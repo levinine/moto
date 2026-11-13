@@ -1,300 +1,296 @@
-from moto.core.responses import BaseResponse
-from .models import batch_backends
-from urllib.parse import urlsplit
-
-from .exceptions import AWSError
-
 import json
+
+from moto.core.models import default_user_config
+from moto.core.responses import BaseResponse
+
+from .models import BatchBackend, batch_backends
 
 
 class BatchResponse(BaseResponse):
-    def _error(self, code, message):
-        return json.dumps({"__type": code, "message": message}), dict(status=400)
+    def __init__(self) -> None:
+        super().__init__(service_name="batch")
 
     @property
-    def batch_backend(self):
-        """
-        :return: Batch Backend
-        :rtype: moto.batch.models.BatchBackend
-        """
-        return batch_backends[self.region]
+    def batch_backend(self) -> BatchBackend:
+        if default_user_config.get("batch", {}).get("use_docker", True) is False:
+            from moto.batch_simple.models import batch_simple_backends
 
-    @property
-    def json(self):
-        if self.body is None or self.body == "":
-            self._json = {}
-        elif not hasattr(self, "_json"):
-            try:
-                self._json = json.loads(self.body)
-            except ValueError:
-                print()
-        return self._json
+            return batch_simple_backends[self.current_account][self.region]
+        else:
+            return batch_backends[self.current_account][self.region]
 
-    def _get_param(self, param_name, if_none=None):
-        val = self.json.get(param_name)
-        if val is not None:
-            return val
-        return if_none
-
-    def _get_action(self):
-        # Return element after the /v1/*
-        return urlsplit(self.uri).path.lstrip("/").split("/")[1]
-
-    # CreateComputeEnvironment
-    def createcomputeenvironment(self):
+    def create_compute_environment(self) -> str:
         compute_env_name = self._get_param("computeEnvironmentName")
         compute_resource = self._get_param("computeResources")
         service_role = self._get_param("serviceRole")
         state = self._get_param("state")
         _type = self._get_param("type")
+        tags = self._get_param("tags")
 
-        try:
-            name, arn = self.batch_backend.create_compute_environment(
-                compute_environment_name=compute_env_name,
-                _type=_type,
-                state=state,
-                compute_resources=compute_resource,
-                service_role=service_role,
-            )
-        except AWSError as err:
-            return err.response()
+        env = self.batch_backend.create_compute_environment(
+            compute_environment_name=compute_env_name,
+            _type=_type,
+            state=state,
+            compute_resources=compute_resource,
+            service_role=service_role,
+            tags=tags,
+        )
 
-        result = {"computeEnvironmentArn": arn, "computeEnvironmentName": name}
+        result = {"computeEnvironmentArn": env.arn, "computeEnvironmentName": env.name}
 
         return json.dumps(result)
 
-    # DescribeComputeEnvironments
-    def describecomputeenvironments(self):
+    def describe_compute_environments(self) -> str:
         compute_environments = self._get_param("computeEnvironments")
-        max_results = self._get_param("maxResults")  # Ignored, should be int
-        next_token = self._get_param("nextToken")  # Ignored
 
-        envs = self.batch_backend.describe_compute_environments(
-            compute_environments, max_results=max_results, next_token=next_token
-        )
+        envs = self.batch_backend.describe_compute_environments(compute_environments)
 
         result = {"computeEnvironments": envs}
         return json.dumps(result)
 
-    # DeleteComputeEnvironment
-    def deletecomputeenvironment(self):
+    def delete_compute_environment(self) -> str:
         compute_environment = self._get_param("computeEnvironment")
 
-        try:
-            self.batch_backend.delete_compute_environment(compute_environment)
-        except AWSError as err:
-            return err.response()
+        self.batch_backend.delete_compute_environment(compute_environment)
 
         return ""
 
-    # UpdateComputeEnvironment
-    def updatecomputeenvironment(self):
+    def update_compute_environment(self) -> str:
         compute_env_name = self._get_param("computeEnvironment")
         compute_resource = self._get_param("computeResources")
         service_role = self._get_param("serviceRole")
         state = self._get_param("state")
 
-        try:
-            name, arn = self.batch_backend.update_compute_environment(
-                compute_environment_name=compute_env_name,
-                compute_resources=compute_resource,
-                service_role=service_role,
-                state=state,
-            )
-        except AWSError as err:
-            return err.response()
+        name, arn = self.batch_backend.update_compute_environment(
+            compute_environment_name=compute_env_name,
+            compute_resources=compute_resource,
+            service_role=service_role,
+            state=state,
+        )
 
         result = {"computeEnvironmentArn": arn, "computeEnvironmentName": name}
 
         return json.dumps(result)
 
-    # CreateJobQueue
-    def createjobqueue(self):
+    def create_job_queue(self) -> str:
         compute_env_order = self._get_param("computeEnvironmentOrder")
         queue_name = self._get_param("jobQueueName")
+        schedule_policy = self._get_param("schedulingPolicyArn")
         priority = self._get_param("priority")
         state = self._get_param("state")
+        tags = self._get_param("tags")
 
-        try:
-            name, arn = self.batch_backend.create_job_queue(
-                queue_name=queue_name,
-                priority=priority,
-                state=state,
-                compute_env_order=compute_env_order,
-            )
-        except AWSError as err:
-            return err.response()
+        queue = self.batch_backend.create_job_queue(
+            queue_name=queue_name,
+            priority=priority,
+            schedule_policy=schedule_policy,
+            state=state,
+            compute_env_order=compute_env_order,
+            tags=tags,
+        )
 
-        result = {"jobQueueArn": arn, "jobQueueName": name}
+        result = {"jobQueueArn": queue.arn, "jobQueueName": queue.name}
 
         return json.dumps(result)
 
-    # DescribeJobQueues
-    def describejobqueues(self):
+    def describe_job_queues(self) -> str:
         job_queues = self._get_param("jobQueues")
-        max_results = self._get_param("maxResults")  # Ignored, should be int
-        next_token = self._get_param("nextToken")  # Ignored
 
-        queues = self.batch_backend.describe_job_queues(
-            job_queues, max_results=max_results, next_token=next_token
-        )
+        queues = self.batch_backend.describe_job_queues(job_queues)
 
         result = {"jobQueues": queues}
         return json.dumps(result)
 
-    # UpdateJobQueue
-    def updatejobqueue(self):
+    def update_job_queue(self) -> str:
         compute_env_order = self._get_param("computeEnvironmentOrder")
         queue_name = self._get_param("jobQueue")
+        schedule_policy = self._get_param("schedulingPolicyArn")
         priority = self._get_param("priority")
         state = self._get_param("state")
 
-        try:
-            name, arn = self.batch_backend.update_job_queue(
-                queue_name=queue_name,
-                priority=priority,
-                state=state,
-                compute_env_order=compute_env_order,
-            )
-        except AWSError as err:
-            return err.response()
+        name, arn = self.batch_backend.update_job_queue(
+            queue_name=queue_name,
+            priority=priority,
+            state=state,
+            compute_env_order=compute_env_order,
+            schedule_policy=schedule_policy,
+        )
 
         result = {"jobQueueArn": arn, "jobQueueName": name}
 
         return json.dumps(result)
 
-    # DeleteJobQueue
-    def deletejobqueue(self):
+    def delete_job_queue(self) -> str:
         queue_name = self._get_param("jobQueue")
 
         self.batch_backend.delete_job_queue(queue_name)
 
         return ""
 
-    # RegisterJobDefinition
-    def registerjobdefinition(self):
+    def register_job_definition(self) -> str:
         container_properties = self._get_param("containerProperties")
+        node_properties = self._get_param("nodeProperties")
+        eks_properties = self._get_param("eksProperties")
         def_name = self._get_param("jobDefinitionName")
         parameters = self._get_param("parameters")
         tags = self._get_param("tags")
         retry_strategy = self._get_param("retryStrategy")
         _type = self._get_param("type")
-        try:
-            name, arn, revision = self.batch_backend.register_job_definition(
-                def_name=def_name,
-                parameters=parameters,
-                _type=_type,
-                tags=tags,
-                retry_strategy=retry_strategy,
-                container_properties=container_properties,
-            )
-        except AWSError as err:
-            return err.response()
+        timeout = self._get_param("timeout")
+        platform_capabilities = self._get_param("platformCapabilities")
+        propagate_tags = self._get_param("propagateTags")
+        job_def = self.batch_backend.register_job_definition(
+            def_name=def_name,
+            parameters=parameters,
+            _type=_type,
+            tags=tags,
+            retry_strategy=retry_strategy,
+            container_properties=container_properties,
+            node_properties=node_properties,
+            eks_properties=eks_properties,
+            timeout=timeout,
+            platform_capabilities=platform_capabilities,
+            propagate_tags=propagate_tags,
+        )
 
         result = {
-            "jobDefinitionArn": arn,
-            "jobDefinitionName": name,
-            "revision": revision,
+            "jobDefinitionArn": job_def.arn,
+            "jobDefinitionName": job_def.name,
+            "revision": job_def.revision,
         }
 
         return json.dumps(result)
 
-    # DeregisterJobDefinition
-    def deregisterjobdefinition(self):
+    def deregister_job_definition(self) -> str:
         queue_name = self._get_param("jobDefinition")
 
         self.batch_backend.deregister_job_definition(queue_name)
 
         return ""
 
-    # DescribeJobDefinitions
-    def describejobdefinitions(self):
+    def describe_job_definitions(self) -> str:
         job_def_name = self._get_param("jobDefinitionName")
         job_def_list = self._get_param("jobDefinitions")
-        max_results = self._get_param("maxResults")
-        next_token = self._get_param("nextToken")
         status = self._get_param("status")
 
         job_defs = self.batch_backend.describe_job_definitions(
-            job_def_name, job_def_list, status, max_results, next_token
+            job_def_name, job_def_list, status
         )
 
         result = {"jobDefinitions": [job.describe() for job in job_defs]}
         return json.dumps(result)
 
-    # SubmitJob
-    def submitjob(self):
+    def submit_job(self) -> str:
         container_overrides = self._get_param("containerOverrides")
+        eks_properties_override = self._get_param("eksPropertiesOverride")
         depends_on = self._get_param("dependsOn")
         job_def = self._get_param("jobDefinition")
         job_name = self._get_param("jobName")
         job_queue = self._get_param("jobQueue")
+        timeout = self._get_param("timeout")
+        array_properties = self._get_param("arrayProperties", {})
         parameters = self._get_param("parameters")
-        retries = self._get_param("retryStrategy")
+        tags = self._get_param("tags")
 
-        try:
-            name, job_id = self.batch_backend.submit_job(
-                job_name,
-                job_def,
-                job_queue,
-                parameters=parameters,
-                retries=retries,
-                depends_on=depends_on,
-                container_overrides=container_overrides,
-            )
-        except AWSError as err:
-            return err.response()
+        name, job_id, job_arn = self.batch_backend.submit_job(
+            job_name,
+            job_def,
+            job_queue,
+            depends_on=depends_on,
+            container_overrides=container_overrides,
+            eks_properties_override=eks_properties_override,
+            timeout=timeout,
+            array_properties=array_properties,
+            parameters=parameters,
+            tags=tags,
+        )
 
-        result = {"jobId": job_id, "jobName": name}
+        result = {"jobId": job_id, "jobName": name, "jobArn": job_arn}
 
         return json.dumps(result)
 
-    # DescribeJobs
-    def describejobs(self):
+    def describe_jobs(self) -> str:
         jobs = self._get_param("jobs")
 
-        try:
-            return json.dumps({"jobs": self.batch_backend.describe_jobs(jobs)})
-        except AWSError as err:
-            return err.response()
+        return json.dumps({"jobs": self.batch_backend.describe_jobs(jobs)})
 
-    # ListJobs
-    def listjobs(self):
+    def list_jobs(self) -> str:
         job_queue = self._get_param("jobQueue")
         job_status = self._get_param("jobStatus")
-        max_results = self._get_param("maxResults")
-        next_token = self._get_param("nextToken")
+        filters = self._get_param("filters")
+        array_job_id = self._get_param("arrayJobId")
 
-        try:
-            jobs = self.batch_backend.list_jobs(
-                job_queue, job_status, max_results, next_token
-            )
-        except AWSError as err:
-            return err.response()
+        jobs = self.batch_backend.list_jobs(
+            job_queue_name=job_queue,
+            array_job_id=array_job_id,
+            job_status=job_status,
+            filters=filters,
+        )
 
-        result = {
-            "jobSummaryList": [
-                {"jobId": job.job_id, "jobName": job.job_name} for job in jobs
-            ]
-        }
+        result = {"jobSummaryList": [job.describe_short() for job in jobs]}
         return json.dumps(result)
 
-    # TerminateJob
-    def terminatejob(self):
+    def terminate_job(self) -> str:
         job_id = self._get_param("jobId")
         reason = self._get_param("reason")
 
-        try:
-            self.batch_backend.terminate_job(job_id, reason)
-        except AWSError as err:
-            return err.response()
+        self.batch_backend.terminate_job(job_id, reason)
 
         return ""
 
-    # CancelJob
-    def canceljob(self,):
+    def cancel_job(self) -> str:
         job_id = self._get_param("jobId")
         reason = self._get_param("reason")
         self.batch_backend.cancel_job(job_id, reason)
 
+        return ""
+
+    def tag_resource(self) -> str:
+        resource_arn = self._get_param("resourceArn")
+        tags = self._get_param("tags")
+        self.batch_backend.tag_resource(resource_arn, tags)
+        return ""
+
+    def list_tags_for_resource(self) -> str:
+        resource_arn = self._get_param("resourceArn")
+        tags = self.batch_backend.list_tags_for_resource(resource_arn)
+        return json.dumps({"tags": tags})
+
+    def untag_resource(self) -> str:
+        resource_arn = self._get_param("resourceArn")
+        tag_keys = self.querystring.get("tagKeys")
+        self.batch_backend.untag_resource(resource_arn, tag_keys)  # type: ignore[arg-type]
+        return ""
+
+    def create_scheduling_policy(self) -> str:
+        body = json.loads(self.body)
+        name = body.get("name")
+        fairshare_policy = body.get("fairsharePolicy") or {}
+        tags = body.get("tags")
+        policy = self.batch_backend.create_scheduling_policy(
+            name, fairshare_policy, tags
+        )
+        return json.dumps(policy.to_dict(create=True))
+
+    def describe_scheduling_policies(self) -> str:
+        body = json.loads(self.body)
+        arns = body.get("arns") or []
+        policies = self.batch_backend.describe_scheduling_policies(arns)
+        return json.dumps({"schedulingPolicies": [pol.to_dict() for pol in policies]})
+
+    def list_scheduling_policies(self) -> str:
+        arns = self.batch_backend.list_scheduling_policies()
+        return json.dumps({"schedulingPolicies": [{"arn": arn} for arn in arns]})
+
+    def delete_scheduling_policy(self) -> str:
+        body = json.loads(self.body)
+        arn = body["arn"]
+        self.batch_backend.delete_scheduling_policy(arn)
+        return ""
+
+    def update_scheduling_policy(self) -> str:
+        body = json.loads(self.body)
+        arn = body.get("arn")
+        fairshare_policy = body.get("fairsharePolicy") or {}
+        self.batch_backend.update_scheduling_policy(arn, fairshare_policy)
         return ""

@@ -1,9 +1,9 @@
 import boto3
-from moto import mock_ec2
-import sure  # pylint: disable=unused-import
+
+from moto import mock_aws
 
 
-@mock_ec2
+@mock_aws
 def test_describe_account_attributes():
     conn = boto3.client("ec2", region_name="us-east-1")
     response = conn.describe_account_attributes()
@@ -33,4 +33,4 @@ def test_describe_account_attributes():
             "AttributeName": "vpc-max-elastic-ips",
         },
     ]
-    response["AccountAttributes"].should.equal(expected_attribute_values)
+    assert response["AccountAttributes"] == expected_attribute_values

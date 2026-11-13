@@ -1,16 +1,17 @@
-import boto3
 import json
 import os
-import sure  # noqa # pylint: disable=unused-import
-from datetime import datetime
-from dateutil.tz import tzutc
-from botocore.exceptions import ClientError
-import pytest
-
-from moto import mock_sts, mock_stepfunctions
-from moto.core import ACCOUNT_ID
-
+import re
+from datetime import datetime, timezone
 from unittest import SkipTest, mock
+from uuid import uuid4
+
+import boto3
+import pytest
+from botocore.exceptions import ClientError, ParamValidationError
+
+from moto import mock_aws
+from moto.core import DEFAULT_ACCOUNT_ID as ACCOUNT_ID
+from tests.test_stepfunctions.parser import sfn_role_policy
 
 region = "us-east-1"
 simple_definition = (
@@ -22,24 +23,45 @@ simple_definition = (
 account_id = None
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_creation_succeeds():
     client = boto3.client("stepfunctions", region_name=region)
     name = "example_step_function"
-    #
     response = client.create_state_machine(
         name=name, definition=str(simple_definition), roleArn=_get_default_role()
     )
-    #
-    response["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
-    response["creationDate"].should.be.a(datetime)
-    response["stateMachineArn"].should.equal(
+    assert response["ResponseMetadata"]["HTTPStatusCode"] == 200
+    assert isinstance(response["creationDate"], datetime)
+    assert response["stateMachineArn"] == (
         "arn:aws:states:" + region + ":" + ACCOUNT_ID + ":stateMachine:" + name
     )
 
 
-@mock_stepfunctions
+@mock_aws
+def test_state_machine_with_cmk():
+    client = boto3.client("stepfunctions", region_name=region)
+    kms_key_id = boto3.client("kms", region_name=region).create_key()["KeyMetadata"][
+        "KeyId"
+    ]
+    name = "example_step_function_cmk"
+    encryption_config = {
+        "kmsDataKeyReusePeriodSeconds": 60,
+        "kmsKeyId": kms_key_id,
+        "type": "CUSTOMER_MANAGED_CMK",
+    }
+
+    state_machine_arn = client.create_state_machine(
+        name=name,
+        definition=str(simple_definition),
+        roleArn=_get_default_role(),
+        encryptionConfiguration=encryption_config,
+    )["stateMachineArn"]
+
+    desc = client.describe_state_machine(stateMachineArn=state_machine_arn)
+    assert desc["encryptionConfiguration"] == encryption_config
+
+
+@mock_aws
 def test_state_machine_creation_fails_with_invalid_names():
     client = boto3.client("stepfunctions", region_name=region)
     invalid_names = [
@@ -76,12 +98,12 @@ def test_state_machine_creation_fails_with_invalid_names():
         "uni\u0007code",
         "uni\u0008code",
         "uni\u0009code",
-        "uni\u000Acode",
-        "uni\u000Bcode",
-        "uni\u000Ccode",
-        "uni\u000Dcode",
-        "uni\u000Ecode",
-        "uni\u000Fcode",
+        "uni\u000acode",
+        "uni\u000bcode",
+        "uni\u000ccode",
+        "uni\u000dcode",
+        "uni\u000ecode",
+        "uni\u000fcode",
         "uni\u0010code",
         "uni\u0011code",
         "uni\u0012code",
@@ -92,13 +114,13 @@ def test_state_machine_creation_fails_with_invalid_names():
         "uni\u0017code",
         "uni\u0018code",
         "uni\u0019code",
-        "uni\u001Acode",
-        "uni\u001Bcode",
-        "uni\u001Ccode",
-        "uni\u001Dcode",
-        "uni\u001Ecode",
-        "uni\u001Fcode",
-        "uni\u007Fcode",
+        "uni\u001acode",
+        "uni\u001bcode",
+        "uni\u001ccode",
+        "uni\u001dcode",
+        "uni\u001ecode",
+        "uni\u001fcode",
+        "uni\u007fcode",
         "uni\u0080code",
         "uni\u0081code",
         "uni\u0082code",
@@ -109,12 +131,12 @@ def test_state_machine_creation_fails_with_invalid_names():
         "uni\u0087code",
         "uni\u0088code",
         "uni\u0089code",
-        "uni\u008Acode",
-        "uni\u008Bcode",
-        "uni\u008Ccode",
-        "uni\u008Dcode",
-        "uni\u008Ecode",
-        "uni\u008Fcode",
+        "uni\u008acode",
+        "uni\u008bcode",
+        "uni\u008ccode",
+        "uni\u008dcode",
+        "uni\u008ecode",
+        "uni\u008fcode",
         "uni\u0090code",
         "uni\u0091code",
         "uni\u0092code",
@@ -125,12 +147,12 @@ def test_state_machine_creation_fails_with_invalid_names():
         "uni\u0097code",
         "uni\u0098code",
         "uni\u0099code",
-        "uni\u009Acode",
-        "uni\u009Bcode",
-        "uni\u009Ccode",
-        "uni\u009Dcode",
-        "uni\u009Ecode",
-        "uni\u009Fcode",
+        "uni\u009acode",
+        "uni\u009bcode",
+        "uni\u009ccode",
+        "uni\u009dcode",
+        "uni\u009ecode",
+        "uni\u009fcode",
     ]
     #
 
@@ -143,7 +165,7 @@ def test_state_machine_creation_fails_with_invalid_names():
             )
 
 
-@mock_stepfunctions
+@mock_aws
 def test_state_machine_creation_requires_valid_role_arn():
     client = boto3.client("stepfunctions", region_name=region)
     name = "example_step_function"
@@ -156,8 +178,7 @@ def test_state_machine_creation_requires_valid_role_arn():
         )
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_update_state_machine():
     client = boto3.client("stepfunctions", region_name=region)
 
@@ -170,29 +191,75 @@ def test_update_state_machine():
     updated_definition = str(simple_definition).replace(
         "DefaultState", "DefaultStateUpdated"
     )
+    kms_key_id = boto3.client("kms", region_name=region).create_key()["KeyMetadata"][
+        "KeyId"
+    ]
+    encryption_config = {
+        "kmsDataKeyReusePeriodSeconds": 60,
+        "kmsKeyId": kms_key_id,
+        "type": "CUSTOMER_MANAGED_CMK",
+    }
+    updated_logging_config = {
+        "level": "ALL",
+        "destinations": [
+            {
+                "cloudWatchLogsLogGroup": {
+                    "logGroupArn": "arn:aws:logs:us-east-1:123456789012:log-group:my-log-group"
+                }
+            }
+        ],
+    }
+    updated_tracing_config = {"enabled": True}
     resp = client.update_state_machine(
         stateMachineArn=state_machine_arn,
         definition=updated_definition,
         roleArn=updated_role,
+        encryptionConfiguration=encryption_config,
+        loggingConfiguration=updated_logging_config,
+        tracingConfiguration=updated_tracing_config,
     )
-    resp["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
-    resp["updateDate"].should.be.a(datetime)
+    assert resp["ResponseMetadata"]["HTTPStatusCode"] == 200
+    assert isinstance(resp["updateDate"], datetime)
 
     desc = client.describe_state_machine(stateMachineArn=state_machine_arn)
-    desc["definition"].should.equal(updated_definition)
-    desc["roleArn"].should.equal(updated_role)
+    assert desc["definition"] == updated_definition
+    assert desc["roleArn"] == updated_role
+    assert desc["encryptionConfiguration"] == encryption_config
+    assert desc["loggingConfiguration"] == updated_logging_config
+    assert desc["tracingConfiguration"] == updated_tracing_config
 
 
-@mock_stepfunctions
+@mock_aws
+def test_state_machine_creation_stores_the_requested_type():
+    client = boto3.client("stepfunctions", region_name=region)
+    standard = client.create_state_machine(
+        name="standard", definition=str(simple_definition), roleArn=_get_default_role()
+    )
+    express = client.create_state_machine(
+        name="express",
+        definition=str(simple_definition),
+        roleArn=_get_default_role(),
+        type="EXPRESS",
+        publish=True,
+    )
+
+    for arn, expected in [
+        (standard["stateMachineArn"], "STANDARD"),
+        (express["stateMachineArn"], "EXPRESS"),
+        (express["stateMachineVersionArn"], "EXPRESS"),
+    ]:
+        assert client.describe_state_machine(stateMachineArn=arn)["type"] == expected
+
+
+@mock_aws
 def test_state_machine_list_returns_empty_list_by_default():
     client = boto3.client("stepfunctions", region_name=region)
     #
     sm_list = client.list_state_machines()
-    sm_list["stateMachines"].should.be.empty
+    assert sm_list["stateMachines"] == []
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_list_returns_created_state_machines():
     client = boto3.client("stepfunctions", region_name=region)
     #
@@ -207,28 +274,44 @@ def test_state_machine_list_returns_created_state_machines():
     )
     sm_list = client.list_state_machines()
     #
-    sm_list["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
-    sm_list["stateMachines"].should.have.length_of(2)
-    sm_list["stateMachines"][0]["creationDate"].should.be.a(datetime)
-    sm_list["stateMachines"][0]["creationDate"].should.equal(machine1["creationDate"])
-    sm_list["stateMachines"][0]["name"].should.equal("name1")
-    sm_list["stateMachines"][0]["stateMachineArn"].should.equal(
-        machine1["stateMachineArn"]
-    )
-    sm_list["stateMachines"][1]["creationDate"].should.be.a(datetime)
-    sm_list["stateMachines"][1]["creationDate"].should.equal(machine2["creationDate"])
-    sm_list["stateMachines"][1]["name"].should.equal("name2")
-    sm_list["stateMachines"][1]["stateMachineArn"].should.equal(
-        machine2["stateMachineArn"]
-    )
+    assert sm_list["ResponseMetadata"]["HTTPStatusCode"] == 200
+    assert len(sm_list["stateMachines"]) == 2
+    assert isinstance(sm_list["stateMachines"][0]["creationDate"], datetime)
+    assert sm_list["stateMachines"][0]["creationDate"] == machine1["creationDate"]
+    assert sm_list["stateMachines"][0]["name"] == "name1"
+    assert sm_list["stateMachines"][0]["stateMachineArn"] == machine1["stateMachineArn"]
+    assert isinstance(sm_list["stateMachines"][1]["creationDate"], datetime)
+    assert sm_list["stateMachines"][1]["creationDate"] == machine2["creationDate"]
+    assert sm_list["stateMachines"][1]["name"] == "name2"
+    assert sm_list["stateMachines"][1]["stateMachineArn"] == machine2["stateMachineArn"]
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
+def test_state_machine_list_returns_the_type_of_each_state_machine():
+    client = boto3.client("stepfunctions", region_name=region)
+    client.create_state_machine(
+        name="standard", definition=str(simple_definition), roleArn=_get_default_role()
+    )
+    client.create_state_machine(
+        name="express",
+        definition=str(simple_definition),
+        roleArn=_get_default_role(),
+        type="EXPRESS",
+    )
+
+    sm_list = client.list_state_machines()["stateMachines"]
+
+    assert {sm["name"]: sm["type"] for sm in sm_list} == {
+        "standard": "STANDARD",
+        "express": "EXPRESS",
+    }
+
+
+@mock_aws
 def test_state_machine_list_pagination():
     client = boto3.client("stepfunctions", region_name=region)
     for i in range(25):
-        machine_name = "StateMachine-{}".format(i)
+        machine_name = f"StateMachine-{i}"
         client.create_state_machine(
             name=machine_name,
             definition=str(simple_definition),
@@ -236,18 +319,18 @@ def test_state_machine_list_pagination():
         )
 
     resp = client.list_state_machines()
-    resp.should_not.have.key("nextToken")
-    resp["stateMachines"].should.have.length_of(25)
+    assert "nextToken" not in resp
+    assert len(resp["stateMachines"]) == 25
 
     paginator = client.get_paginator("list_state_machines")
     page_iterator = paginator.paginate(maxResults=5)
-    for page in page_iterator:
-        page["stateMachines"].should.have.length_of(5)
-    page["stateMachines"][-1]["name"].should.contain("24")
+    page_list = list(page_iterator)
+    for page in page_list:
+        assert len(page["stateMachines"]) == 5
+    assert "24" in page_list[-1]["stateMachines"][-1]["name"]
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_creation_is_idempotent_by_name():
     client = boto3.client("stepfunctions", region_name=region)
     #
@@ -255,23 +338,22 @@ def test_state_machine_creation_is_idempotent_by_name():
         name="name", definition=str(simple_definition), roleArn=_get_default_role()
     )
     sm_list = client.list_state_machines()
-    sm_list["stateMachines"].should.have.length_of(1)
+    assert len(sm_list["stateMachines"]) == 1
     #
     client.create_state_machine(
         name="name", definition=str(simple_definition), roleArn=_get_default_role()
     )
     sm_list = client.list_state_machines()
-    sm_list["stateMachines"].should.have.length_of(1)
+    assert len(sm_list["stateMachines"]) == 1
     #
     client.create_state_machine(
         name="diff_name", definition=str(simple_definition), roleArn=_get_default_role()
     )
     sm_list = client.list_state_machines()
-    sm_list["stateMachines"].should.have.length_of(2)
+    assert len(sm_list["stateMachines"]) == 2
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_creation_can_be_described():
     client = boto3.client("stepfunctions", region_name=region)
     #
@@ -279,33 +361,31 @@ def test_state_machine_creation_can_be_described():
         name="name", definition=str(simple_definition), roleArn=_get_default_role()
     )
     desc = client.describe_state_machine(stateMachineArn=sm["stateMachineArn"])
-    desc["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
-    desc["creationDate"].should.equal(sm["creationDate"])
-    desc["definition"].should.equal(str(simple_definition))
-    desc["name"].should.equal("name")
-    desc["roleArn"].should.equal(_get_default_role())
-    desc["stateMachineArn"].should.equal(sm["stateMachineArn"])
-    desc["status"].should.equal("ACTIVE")
+    assert desc["ResponseMetadata"]["HTTPStatusCode"] == 200
+    assert desc["creationDate"] == sm["creationDate"]
+    assert desc["definition"] == str(simple_definition)
+    assert desc["name"] == "name"
+    assert desc["roleArn"] == _get_default_role()
+    assert desc["stateMachineArn"] == sm["stateMachineArn"]
+    assert desc["status"] == "ACTIVE"
+    assert desc["type"] == "STANDARD"
+    assert desc["encryptionConfiguration"] == {"type": "AWS_OWNED_KEY"}
+    assert desc["loggingConfiguration"] == {"level": "OFF"}
+    assert desc["tracingConfiguration"] == {"enabled": False}
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_throws_error_when_describing_unknown_machine():
     client = boto3.client("stepfunctions", region_name=region)
     #
     with pytest.raises(ClientError):
         unknown_state_machine = (
-            "arn:aws:states:"
-            + region
-            + ":"
-            + _get_account_id()
-            + ":stateMachine:unknown"
+            f"arn:aws:states:{region}:{ACCOUNT_ID}:stateMachine:unknown"
         )
         client.describe_state_machine(stateMachineArn=unknown_state_machine)
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_throws_error_when_describing_bad_arn():
     client = boto3.client("stepfunctions", region_name=region)
     #
@@ -313,8 +393,7 @@ def test_state_machine_throws_error_when_describing_bad_arn():
         client.describe_state_machine(stateMachineArn="bad")
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_throws_error_when_describing_machine_in_different_account():
     client = boto3.client("stepfunctions", region_name=region)
     #
@@ -325,8 +404,7 @@ def test_state_machine_throws_error_when_describing_machine_in_different_account
         client.describe_state_machine(stateMachineArn=unknown_state_machine)
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_can_be_deleted():
     client = boto3.client("stepfunctions", region_name=region)
     sm = client.create_state_machine(
@@ -334,14 +412,13 @@ def test_state_machine_can_be_deleted():
     )
     #
     response = client.delete_state_machine(stateMachineArn=sm["stateMachineArn"])
-    response["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
+    assert response["ResponseMetadata"]["HTTPStatusCode"] == 200
     #
     sm_list = client.list_state_machines()
-    sm_list["stateMachines"].should.have.length_of(0)
+    assert len(sm_list["stateMachines"]) == 0
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_can_deleted_nonexisting_machine():
     client = boto3.client("stepfunctions", region_name=region)
     #
@@ -349,50 +426,36 @@ def test_state_machine_can_deleted_nonexisting_machine():
         "arn:aws:states:" + region + ":" + ACCOUNT_ID + ":stateMachine:unknown"
     )
     response = client.delete_state_machine(stateMachineArn=unknown_state_machine)
-    response["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
+    assert response["ResponseMetadata"]["HTTPStatusCode"] == 200
     #
     sm_list = client.list_state_machines()
-    sm_list["stateMachines"].should.have.length_of(0)
+    assert len(sm_list["stateMachines"]) == 0
 
 
-@mock_stepfunctions
-def test_state_machine_tagging_non_existent_resource_fails():
-    client = boto3.client("stepfunctions", region_name=region)
-    non_existent_arn = "arn:aws:states:{region}:{account}:stateMachine:non-existent".format(
-        region=region, account=ACCOUNT_ID
-    )
-    with pytest.raises(ClientError) as ex:
-        client.tag_resource(resourceArn=non_existent_arn, tags=[])
-    ex.value.response["Error"]["Code"].should.equal("ResourceNotFound")
-    ex.value.response["Error"]["Message"].should.contain(non_existent_arn)
-
-
-@mock_stepfunctions
-def test_state_machine_untagging_non_existent_resource_fails():
-    client = boto3.client("stepfunctions", region_name=region)
-    non_existent_arn = "arn:aws:states:{region}:{account}:stateMachine:non-existent".format(
-        region=region, account=ACCOUNT_ID
-    )
-    with pytest.raises(ClientError) as ex:
-        client.untag_resource(resourceArn=non_existent_arn, tagKeys=[])
-    ex.value.response["Error"]["Code"].should.equal("ResourceNotFound")
-    ex.value.response["Error"]["Message"].should.contain(non_existent_arn)
-
-
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_tagging():
     client = boto3.client("stepfunctions", region_name=region)
+    # Test tags are added on resource creation
     tags = [
         {"key": "tag_key1", "value": "tag_value1"},
         {"key": "tag_key2", "value": "tag_value2"},
     ]
     machine = client.create_state_machine(
-        name="test", definition=str(simple_definition), roleArn=_get_default_role(),
+        name="test-with-tags",
+        definition=str(simple_definition),
+        roleArn=_get_default_role(),
+        tags=tags,
+    )
+    resp = client.list_tags_for_resource(resourceArn=machine["stateMachineArn"])
+    assert resp["tags"] == tags
+
+    # Test tags are added after creation with tag_resource
+    machine = client.create_state_machine(
+        name="test", definition=str(simple_definition), roleArn=_get_default_role()
     )
     client.tag_resource(resourceArn=machine["stateMachineArn"], tags=tags)
     resp = client.list_tags_for_resource(resourceArn=machine["stateMachineArn"])
-    resp["tags"].should.equal(tags)
+    assert resp["tags"] == tags
 
     tags_update = [
         {"key": "tag_key1", "value": "tag_value1_new"},
@@ -405,11 +468,10 @@ def test_state_machine_tagging():
         tags[1],
         tags_update[1],
     ]
-    resp["tags"].should.equal(tags_expected)
+    assert resp["tags"] == tags_expected
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_untagging():
     client = boto3.client("stepfunctions", region_name=region)
     tags = [
@@ -424,18 +486,17 @@ def test_state_machine_untagging():
         tags=tags,
     )
     resp = client.list_tags_for_resource(resourceArn=machine["stateMachineArn"])
-    resp["tags"].should.equal(tags)
+    assert resp["tags"] == tags
     tags_to_delete = ["tag_key1", "tag_key2"]
     client.untag_resource(
         resourceArn=machine["stateMachineArn"], tagKeys=tags_to_delete
     )
     resp = client.list_tags_for_resource(resourceArn=machine["stateMachineArn"])
     expected_tags = [tag for tag in tags if tag["key"] not in tags_to_delete]
-    resp["tags"].should.equal(expected_tags)
+    assert resp["tags"] == expected_tags
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_list_tags_for_created_machine():
     client = boto3.client("stepfunctions", region_name=region)
     #
@@ -447,12 +508,11 @@ def test_state_machine_list_tags_for_created_machine():
     )
     response = client.list_tags_for_resource(resourceArn=machine["stateMachineArn"])
     tags = response["tags"]
-    tags.should.have.length_of(1)
-    tags[0].should.equal({"key": "tag_key", "value": "tag_value"})
+    assert len(tags) == 1
+    assert tags[0] == {"key": "tag_key", "value": "tag_value"}
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_list_tags_for_machine_without_tags():
     client = boto3.client("stepfunctions", region_name=region)
     #
@@ -461,24 +521,22 @@ def test_state_machine_list_tags_for_machine_without_tags():
     )
     response = client.list_tags_for_resource(resourceArn=machine["stateMachineArn"])
     tags = response["tags"]
-    tags.should.have.length_of(0)
+    assert len(tags) == 0
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_list_tags_for_nonexisting_machine():
     client = boto3.client("stepfunctions", region_name=region)
     #
     non_existing_state_machine = (
-        "arn:aws:states:" + region + ":" + _get_account_id() + ":stateMachine:unknown"
+        f"arn:aws:states:{region}:{ACCOUNT_ID}:stateMachine:unknown"
     )
     response = client.list_tags_for_resource(resourceArn=non_existing_state_machine)
     tags = response["tags"]
-    tags.should.have.length_of(0)
+    assert len(tags) == 0
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_start_execution():
     client = boto3.client("stepfunctions", region_name=region)
     #
@@ -487,22 +545,16 @@ def test_state_machine_start_execution():
     )
     execution = client.start_execution(stateMachineArn=sm["stateMachineArn"])
     #
-    execution["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
+    assert execution["ResponseMetadata"]["HTTPStatusCode"] == 200
     uuid_regex = "[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}"
     expected_exec_name = (
-        "arn:aws:states:"
-        + region
-        + ":"
-        + _get_account_id()
-        + ":execution:name:"
-        + uuid_regex
+        f"arn:aws:states:{region}:{ACCOUNT_ID}:execution:name:{uuid_regex}"
     )
-    execution["executionArn"].should.match(expected_exec_name)
-    execution["startDate"].should.be.a(datetime)
+    assert re.match(expected_exec_name, execution["executionArn"])
+    assert isinstance(execution["startDate"], datetime)
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_start_execution_bad_arn_raises_exception():
     client = boto3.client("stepfunctions", region_name=region)
     #
@@ -510,8 +562,7 @@ def test_state_machine_start_execution_bad_arn_raises_exception():
         client.start_execution(stateMachineArn="bad")
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_start_execution_with_custom_name():
     client = boto3.client("stepfunctions", region_name=region)
     #
@@ -522,41 +573,66 @@ def test_state_machine_start_execution_with_custom_name():
         stateMachineArn=sm["stateMachineArn"], name="execution_name"
     )
     #
-    execution["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
+    assert execution["ResponseMetadata"]["HTTPStatusCode"] == 200
     expected_exec_name = (
-        "arn:aws:states:"
-        + region
-        + ":"
-        + _get_account_id()
-        + ":execution:name:execution_name"
+        f"arn:aws:states:{region}:{ACCOUNT_ID}:execution:name:execution_name"
     )
-    execution["executionArn"].should.equal(expected_exec_name)
-    execution["startDate"].should.be.a(datetime)
+    assert execution["executionArn"] == expected_exec_name
+    assert isinstance(execution["startDate"], datetime)
 
 
-@mock_stepfunctions
-@mock_sts
-def test_state_machine_start_execution_fails_on_duplicate_execution_name():
+@mock_aws
+def test_state_machine_start_execution_fails_on_duplicate_execution_name_with_different_input():
     client = boto3.client("stepfunctions", region_name=region)
     #
     sm = client.create_state_machine(
         name="name", definition=str(simple_definition), roleArn=_get_default_role()
     )
     execution_one = client.start_execution(
-        stateMachineArn=sm["stateMachineArn"], name="execution_name"
+        stateMachineArn=sm["stateMachineArn"],
+        name="execution_name",
+        input='{"a": "b", "c": "d"}',
     )
     #
     with pytest.raises(ClientError) as ex:
         _ = client.start_execution(
-            stateMachineArn=sm["stateMachineArn"], name="execution_name"
+            stateMachineArn=sm["stateMachineArn"],
+            name="execution_name",
+            # Input is different (even though the decoded json is equivalent)
+            input='{"c": "d", "a": "b"}',
         )
-    ex.value.response["Error"]["Message"].should.equal(
+    assert ex.value.response["Error"]["Message"] == (
         "Execution Already Exists: '" + execution_one["executionArn"] + "'"
     )
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
+def test_state_machine_start_execution_is_idempotent_by_name_and_input():
+    client = boto3.client("stepfunctions", region_name=region)
+    #
+    sm = client.create_state_machine(
+        name="name", definition=str(simple_definition), roleArn=_get_default_role()
+    )
+    execution_input = '{"a": "b", "c": "d"}'
+    execution_one = client.start_execution(
+        stateMachineArn=sm["stateMachineArn"],
+        name="execution_name",
+        input=execution_input,
+    )
+    #
+    execution_two = client.start_execution(
+        stateMachineArn=sm["stateMachineArn"],
+        name="execution_name",
+        input=execution_input,
+    )
+    assert execution_one["executionArn"] == execution_two["executionArn"]
+
+    # Check idempotency
+    list_execs = client.list_executions(stateMachineArn=sm["stateMachineArn"])
+    assert len(list_execs["executions"]) == 1
+
+
+@mock_aws
 def test_state_machine_start_execution_with_custom_input():
     client = boto3.client("stepfunctions", region_name=region)
     #
@@ -568,22 +644,16 @@ def test_state_machine_start_execution_with_custom_input():
         stateMachineArn=sm["stateMachineArn"], input=execution_input
     )
     #
-    execution["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
+    assert execution["ResponseMetadata"]["HTTPStatusCode"] == 200
     uuid_regex = "[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}"
     expected_exec_name = (
-        "arn:aws:states:"
-        + region
-        + ":"
-        + _get_account_id()
-        + ":execution:name:"
-        + uuid_regex
+        f"arn:aws:states:{region}:{ACCOUNT_ID}:execution:name:{uuid_regex}"
     )
-    execution["executionArn"].should.match(expected_exec_name)
-    execution["startDate"].should.be.a(datetime)
+    assert re.match(expected_exec_name, execution["executionArn"])
+    assert isinstance(execution["startDate"], datetime)
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_start_execution_with_invalid_input():
     client = boto3.client("stepfunctions", region_name=region)
     #
@@ -591,13 +661,12 @@ def test_state_machine_start_execution_with_invalid_input():
         name="name", definition=str(simple_definition), roleArn=_get_default_role()
     )
     with pytest.raises(ClientError):
-        _ = client.start_execution(stateMachineArn=sm["stateMachineArn"], input="")
+        client.start_execution(stateMachineArn=sm["stateMachineArn"], input="")
     with pytest.raises(ClientError):
-        _ = client.start_execution(stateMachineArn=sm["stateMachineArn"], input="{")
+        client.start_execution(stateMachineArn=sm["stateMachineArn"], input="{")
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_list_executions():
     client = boto3.client("stepfunctions", region_name=region)
     #
@@ -609,17 +678,17 @@ def test_state_machine_list_executions():
     execution_name = execution_arn[execution_arn.rindex(":") + 1 :]
     executions = client.list_executions(stateMachineArn=sm["stateMachineArn"])
     #
-    executions["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
-    executions["executions"].should.have.length_of(1)
-    executions["executions"][0]["executionArn"].should.equal(execution_arn)
-    executions["executions"][0]["name"].should.equal(execution_name)
-    executions["executions"][0]["startDate"].should.equal(execution["startDate"])
-    executions["executions"][0]["stateMachineArn"].should.equal(sm["stateMachineArn"])
-    executions["executions"][0]["status"].should.equal("RUNNING")
-    executions["executions"][0].shouldnt.have("stopDate")
+    assert executions["ResponseMetadata"]["HTTPStatusCode"] == 200
+    assert len(executions["executions"]) == 1
+    assert executions["executions"][0]["executionArn"] == execution_arn
+    assert executions["executions"][0]["name"] == execution_name
+    assert executions["executions"][0]["startDate"] == execution["startDate"]
+    assert executions["executions"][0]["stateMachineArn"] == sm["stateMachineArn"]
+    assert executions["executions"][0]["status"] == "RUNNING"
+    assert "stopDate" not in executions["executions"][0]
 
 
-@mock_stepfunctions
+@mock_aws
 def test_state_machine_list_executions_with_filter():
     client = boto3.client("stepfunctions", region_name=region)
     sm = client.create_state_machine(
@@ -631,16 +700,16 @@ def test_state_machine_list_executions_with_filter():
             client.stop_execution(executionArn=execution["executionArn"])
 
     resp = client.list_executions(stateMachineArn=sm["stateMachineArn"])
-    resp["executions"].should.have.length_of(20)
+    assert len(resp["executions"]) == 20
 
     resp = client.list_executions(
         stateMachineArn=sm["stateMachineArn"], statusFilter="ABORTED"
     )
-    resp["executions"].should.have.length_of(5)
-    all([e["status"] == "ABORTED" for e in resp["executions"]]).should.be.true
+    assert len(resp["executions"]) == 5
+    assert all(e["status"] == "ABORTED" for e in resp["executions"]) is True
 
 
-@mock_stepfunctions
+@mock_aws
 def test_state_machine_list_executions_with_pagination():
     client = boto3.client("stepfunctions", region_name=region)
     sm = client.create_state_machine(
@@ -650,15 +719,15 @@ def test_state_machine_list_executions_with_pagination():
         client.start_execution(stateMachineArn=sm["stateMachineArn"])
 
     resp = client.list_executions(stateMachineArn=sm["stateMachineArn"])
-    resp.should_not.have.key("nextToken")
-    resp["executions"].should.have.length_of(100)
+    assert "nextToken" not in resp
+    assert len(resp["executions"]) == 100
 
     paginator = client.get_paginator("list_executions")
     page_iterator = paginator.paginate(
         stateMachineArn=sm["stateMachineArn"], maxResults=25
     )
     for page in page_iterator:
-        page["executions"].should.have.length_of(25)
+        assert len(page["executions"]) == 25
 
     with pytest.raises(ClientError) as ex:
         resp = client.list_executions(
@@ -670,20 +739,17 @@ def test_state_machine_list_executions_with_pagination():
             statusFilter="ABORTED",
             nextToken=resp["nextToken"],
         )
-    ex.value.response["Error"]["Code"].should.equal("InvalidToken")
-    ex.value.response["Error"]["Message"].should.contain(
-        "Input inconsistent with page token"
-    )
+    assert ex.value.response["Error"]["Code"] == "InvalidToken"
+    assert "Input inconsistent with page token" in ex.value.response["Error"]["Message"]
 
     with pytest.raises(ClientError) as ex:
         client.list_executions(
             stateMachineArn=sm["stateMachineArn"], nextToken="invalid"
         )
-    ex.value.response["Error"]["Code"].should.equal("InvalidToken")
+    assert ex.value.response["Error"]["Code"] == "InvalidToken"
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_list_executions_when_none_exist():
     client = boto3.client("stepfunctions", region_name=region)
     #
@@ -692,12 +758,11 @@ def test_state_machine_list_executions_when_none_exist():
     )
     executions = client.list_executions(stateMachineArn=sm["stateMachineArn"])
     #
-    executions["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
-    executions["executions"].should.have.length_of(0)
+    assert executions["ResponseMetadata"]["HTTPStatusCode"] == 200
+    assert len(executions["executions"]) == 0
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_describe_execution_with_no_input():
     client = boto3.client("stepfunctions", region_name=region)
     #
@@ -707,18 +772,17 @@ def test_state_machine_describe_execution_with_no_input():
     execution = client.start_execution(stateMachineArn=sm["stateMachineArn"])
     description = client.describe_execution(executionArn=execution["executionArn"])
     #
-    description["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
-    description["executionArn"].should.equal(execution["executionArn"])
-    description["input"].should.equal("{}")
-    description["name"].shouldnt.be.empty
-    description["startDate"].should.equal(execution["startDate"])
-    description["stateMachineArn"].should.equal(sm["stateMachineArn"])
-    description["status"].should.equal("RUNNING")
-    description.shouldnt.have("stopDate")
+    assert description["ResponseMetadata"]["HTTPStatusCode"] == 200
+    assert description["executionArn"] == execution["executionArn"]
+    assert description["input"] == "{}"
+    assert re.match("[-0-9a-z]+", description["name"])
+    assert description["startDate"] == execution["startDate"]
+    assert description["stateMachineArn"] == sm["stateMachineArn"]
+    assert description["status"] == "RUNNING"
+    assert "stopDate" not in description
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_describe_execution_with_custom_input():
     client = boto3.client("stepfunctions", region_name=region)
     #
@@ -731,30 +795,26 @@ def test_state_machine_describe_execution_with_custom_input():
     )
     description = client.describe_execution(executionArn=execution["executionArn"])
     #
-    description["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
-    description["executionArn"].should.equal(execution["executionArn"])
-    description["input"].should.equal(execution_input)
-    description["name"].shouldnt.be.empty
-    description["startDate"].should.equal(execution["startDate"])
-    description["stateMachineArn"].should.equal(sm["stateMachineArn"])
-    description["status"].should.equal("RUNNING")
-    description.shouldnt.have("stopDate")
+    assert description["ResponseMetadata"]["HTTPStatusCode"] == 200
+    assert description["executionArn"] == execution["executionArn"]
+    assert description["input"] == execution_input
+    assert re.match("[-a-z0-9]+", description["name"])
+    assert description["startDate"] == execution["startDate"]
+    assert description["stateMachineArn"] == sm["stateMachineArn"]
+    assert description["status"] == "RUNNING"
+    assert "stopDate" not in description
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_execution_throws_error_when_describing_unknown_execution():
     client = boto3.client("stepfunctions", region_name=region)
     #
     with pytest.raises(ClientError):
-        unknown_execution = (
-            "arn:aws:states:" + region + ":" + _get_account_id() + ":execution:unknown"
-        )
+        unknown_execution = f"arn:aws:states:{region}:{ACCOUNT_ID}:execution:unknown"
         client.describe_execution(executionArn=unknown_execution)
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_can_be_described_by_execution():
     client = boto3.client("stepfunctions", region_name=region)
     #
@@ -765,42 +825,44 @@ def test_state_machine_can_be_described_by_execution():
     desc = client.describe_state_machine_for_execution(
         executionArn=execution["executionArn"]
     )
-    desc["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
-    desc["definition"].should.equal(str(simple_definition))
-    desc["name"].should.equal("name")
-    desc["roleArn"].should.equal(_get_default_role())
-    desc["stateMachineArn"].should.equal(sm["stateMachineArn"])
+    assert desc["ResponseMetadata"]["HTTPStatusCode"] == 200
+    assert desc["definition"] == str(simple_definition)
+    assert desc["name"] == "name"
+    assert desc["roleArn"] == _get_default_role()
+    assert desc["stateMachineArn"] == sm["stateMachineArn"]
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_throws_error_when_describing_unknown_execution():
     client = boto3.client("stepfunctions", region_name=region)
     #
     with pytest.raises(ClientError):
-        unknown_execution = (
-            "arn:aws:states:" + region + ":" + _get_account_id() + ":execution:unknown"
-        )
+        unknown_execution = f"arn:aws:states:{region}:{ACCOUNT_ID}:execution:unknown"
         client.describe_state_machine_for_execution(executionArn=unknown_execution)
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_stop_execution():
     client = boto3.client("stepfunctions", region_name=region)
     #
-    sm = client.create_state_machine(
+    sm_arn = client.create_state_machine(
         name="name", definition=str(simple_definition), roleArn=_get_default_role()
-    )
-    start = client.start_execution(stateMachineArn=sm["stateMachineArn"])
+    )["stateMachineArn"]
+    start = client.start_execution(stateMachineArn=sm_arn)
     stop = client.stop_execution(executionArn=start["executionArn"])
     #
-    stop["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
-    stop["stopDate"].should.be.a(datetime)
+    assert stop["ResponseMetadata"]["HTTPStatusCode"] == 200
+    assert isinstance(stop["stopDate"], datetime)
+
+    description = client.describe_execution(executionArn=start["executionArn"])
+    assert description["status"] == "ABORTED"
+    assert isinstance(description["stopDate"], datetime)
+
+    execution = client.list_executions(stateMachineArn=sm_arn)["executions"][0]
+    assert isinstance(execution["stopDate"], datetime)
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_stop_raises_error_when_unknown_execution():
     client = boto3.client("stepfunctions", region_name=region)
     client.create_state_machine(
@@ -810,35 +872,14 @@ def test_state_machine_stop_raises_error_when_unknown_execution():
     )
     with pytest.raises(ClientError) as ex:
         unknown_execution = (
-            "arn:aws:states:"
-            + region
-            + ":"
-            + _get_account_id()
-            + ":execution:test-state-machine:unknown"
+            f"arn:aws:states:{region}:{ACCOUNT_ID}:execution:test-state-machine:unknown"
         )
         client.stop_execution(executionArn=unknown_execution)
-    ex.value.response["Error"]["Code"].should.equal("ExecutionDoesNotExist")
-    ex.value.response["Error"]["Message"].should.contain("Execution Does Not Exist:")
+    assert ex.value.response["Error"]["Code"] == "ExecutionDoesNotExist"
+    assert "Execution Does Not Exist:" in ex.value.response["Error"]["Message"]
 
 
-@mock_stepfunctions
-@mock_sts
-def test_state_machine_describe_execution_after_stoppage():
-    client = boto3.client("stepfunctions", region_name=region)
-    sm = client.create_state_machine(
-        name="name", definition=str(simple_definition), roleArn=_get_default_role()
-    )
-    execution = client.start_execution(stateMachineArn=sm["stateMachineArn"])
-    client.stop_execution(executionArn=execution["executionArn"])
-    description = client.describe_execution(executionArn=execution["executionArn"])
-    #
-    description["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
-    description["status"].should.equal("ABORTED")
-    description["stopDate"].should.be.a(datetime)
-
-
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_get_execution_history_throws_error_with_unknown_execution():
     client = boto3.client("stepfunctions", region_name=region)
     client.create_state_machine(
@@ -848,23 +889,18 @@ def test_state_machine_get_execution_history_throws_error_with_unknown_execution
     )
     with pytest.raises(ClientError) as ex:
         unknown_execution = (
-            "arn:aws:states:"
-            + region
-            + ":"
-            + _get_account_id()
-            + ":execution:test-state-machine:unknown"
+            f"arn:aws:states:{region}:{ACCOUNT_ID}:execution:test-state-machine:unknown"
         )
         client.get_execution_history(executionArn=unknown_execution)
-    ex.value.response["Error"]["Code"].should.equal("ExecutionDoesNotExist")
-    ex.value.response["Error"]["Message"].should.contain("Execution Does Not Exist:")
+    assert ex.value.response["Error"]["Code"] == "ExecutionDoesNotExist"
+    assert "Execution Does Not Exist:" in ex.value.response["Error"]["Message"]
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 def test_state_machine_get_execution_history_contains_expected_success_events_when_started():
     expected_events = [
         {
-            "timestamp": datetime(2020, 1, 1, 0, 0, 0, tzinfo=tzutc()),
+            "timestamp": datetime(2020, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
             "type": "ExecutionStarted",
             "id": 1,
             "previousEventId": 0,
@@ -875,7 +911,7 @@ def test_state_machine_get_execution_history_contains_expected_success_events_wh
             },
         },
         {
-            "timestamp": datetime(2020, 1, 1, 0, 0, 10, tzinfo=tzutc()),
+            "timestamp": datetime(2020, 1, 1, 0, 0, 10, tzinfo=timezone.utc),
             "type": "PassStateEntered",
             "id": 2,
             "previousEventId": 0,
@@ -886,7 +922,7 @@ def test_state_machine_get_execution_history_contains_expected_success_events_wh
             },
         },
         {
-            "timestamp": datetime(2020, 1, 1, 0, 0, 10, tzinfo=tzutc()),
+            "timestamp": datetime(2020, 1, 1, 0, 0, 10, tzinfo=timezone.utc),
             "type": "PassStateExited",
             "id": 3,
             "previousEventId": 2,
@@ -897,7 +933,7 @@ def test_state_machine_get_execution_history_contains_expected_success_events_wh
             },
         },
         {
-            "timestamp": datetime(2020, 1, 1, 0, 0, 20, tzinfo=tzutc()),
+            "timestamp": datetime(2020, 1, 1, 0, 0, 20, tzinfo=timezone.utc),
             "type": "ExecutionSucceeded",
             "id": 4,
             "previousEventId": 3,
@@ -918,27 +954,48 @@ def test_state_machine_get_execution_history_contains_expected_success_events_wh
     execution_history = client.get_execution_history(
         executionArn=execution["executionArn"]
     )
-    execution_history["events"].should.have.length_of(4)
-    execution_history["events"].should.equal(expected_events)
+    assert len(execution_history["events"]) == 4
+    assert execution_history["events"] == expected_events
 
 
-@pytest.mark.parametrize("region", ["us-west-2", "cn-northwest-1"])
-@mock_stepfunctions
-def test_stepfunction_regions(region):
-    client = boto3.client("stepfunctions", region_name=region)
+@mock.patch.dict("os.environ", {"MOTO_ENABLE_ISO_REGIONS": "true"})
+@pytest.mark.parametrize(
+    "test_region", ["us-west-2", "cn-northwest-1", "us-isob-east-1"]
+)
+@mock_aws
+def test_stepfunction_regions(test_region):
+    client = boto3.client("stepfunctions", region_name=test_region)
     resp = client.list_state_machines()
-    resp["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
+    assert resp["ResponseMetadata"]["HTTPStatusCode"] == 200
+
+    response = client.create_state_machine(
+        name="name", definition=str(simple_definition), roleArn=_get_default_role()
+    )
+    if test_region == "us-west-2":
+        assert (
+            response["stateMachineArn"]
+            == f"arn:aws:states:{test_region}:{ACCOUNT_ID}:stateMachine:name"
+        )
+    if test_region == "cn-northwest-1":
+        assert (
+            response["stateMachineArn"]
+            == f"arn:aws-cn:states:{test_region}:{ACCOUNT_ID}:stateMachine:name"
+        )
+    if test_region == "us-isob-east-1":
+        assert (
+            response["stateMachineArn"]
+            == f"arn:aws-iso-b:states:{test_region}:{ACCOUNT_ID}:stateMachine:name"
+        )
 
 
-@mock_stepfunctions
-@mock_sts
+@mock_aws
 @mock.patch.dict(os.environ, {"SF_EXECUTION_HISTORY_TYPE": "FAILURE"})
 def test_state_machine_get_execution_history_contains_expected_failure_events_when_started():
     if os.environ.get("TEST_SERVER_MODE", "false").lower() == "true":
         raise SkipTest("Cant pass environment variable in server mode")
     expected_events = [
         {
-            "timestamp": datetime(2020, 1, 1, 0, 0, 0, tzinfo=tzutc()),
+            "timestamp": datetime(2020, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
             "type": "ExecutionStarted",
             "id": 1,
             "previousEventId": 0,
@@ -949,7 +1006,7 @@ def test_state_machine_get_execution_history_contains_expected_failure_events_wh
             },
         },
         {
-            "timestamp": datetime(2020, 1, 1, 0, 0, 10, tzinfo=tzutc()),
+            "timestamp": datetime(2020, 1, 1, 0, 0, 10, tzinfo=timezone.utc),
             "type": "FailStateEntered",
             "id": 2,
             "previousEventId": 0,
@@ -960,7 +1017,7 @@ def test_state_machine_get_execution_history_contains_expected_failure_events_wh
             },
         },
         {
-            "timestamp": datetime(2020, 1, 1, 0, 0, 10, tzinfo=tzutc()),
+            "timestamp": datetime(2020, 1, 1, 0, 0, 10, tzinfo=timezone.utc),
             "type": "ExecutionFailed",
             "id": 3,
             "previousEventId": 2,
@@ -981,19 +1038,490 @@ def test_state_machine_get_execution_history_contains_expected_failure_events_wh
     execution_history = client.get_execution_history(
         executionArn=execution["executionArn"]
     )
-    execution_history["events"].should.have.length_of(3)
-    execution_history["events"].should.equal(expected_events)
+    assert len(execution_history["events"]) == 3
+    assert execution_history["events"] == expected_events
+
+    exc = client.describe_execution(executionArn=execution["executionArn"])
+    assert exc["status"] == "FAILED"
+
+    exc = client.list_executions(stateMachineArn=sm["stateMachineArn"])["executions"][0]
+    assert exc["status"] == "FAILED"
 
 
-def _get_account_id():
-    global account_id
-    if account_id:
-        return account_id
-    sts = boto3.client("sts", region_name=region)
-    identity = sts.get_caller_identity()
-    account_id = identity["Account"]
-    return account_id
+@mock_aws
+def test_state_machine_name_limits():
+    # Setup
+    client = boto3.client("stepfunctions", region_name=region)
+    long_name = "t" * 81
+
+    # Execute
+    with pytest.raises(ClientError) as exc:
+        client.create_state_machine(
+            name=long_name,
+            definition=simple_definition,
+            roleArn=_get_default_role(),
+        )
+
+    # Verify
+    assert exc.value.response["Error"]["Code"] == "ValidationException"
+    assert exc.value.response["Error"]["Message"] == (
+        f"1 validation error detected: Value '{long_name}' at 'name' "
+        "failed to satisfy constraint: "
+        "Member must have length less than or equal to 80"
+    )
+
+
+@mock_aws
+def test_state_machine_execution_name_limits():
+    # Setup
+    client = boto3.client("stepfunctions", region_name=region)
+    machine_name = "test_name"
+    long_name = "t" * 81
+    resp = client.create_state_machine(
+        name=machine_name,
+        definition=simple_definition,
+        roleArn=_get_default_role(),
+    )
+
+    # Execute
+    with pytest.raises(ClientError) as exc:
+        client.start_execution(name=long_name, stateMachineArn=resp["stateMachineArn"])
+
+    # Verify
+    assert exc.value.response["Error"]["Code"] == "ValidationException"
+    assert exc.value.response["Error"]["Message"] == (
+        f"1 validation error detected: Value '{long_name}' at 'name' "
+        "failed to satisfy constraint: "
+        "Member must have length less than or equal to 80"
+    )
+
+
+@mock_aws
+def test_version_is_only_available_when_published():
+    iam = boto3.client("iam", region_name="us-east-1")
+    role_name = f"sfn_role_{str(uuid4())[0:6]}"
+    sfn_role = iam.create_role(
+        RoleName=role_name,
+        AssumeRolePolicyDocument=json.dumps(sfn_role_policy),
+        Path="/",
+    )["Role"]["Arn"]
+
+    client = boto3.client("stepfunctions", region_name="us-east-1")
+
+    name1 = f"sfn_name_{str(uuid4())[0:6]}"
+    response = client.create_state_machine(
+        name=name1, definition=simple_definition, roleArn=sfn_role
+    )
+    assert "stateMachineVersionArn" not in response
+    arn1 = response["stateMachineArn"]
+
+    resp = client.update_state_machine(
+        stateMachineArn=arn1, publish=True, tracingConfiguration={"enabled": True}
+    )
+    assert resp["stateMachineVersionArn"] == f"{arn1}:1"
+
+    resp = client.update_state_machine(
+        stateMachineArn=arn1, tracingConfiguration={"enabled": False}
+    )
+    assert "stateMachineVersionArn" not in resp
+
+    name2 = f"sfn_name_{str(uuid4())[0:6]}"
+    response = client.create_state_machine(
+        name=name2, definition=simple_definition, roleArn=sfn_role, publish=True
+    )
+    arn2 = response["stateMachineArn"]
+    assert response["stateMachineVersionArn"] == f"{arn2}:1"
+
+    resp = client.update_state_machine(
+        stateMachineArn=arn2, publish=True, tracingConfiguration={"enabled": True}
+    )
+    assert resp["stateMachineVersionArn"] == f"{arn2}:2"
 
 
 def _get_default_role():
-    return "arn:aws:iam::" + _get_account_id() + ":role/unknown_sf_role"
+    return "arn:aws:iam::" + ACCOUNT_ID + ":role/unknown_sf_role"
+
+
+@mock_aws
+def test_create_activity():
+    client = boto3.client("stepfunctions", region_name=region)
+    response = client.create_activity(
+        name="test-activity",
+        tags=[{"key": "activity-name", "value": "test-activity"}],
+        encryptionConfiguration={
+            "kmsKeyId": "test-id",
+            "kmsDataKeyReusePeriodSeconds": 123,
+            "type": "CUSTOMER_MANAGED_KMS_KEY",
+        },
+    )
+
+    assert "creationDate" in response
+    assert "activityArn" in response
+
+
+@mock_aws
+def test_create_activity_with_invalid_name():
+    client = boto3.client("stepfunctions", region_name=region)
+
+    invalid_names = [
+        "with space",
+        "with<bracket",
+        "with>bracket",
+        "with{bracket",
+        "with}bracket",
+        "with[bracket",
+        "with]bracket",
+        "with?wildcard",
+        "with*wildcard",
+        'special"char',
+        "special#char",
+        "special%char",
+        "special\\char",
+        "special^char",
+        "special|char",
+        "special~char",
+        "special`char",
+        "special$char",
+        "special&char",
+        "special,char",
+        "special;char",
+        "special:char",
+        "special/char",
+        "uni\u0000code",
+        "uni\u0001code",
+        "uni\u0002code",
+        "uni\u0003code",
+        "uni\u0004code",
+        "uni\u0005code",
+        "uni\u0006code",
+        "uni\u0007code",
+        "uni\u0008code",
+        "uni\u0009code",
+        "uni\u000acode",
+        "uni\u000bcode",
+        "uni\u000ccode",
+        "uni\u000dcode",
+        "uni\u000ecode",
+        "uni\u000fcode",
+        "uni\u0010code",
+        "uni\u0011code",
+        "uni\u0012code",
+        "uni\u0013code",
+        "uni\u0014code",
+        "uni\u0015code",
+        "uni\u0016code",
+        "uni\u0017code",
+        "uni\u0018code",
+        "uni\u0019code",
+        "uni\u001acode",
+        "uni\u001bcode",
+        "uni\u001ccode",
+        "uni\u001dcode",
+        "uni\u001ecode",
+        "uni\u001fcode",
+        "uni\u007fcode",
+        "uni\u0080code",
+        "uni\u0081code",
+        "uni\u0082code",
+        "uni\u0083code",
+        "uni\u0084code",
+        "uni\u0085code",
+        "uni\u0086code",
+        "uni\u0087code",
+        "uni\u0088code",
+        "uni\u0089code",
+        "uni\u008acode",
+        "uni\u008bcode",
+        "uni\u008ccode",
+        "uni\u008dcode",
+        "uni\u008ecode",
+        "uni\u008fcode",
+        "uni\u0090code",
+        "uni\u0091code",
+        "uni\u0092code",
+        "uni\u0093code",
+        "uni\u0094code",
+        "uni\u0095code",
+        "uni\u0096code",
+        "uni\u0097code",
+        "uni\u0098code",
+        "uni\u0099code",
+        "uni\u009acode",
+        "uni\u009bcode",
+        "uni\u009ccode",
+        "uni\u009dcode",
+        "uni\u009ecode",
+        "uni\u009fcode",
+    ]
+
+    for invalid_name in invalid_names:
+        with pytest.raises(ClientError) as exc:
+            client.create_activity(
+                name=invalid_name,
+                tags=[{"key": "activity-name", "value": "test-activity"}],
+            )
+
+        assert exc.value.response["Error"]["Code"] == "InvalidName"
+
+    # Validate name too long error.
+    with pytest.raises(ClientError) as exc:
+        client.create_activity(
+            name="test" * 25,  # 100 characters long.
+            tags=[{"key": "activity-name", "value": "test-activity"}],
+        )
+
+    assert exc.value.response["Error"]["Code"] == "ValidationException"
+    assert (
+        "Member must have length less than or equal to 80"
+        in exc.value.response["Error"]["Message"]
+    )
+
+
+@mock_aws
+def test_create_activity_with_invalid_encryption_configuration():
+    client = boto3.client("stepfunctions", region_name=region)
+
+    # Missing `type` in encryptionConfiguration
+    with pytest.raises(ParamValidationError) as exc:
+        client.create_activity(
+            name="test-activity",
+            tags=[{"key": "activity-name", "value": "test-activity"}],
+            encryptionConfiguration={
+                "kmsKeyId": "test-id",
+                "kmsDataKeyReusePeriodSeconds": 123,
+            },
+        )
+
+    # `kmsKeyId` missing when `type` is `CUSTOMER_MANAGED_KMS_KEY`
+    with pytest.raises(ClientError) as exc:
+        client.create_activity(
+            name="test-activity",
+            tags=[{"key": "activity-name", "value": "test-activity"}],
+            encryptionConfiguration={
+                "kmsDataKeyReusePeriodSeconds": 123,
+                "type": "CUSTOMER_MANAGED_KMS_KEY",
+            },
+        )
+    assert exc.value.response["Error"]["Code"] == "InvalidEncryptionConfiguration"
+
+
+@mock_aws
+def test_create_activity_with_duplicate_name():
+    client = boto3.client("stepfunctions", region_name=region)
+    client.create_activity(
+        name="test-activity",
+        tags=[{"key": "activity-name", "value": "test-activity"}],
+        encryptionConfiguration={
+            "kmsKeyId": "test-id",
+            "kmsDataKeyReusePeriodSeconds": 123,
+            "type": "CUSTOMER_MANAGED_KMS_KEY",
+        },
+    )
+
+    # Validate error if user tries to create activity with the existing name
+    with pytest.raises(ClientError) as exc:
+        client.create_activity(
+            name="test-activity",
+            tags=[{"key": "activity-name", "value": "test-activity"}],
+            encryptionConfiguration={
+                "kmsKeyId": "test-id",
+                "kmsDataKeyReusePeriodSeconds": 123,
+                "type": "CUSTOMER_MANAGED_KMS_KEY",
+            },
+        )
+
+    assert exc.value.response["Error"]["Code"] == "ActivityAlreadyExists"
+
+
+@mock_aws
+def test_describe_activity():
+    client = boto3.client("stepfunctions", region_name=region)
+    activity = client.create_activity(
+        name="test-activity",
+        tags=[{"key": "activity-name", "value": "test-activity"}],
+        encryptionConfiguration={
+            "kmsKeyId": "test-id",
+            "kmsDataKeyReusePeriodSeconds": 123,
+            "type": "CUSTOMER_MANAGED_KMS_KEY",
+        },
+    )
+
+    response = client.describe_activity(activityArn=activity["activityArn"])
+    assert response["name"] == "test-activity"
+    assert response["activityArn"] == activity["activityArn"]
+    assert response["creationDate"] == activity["creationDate"]
+    assert response["encryptionConfiguration"]["kmsKeyId"] == "test-id"
+    assert response["encryptionConfiguration"]["kmsDataKeyReusePeriodSeconds"] == 123
+    assert response["encryptionConfiguration"]["type"] == "CUSTOMER_MANAGED_KMS_KEY"
+
+
+@mock_aws
+def test_delete_activity():
+    client = boto3.client("stepfunctions", region_name=region)
+    activity = client.create_activity(
+        name="test-activity",
+        tags=[{"key": "activity-name", "value": "test-activity"}],
+        encryptionConfiguration={
+            "kmsKeyId": "test-id",
+            "kmsDataKeyReusePeriodSeconds": 123,
+            "type": "CUSTOMER_MANAGED_KMS_KEY",
+        },
+    )
+
+    response = client.describe_activity(activityArn=activity["activityArn"])
+    assert response["name"] == "test-activity"
+
+    client.delete_activity(activityArn=activity["activityArn"])
+
+    # Make sure activity is deleted.
+    with pytest.raises(ClientError) as exc:
+        client.describe_activity(activityArn=activity["activityArn"])
+
+    assert exc.value.response["Error"]["Code"] == "ActivityDoesNotExist"
+
+
+@mock_aws
+def test_list_activities_returns_empty_list_by_default():
+    client = boto3.client("stepfunctions", region_name=region)
+    #
+    activities = client.list_activities()
+    assert activities["activities"] == []
+
+
+@mock_aws
+def test_list_activities_returns_created_activities():
+    client = boto3.client("stepfunctions", region_name=region)
+    activity1 = client.create_activity(
+        name="test-activity-1",
+        tags=[{"key": "activity-name", "value": "test-activity"}],
+    )
+    activity2 = client.create_activity(
+        name="test-activity-2",
+        tags=[{"key": "activity-name", "value": "test-activity"}],
+    )
+    activities = client.list_activities()
+
+    assert activities["ResponseMetadata"]["HTTPStatusCode"] == 200
+    assert len(activities["activities"]) == 2
+    assert isinstance(activities["activities"][0]["creationDate"], datetime)
+    assert activities["activities"][0]["creationDate"] == activity1["creationDate"]
+    assert activities["activities"][0]["name"] == "test-activity-1"
+    assert activities["activities"][0]["activityArn"] == activity1["activityArn"]
+    assert isinstance(activities["activities"][1]["creationDate"], datetime)
+    assert activities["activities"][1]["creationDate"] == activity2["creationDate"]
+    assert activities["activities"][1]["name"] == "test-activity-2"
+    assert activities["activities"][1]["activityArn"] == activity2["activityArn"]
+
+
+@mock_aws
+def test_list_activities_pagination():
+    client = boto3.client("stepfunctions", region_name=region)
+    for i in range(25):
+        activity_name = f"test-activity-{i}"
+        client.create_activity(
+            name=activity_name,
+            tags=[{"key": "activity-name", "value": f"test-activity-{i}"}],
+        )
+
+    resp = client.list_activities()
+    assert "nextToken" not in resp
+    assert len(resp["activities"]) == 25
+
+    paginator = client.get_paginator("list_activities")
+    page_iterator = paginator.paginate(maxResults=5)
+    page_list = list(page_iterator)
+    for page in page_list:
+        assert len(page["activities"]) == 5
+    assert "24" in page_list[-1]["activities"][-1]["name"]
+
+
+@mock_aws
+def test_activity_tagging():
+    client = boto3.client("stepfunctions", region_name=region)
+    # Test tags are added on resource creation
+    tags = [
+        {"key": "tag_key1", "value": "tag_value1"},
+        {"key": "tag_key2", "value": "tag_value2"},
+    ]
+    activity = client.create_activity(
+        name="test-with-tags",
+        tags=tags,
+    )
+    resp = client.list_tags_for_resource(resourceArn=activity["activityArn"])
+    assert resp["tags"] == tags
+
+    # Test tags are added after creation with tag_resource
+    activity = client.create_activity(
+        name="test-activity",
+    )
+    client.tag_resource(resourceArn=activity["activityArn"], tags=tags)
+    resp = client.list_tags_for_resource(resourceArn=activity["activityArn"])
+    assert resp["tags"] == tags
+
+    tags_update = [
+        {"key": "tag_key1", "value": "tag_value1_new"},
+        {"key": "tag_key3", "value": "tag_value3"},
+    ]
+    client.tag_resource(resourceArn=activity["activityArn"], tags=tags_update)
+    resp = client.list_tags_for_resource(resourceArn=activity["activityArn"])
+    tags_expected = [
+        tags_update[0],
+        tags[1],
+        tags_update[1],
+    ]
+    assert resp["tags"] == tags_expected
+
+
+@mock_aws
+def test_activity_untagging():
+    client = boto3.client("stepfunctions", region_name=region)
+    tags = [
+        {"key": "tag_key1", "value": "tag_value1"},
+        {"key": "tag_key2", "value": "tag_value2"},
+        {"key": "tag_key3", "value": "tag_value3"},
+    ]
+    activity = client.create_activity(
+        name="test-activity",
+        tags=tags,
+    )
+    resp = client.list_tags_for_resource(resourceArn=activity["activityArn"])
+    assert resp["tags"] == tags
+    tags_to_delete = ["tag_key1", "tag_key2"]
+    client.untag_resource(resourceArn=activity["activityArn"], tagKeys=tags_to_delete)
+    resp = client.list_tags_for_resource(resourceArn=activity["activityArn"])
+    expected_tags = [tag for tag in tags if tag["key"] not in tags_to_delete]
+    assert resp["tags"] == expected_tags
+
+
+@mock_aws
+def test_activity_list_tags_for_created_activity():
+    client = boto3.client("stepfunctions", region_name=region)
+    #
+    activity = client.create_activity(
+        name="test-activity",
+        tags=[{"key": "tag_key", "value": "tag_value"}],
+    )
+    response = client.list_tags_for_resource(resourceArn=activity["activityArn"])
+    tags = response["tags"]
+    assert len(tags) == 1
+    assert tags[0] == {"key": "tag_key", "value": "tag_value"}
+
+
+@mock_aws
+def test_activity_list_tags_for_activity_without_tags():
+    client = boto3.client("stepfunctions", region_name=region)
+    #
+    activity = client.create_activity(name="test-activity")
+    response = client.list_tags_for_resource(resourceArn=activity["activityArn"])
+    tags = response["tags"]
+    assert len(tags) == 0
+
+
+@mock_aws
+def test_activity_list_tags_for_nonexisting_activity():
+    client = boto3.client("stepfunctions", region_name=region)
+    #
+    non_existing_activity = f"arn:aws:states:{region}:{ACCOUNT_ID}:activity:unknown"
+    response = client.list_tags_for_resource(resourceArn=non_existing_activity)
+    tags = response["tags"]
+    assert len(tags) == 0

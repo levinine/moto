@@ -1,5 +1,4 @@
 import re
-import sure  # pylint: disable=unused-import
 
 import moto.server as server
 

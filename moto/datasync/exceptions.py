@@ -1,13 +1,12 @@
-from moto.core.exceptions import JsonRESTError
+"""Exceptions raised by the datasync service."""
+
+from moto.core.exceptions import ServiceException
 
 
-class DataSyncClientError(JsonRESTError):
-    code = 400
+class DataSyncClientError(ServiceException):
+    pass
 
 
 class InvalidRequestException(DataSyncClientError):
-    def __init__(self, msg=None):
-        self.code = 400
-        super(InvalidRequestException, self).__init__(
-            "InvalidRequestException", msg or "The request is not valid."
-        )
+    code = "InvalidRequestException"
+    message = "The request is not valid."

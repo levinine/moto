@@ -6,8 +6,9 @@ try:
 except ImportError:
     from urlparse import urlparse
 
-from moto.utilities.utils import random_string as generate_random_name
+from moto.moto_api._internal import mock_random
 from tests.test_eks.test_eks_constants import (
+    STATUS,
     ClusterAttributes,
     ClusterInputs,
     FargateProfileAttributes,
@@ -15,8 +16,9 @@ from tests.test_eks.test_eks_constants import (
     NodegroupAttributes,
     NodegroupInputs,
     ResponseAttributes,
-    STATUS,
 )
+
+generate_random_name = mock_random.get_random_string
 
 
 def attributes_to_test(inputs, name):
@@ -57,7 +59,7 @@ def generate_fargate_profiles(client, cluster_name, num_profiles, minimal):
         client.create_fargate_profile(
             fargateProfileName=generate_random_name(),
             clusterName=cluster_name,
-            **_input_builder(FargateProfileInputs, minimal)
+            **_input_builder(FargateProfileInputs, minimal),
         )[ResponseAttributes.FARGATE_PROFILE][
             FargateProfileAttributes.FARGATE_PROFILE_NAME
         ]
@@ -75,17 +77,14 @@ def generate_nodegroups(client, cluster_name, num_nodegroups, minimal):
         client.create_nodegroup(
             nodegroupName=generate_random_name(),
             clusterName=cluster_name,
-            **_input_builder(NodegroupInputs, minimal)
+            **_input_builder(NodegroupInputs, minimal),
         )[ResponseAttributes.NODEGROUP][NodegroupAttributes.NODEGROUP_NAME]
         for _ in range(num_nodegroups)
     ]
 
 
 def generate_dict(prefix, count):
-    return {
-        "{prefix}_{count}".format(prefix=prefix, count=_count): str(_count)
-        for _count in range(count)
-    }
+    return {f"{prefix}_{_count}": str(_count) for _count in range(count)}
 
 
 def is_valid_uri(value):
@@ -105,6 +104,7 @@ def region_matches_partition(region, partition):
         ("us-gov-", "aws-us-gov"),
         ("us-gov-iso-", "aws-iso"),
         ("us-gov-iso-b-", "aws-iso-b"),
+        ("eusc-", "aws-eusc"),
     ]
 
     for prefix, expected_partition in valid_matches:

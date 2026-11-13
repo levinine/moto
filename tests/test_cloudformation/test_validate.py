@@ -1,10 +1,11 @@
 import json
+
 import boto3
 import botocore
-import sure  # noqa # pylint: disable=unused-import
+import pytest
 
-from moto import mock_cloudformation, mock_s3
-from tests import EXAMPLE_AMI_ID
+from moto import mock_aws
+from tests import EXAMPLE_AMI_ID, aws_verified
 
 json_template = {
     "AWSTemplateFormatVersion": "2010-09-09",
@@ -42,8 +43,8 @@ dummy_template_json = json.dumps(json_template)
 dummy_bad_template_json = json.dumps(json_bad_template)
 
 
-@mock_cloudformation
-def test_boto3_json_validate_successful():
+@mock_aws
+def test_json_validate_successful():
     cf_conn = boto3.client("cloudformation", region_name="us-east-1")
     response = cf_conn.validate_template(TemplateBody=dummy_template_json)
     assert response["Description"] == "Stack 1"
@@ -51,8 +52,8 @@ def test_boto3_json_validate_successful():
     assert response["ResponseMetadata"]["HTTPStatusCode"] == 200
 
 
-@mock_cloudformation
-def test_boto3_json_with_tabs_validate_successful():
+@mock_aws
+def test_json_with_tabs_validate_successful():
     cf_conn = boto3.client("cloudformation", region_name="us-east-1")
     response = cf_conn.validate_template(TemplateBody=json_valid_template_with_tabs)
     assert response["Description"] == "Stack 2"
@@ -60,18 +61,19 @@ def test_boto3_json_with_tabs_validate_successful():
     assert response["ResponseMetadata"]["HTTPStatusCode"] == 200
 
 
-@mock_cloudformation
-def test_boto3_json_invalid_missing_resource():
+@mock_aws
+def test_json_invalid_missing_resource():
     cf_conn = boto3.client("cloudformation", region_name="us-east-1")
-    try:
+    with pytest.raises(botocore.exceptions.ClientError) as exc:
         cf_conn.validate_template(TemplateBody=dummy_bad_template_json)
-        assert False
-    except botocore.exceptions.ClientError as e:
-        str(e).should.contain(
-            "An error occurred (ValidationError) when calling the ValidateTemplate operation: Stack"
-            " with id Missing top level"
+    err = exc.value.response["Error"]
+    assert (
+        err["Message"]
+        in (
+            "Stack with id Missing top level template section Resources does not exist",  # cfn-lint 0.x
+            "Stack with id 'Resources' is a required property does not exist",  # cfn-lint 1.x
         )
-        assert True
+    )
 
 
 yaml_template = """
@@ -81,7 +83,6 @@ yaml_template = """
       S3Bucket:
         Type: AWS::S3::Bucket
         Properties:
-          AccessControl: PublicRead
           BucketName: cf-test-bucket-1
 """
 
@@ -91,8 +92,8 @@ yaml_bad_template = """
 """
 
 
-@mock_cloudformation
-def test_boto3_yaml_validate_successful():
+@mock_aws
+def test_yaml_validate_successful():
     cf_conn = boto3.client("cloudformation", region_name="us-east-1")
     response = cf_conn.validate_template(TemplateBody=yaml_template)
     assert response["Description"] == "Simple CloudFormation Test Template"
@@ -100,9 +101,8 @@ def test_boto3_yaml_validate_successful():
     assert response["ResponseMetadata"]["HTTPStatusCode"] == 200
 
 
-@mock_cloudformation
-@mock_s3
-def test_boto3_yaml_validate_template_url_successful():
+@mock_aws
+def test_yaml_validate_template_url_successful():
     s3 = boto3.client("s3", region_name="us-east-1")
     s3_conn = boto3.resource("s3", region_name="us-east-1")
     s3_conn.create_bucket(Bucket="foobar")
@@ -119,15 +119,43 @@ def test_boto3_yaml_validate_template_url_successful():
     assert response["ResponseMetadata"]["HTTPStatusCode"] == 200
 
 
-@mock_cloudformation
-def test_boto3_yaml_invalid_missing_resource():
+@mock_aws
+def test_yaml_invalid_missing_resource():
     cf_conn = boto3.client("cloudformation", region_name="us-east-1")
-    try:
+    with pytest.raises(botocore.exceptions.ClientError) as exc:
         cf_conn.validate_template(TemplateBody=yaml_bad_template)
-        assert False
-    except botocore.exceptions.ClientError as e:
-        str(e).should.contain(
-            "An error occurred (ValidationError) when calling the ValidateTemplate operation: Stack"
-            " with id Missing top level"
+    err = exc.value.response["Error"]
+    assert (
+        err["Message"]
+        in (
+            "Stack with id Missing top level template section Resources does not exist",  # cfn-lint 0.x
+            "Stack with id 'Resources' is a required property does not exist",  # cfn-lint 1.x
         )
-        assert True
+    )
+
+
+@aws_verified
+@pytest.mark.aws_verified
+def test_validate_yaml_using_short_func_refs():
+    """Template using !Sub as a key, which is not valid YAML"""
+    cf_client = boto3.client("cloudformation", region_name="us-east-1")
+
+    template = """AWSTemplateFormatVersion: '2010-09-09'
+Description: Test template
+Parameters:
+  BucketName:
+    Type: String
+Resources:
+  TestBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        !Sub "${AWS::StackName}-${BucketName}"
+Outputs:
+  BucketName:
+    Value:
+      !Sub "${TestBucket}"
+"""
+
+    response = cf_client.validate_template(TemplateBody=template)
+    assert response["ResponseMetadata"]["HTTPStatusCode"] == 200

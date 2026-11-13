@@ -12,29 +12,22 @@
 managedblockchain
 =================
 
-|start-h3| Example usage |end-h3|
-
-.. sourcecode:: python
-
-            @mock_managedblockchain
-            def test_managedblockchain_behaviour:
-                boto3.client("managedblockchain")
-                ...
-
-
-
 |start-h3| Implemented features for this service |end-h3|
 
+- [ ] create_accessor
 - [X] create_member
 - [X] create_network
 - [X] create_node
 - [X] create_proposal
+- [ ] delete_accessor
 - [X] delete_member
 - [X] delete_node
+- [ ] get_accessor
 - [X] get_member
 - [X] get_network
 - [X] get_node
 - [X] get_proposal
+- [ ] list_accessors
 - [X] list_invitations
 - [X] list_members
 - [X] list_networks

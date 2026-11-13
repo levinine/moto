@@ -1,10 +1,4 @@
-import sure  # noqa # pylint: disable=unused-import
-
 import moto.server as server
-
-"""
-Test the different server responses
-"""
 
 
 def test_sts_get_session_token():
@@ -12,9 +6,9 @@ def test_sts_get_session_token():
     test_client = backend.test_client()
 
     res = test_client.get("/?Action=GetSessionToken")
-    res.status_code.should.equal(200)
-    res.data.should.contain(b"SessionToken")
-    res.data.should.contain(b"AccessKeyId")
+    assert res.status_code == 200
+    assert b"SessionToken" in res.data
+    assert b"AccessKeyId" in res.data
 
 
 def test_sts_get_federation_token():
@@ -22,9 +16,9 @@ def test_sts_get_federation_token():
     test_client = backend.test_client()
 
     res = test_client.get("/?Action=GetFederationToken&Name=Bob")
-    res.status_code.should.equal(200)
-    res.data.should.contain(b"SessionToken")
-    res.data.should.contain(b"AccessKeyId")
+    assert res.status_code == 200
+    assert b"SessionToken" in res.data
+    assert b"AccessKeyId" in res.data
 
 
 def test_sts_get_caller_identity():
@@ -32,7 +26,19 @@ def test_sts_get_caller_identity():
     test_client = backend.test_client()
 
     res = test_client.get("/?Action=GetCallerIdentity")
-    res.status_code.should.equal(200)
-    res.data.should.contain(b"Arn")
-    res.data.should.contain(b"UserId")
-    res.data.should.contain(b"Account")
+    assert res.status_code == 200
+    assert b"Arn" in res.data
+    assert b"UserId" in res.data
+    assert b"Account" in res.data
+
+
+def test_sts_wellformed_xml():
+    backend = server.create_backend_app("sts")
+    test_client = backend.test_client()
+
+    res = test_client.get("/?Action=GetFederationToken&Name=Bob")
+    assert b"\n" not in res.data
+    res = test_client.get("/?Action=GetSessionToken")
+    assert b"\n" not in res.data
+    res = test_client.get("/?Action=GetCallerIdentity")
+    assert b"\n" not in res.data

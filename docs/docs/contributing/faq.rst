@@ -13,10 +13,11 @@ FAQ for Developers
 When running the linter...
 #############################
 
-Why does black give different results?
+Why does ruff give different results?
 ****************************************
-Different versions of black produce different results.
-To ensure that our CI passes, please format the code using :bash:`black==19.10b0`.
+Different versions of ruff produce different results.
+The CI system uses the version set in `requirements-dev.txt`.
+To ensure that our CI passes, please format the code using the same version.
 
 When running a test...
 #########################

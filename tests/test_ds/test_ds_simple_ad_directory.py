@@ -1,12 +1,9 @@
-"""Directory-related unit tests for Simple AD Directory Services."""
 import boto3
-from botocore.exceptions import ClientError
 import pytest
+from botocore.exceptions import ClientError
 
-from moto import mock_ds
-from moto import settings
-from moto.core.utils import get_random_hex
-from moto.ec2 import mock_ec2
+from moto import mock_aws, settings
+from moto.moto_api._internal import mock_random
 
 TEST_REGION = "us-east-1" if settings.TEST_SERVER_MODE else "us-west-2"
 
@@ -24,7 +21,7 @@ def create_subnets(
     for cidr_block, region in [("10.0.1.0/24", region1), ("10.0.0.0/24", region2)]:
         subnet_ids.append(
             ec2_client.create_subnet(
-                VpcId=vpc_id, CidrBlock=cidr_block, AvailabilityZone=region,
+                VpcId=vpc_id, CidrBlock=cidr_block, AvailabilityZone=region
             )["Subnet"]["SubnetId"]
         )
     return subnet_ids
@@ -41,7 +38,7 @@ def create_test_directory(ds_client, ec2_client, vpc_settings=None, tags=None):
         tags = []
 
     result = ds_client.create_directory(
-        Name=f"test-{get_random_hex(6)}.test",
+        Name=f"test-{mock_random.get_random_hex(6)}.test",
         Password="Password4TheAges",
         Size="Large",
         VpcSettings=vpc_settings,
@@ -50,11 +47,11 @@ def create_test_directory(ds_client, ec2_client, vpc_settings=None, tags=None):
     return result["DirectoryId"]
 
 
-@mock_ds
+@mock_aws
 def test_ds_create_directory_validations():
     """Test validation errs that aren't caught by botocore."""
     client = boto3.client("ds", region_name=TEST_REGION)
-    random_num = get_random_hex(6)
+    random_num = mock_random.get_random_hex(6)
 
     # Verify ValidationException error messages are accumulated properly.
     bad_name = f"bad_name_{random_num}"
@@ -87,9 +84,9 @@ def test_ds_create_directory_validations():
         f"Member must satisfy enum value set: [Small, Large];" in err["Message"]
     )
     assert (
-        fr"Value '{bad_name}' at 'name' failed to satisfy constraint: "
-        fr"Member must satisfy regular expression pattern: "
-        fr"^([a-zA-Z0-9]+[\.-])+([a-zA-Z0-9])+$" in err["Message"]
+        rf"Value '{bad_name}' at 'name' failed to satisfy constraint: "
+        rf"Member must satisfy regular expression pattern: "
+        rf"^([a-zA-Z0-9]+[\.-])+([a-zA-Z0-9])+$" in err["Message"]
     )
 
     too_long = (
@@ -132,15 +129,14 @@ def test_ds_create_directory_validations():
     assert err["Code"] == "ValidationException"
     assert "1 validation error detected" in err["Message"]
     assert (
-        fr"Value '['{bad_vpc_settings['SubnetIds'][0]}']' at "
-        fr"'vpcSettings.subnetIds' failed to satisfy constraint: "
-        fr"Member must satisfy regular expression pattern: "
-        fr"^(subnet-[0-9a-f]{{8}}|subnet-[0-9a-f]{{17}})$" in err["Message"]
+        rf"Value '['{bad_vpc_settings['SubnetIds'][0]}']' at "
+        rf"'vpcSettings.subnetIds' failed to satisfy constraint: "
+        rf"Member must satisfy regular expression pattern: "
+        rf"^(subnet-[0-9a-f]{{8}}|subnet-[0-9a-f]{{17}})$" in err["Message"]
     )
 
 
-@mock_ec2
-@mock_ds
+@mock_aws
 def test_ds_create_directory_bad_vpc_settings():
     """Test validation of bad vpc that doesn't raise ValidationException."""
     client = boto3.client("ds", region_name=TEST_REGION)
@@ -148,7 +144,9 @@ def test_ds_create_directory_bad_vpc_settings():
     # Error if no VpcSettings argument.
     with pytest.raises(ClientError) as exc:
         client.create_directory(
-            Name=f"test-{get_random_hex(6)}.test", Password="TESTfoobar1", Size="Small",
+            Name=f"test-{mock_random.get_random_hex(6)}.test",
+            Password="TESTfoobar1",
+            Size="Small",
         )
     err = exc.value.response["Error"]
     assert err["Code"] == "InvalidParameterException"
@@ -159,15 +157,14 @@ def test_ds_create_directory_bad_vpc_settings():
     good_subnet_ids = create_subnets(ec2_client, create_vpc(ec2_client))
     with pytest.raises(ClientError) as exc:
         create_test_directory(
-            client, ec2_client, {"VpcId": "vpc-12345678", "SubnetIds": good_subnet_ids},
+            client, ec2_client, {"VpcId": "vpc-12345678", "SubnetIds": good_subnet_ids}
         )
     err = exc.value.response["Error"]
     assert err["Code"] == "ClientException"
     assert "Invalid VPC ID" in err["Message"]
 
 
-@mock_ec2
-@mock_ds
+@mock_aws
 def test_ds_create_directory_bad_subnets():
     """Test validation of VPC subnets."""
     client = boto3.client("ds", region_name=TEST_REGION)
@@ -194,15 +191,12 @@ def test_ds_create_directory_bad_subnets():
     )
     with pytest.raises(ClientError) as exc:
         create_test_directory(
-            client,
-            ec2_client,
-            {"VpcId": good_vpc_id, "SubnetIds": subnets_same_region},
+            client, ec2_client, {"VpcId": good_vpc_id, "SubnetIds": subnets_same_region}
         )
     err = exc.value.response["Error"]
     assert err["Code"] == "ClientException"
     assert (
-        "Invalid subnet ID(s). The two subnets must be in different "
-        "Availability Zones."
+        "Invalid subnet ID(s). The two subnets must be in different Availability Zones."
     ) in err["Message"]
     ec2_client.delete_subnet(SubnetId=subnets_same_region[0])
     ec2_client.delete_subnet(SubnetId=subnets_same_region[1])
@@ -220,8 +214,7 @@ def test_ds_create_directory_bad_subnets():
     assert "Invalid subnet ID(s). They must correspond to two subnets" in err["Message"]
 
 
-@mock_ec2
-@mock_ds
+@mock_aws
 def test_ds_create_directory_good_args():
     """Test creation of AD directory using good arguments."""
     client = boto3.client("ds", region_name=TEST_REGION)

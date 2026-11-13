@@ -1,50 +1,228 @@
 import boto3
-import sure  # noqa # pylint: disable=unused-import
 import pytest
-
 from botocore.exceptions import ClientError
 
-from moto import mock_ec2
+from moto import mock_aws
 
 
-@mock_ec2
+@mock_aws
 def test_describe_instance_types():
     client = boto3.client("ec2", "us-east-1")
     instance_types = client.describe_instance_types()
 
-    instance_types.should.have.key("InstanceTypes")
-    instance_types["InstanceTypes"].should_not.be.empty
-    instance_types["InstanceTypes"][0].should.have.key("InstanceType")
-    instance_types["InstanceTypes"][0].should.have.key("MemoryInfo")
-    instance_types["InstanceTypes"][0]["MemoryInfo"].should.have.key("SizeInMiB")
+    assert len(instance_types["InstanceTypes"]) > 0
+    assert "InstanceType" in instance_types["InstanceTypes"][0]
+    assert "SizeInMiB" in instance_types["InstanceTypes"][0]["MemoryInfo"]
+
+    ena_support = {
+        t["NetworkInfo"]["EnaSupport"] for t in instance_types["InstanceTypes"]
+    }
+    assert ena_support == {"required", "unsupported", "supported"}
 
 
-@mock_ec2
+@mock_aws
 def test_describe_instance_types_filter_by_type():
     client = boto3.client("ec2", "us-east-1")
     instance_types = client.describe_instance_types(
         InstanceTypes=["t1.micro", "t2.nano"]
     )
 
-    instance_types.should.have.key("InstanceTypes")
-    instance_types["InstanceTypes"].should_not.be.empty
-    instance_types["InstanceTypes"].should.have.length_of(2)
-    instance_types["InstanceTypes"][0]["InstanceType"].should.be.within(
-        ["t1.micro", "t2.nano"]
-    )
-    instance_types["InstanceTypes"][1]["InstanceType"].should.be.within(
-        ["t1.micro", "t2.nano"]
-    )
+    assert "InstanceTypes" in instance_types
+    assert len(instance_types["InstanceTypes"]) == 2
+    assert instance_types["InstanceTypes"][0]["InstanceType"] in ["t1.micro", "t2.nano"]
+    assert instance_types["InstanceTypes"][1]["InstanceType"] in ["t1.micro", "t2.nano"]
 
 
-@mock_ec2
+@mock_aws
+def test_describe_instance_types_gpu_instance_types():
+    client = boto3.client("ec2", "us-east-1")
+    instance_types = client.describe_instance_types(
+        InstanceTypes=["p3dn.24xlarge", "g4dn.8xlarge"]
+    )
+
+    assert len(instance_types["InstanceTypes"]) == 2
+    assert "GpuInfo" in instance_types["InstanceTypes"][0]
+    assert "GpuInfo" in instance_types["InstanceTypes"][1]
+
+    instance_type_to_gpu_info = {
+        instance_info["InstanceType"]: instance_info["GpuInfo"]
+        for instance_info in instance_types["InstanceTypes"]
+    }
+    for itype in instance_type_to_gpu_info.values():
+        for gpu in itype["Gpus"]:
+            # AWS seems to re-order these attributes every week
+            gpu["Workloads"] = sorted(gpu["Workloads"])
+    assert instance_type_to_gpu_info == {
+        "g4dn.8xlarge": {
+            "Gpus": [
+                {
+                    "Count": 1,
+                    "GpuPartitionSize": 1.0,
+                    "LogicalGpuCount": 1,
+                    "Manufacturer": "NVIDIA",
+                    "MemoryInfo": {"SizeInMiB": 16384},
+                    "Name": "T4",
+                    "Workloads": ["graphics", "ml-ai"],
+                }
+            ],
+            "TotalGpuMemoryInMiB": 16384,
+        },
+        "p3dn.24xlarge": {
+            "Gpus": [
+                {
+                    "Count": 8,
+                    "GpuPartitionSize": 1.0,
+                    "LogicalGpuCount": 8,
+                    "Manufacturer": "NVIDIA",
+                    "MemoryInfo": {"SizeInMiB": 32768},
+                    "Name": "V100",
+                    "Workloads": [
+                        "ml-ai",
+                    ],
+                }
+            ],
+            "TotalGpuMemoryInMiB": 262144,
+        },
+    }
+
+
+@mock_aws
 def test_describe_instance_types_unknown_type():
     client = boto3.client("ec2", "us-east-1")
 
-    with pytest.raises(ClientError) as err:
+    with pytest.raises(ClientError) as exc_info:
         client.describe_instance_types(InstanceTypes=["t1.non_existent"])
-        err.response["Error"]["Code"].should.equal("ValidationException")
-        err.response["Error"]["Message"].split(":")[0].should.look_like(
-            "The instance type '{'t1.non_existent'}' does not exist"
+
+    assert exc_info.value.response["Error"]["Code"] == "InvalidInstanceType"
+    assert (
+        exc_info.value.response["Error"]["Message"]
+        == "The following supplied instance types do not exist: [t1.non_existent]"
+    )
+    assert exc_info.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+
+
+@mock_aws
+def test_describe_instance_types_filter_by_vcpus():
+    client = boto3.client("ec2", "us-east-1")
+    instance_types = client.describe_instance_types(
+        Filters=[{"Name": "vcpu-info.default-vcpus", "Values": ["1", "2"]}]
+    )
+
+    types = [
+        instance_type["InstanceType"]
+        for instance_type in instance_types["InstanceTypes"]
+    ]
+    assert "t1.micro" in types
+    assert "t2.nano" in types
+
+    # not contain
+    assert "m5d.xlarge" not in types
+
+
+@mock_aws
+def test_describe_instance_types_filter_by_memory():
+    client = boto3.client("ec2", "us-east-1")
+    instance_types = client.describe_instance_types(
+        Filters=[{"Name": "memory-info.size-in-mib", "Values": ["512"]}]
+    )
+
+    types = [
+        instance_type["InstanceType"]
+        for instance_type in instance_types["InstanceTypes"]
+    ]
+    assert "t4g.nano" in types
+
+    # not contain
+    assert "m5d.xlarge" not in types
+
+
+@mock_aws
+def test_describe_instance_types_filter_by_bare_metal():
+    client = boto3.client("ec2", "us-east-1")
+    instance_types = client.describe_instance_types(
+        Filters=[{"Name": "bare-metal", "Values": ["true"]}]
+    )
+
+    types = [
+        instance_type["InstanceType"]
+        for instance_type in instance_types["InstanceTypes"]
+    ]
+    assert "a1.metal" in types
+
+    # not contain
+    assert "t1.micro" not in types
+
+
+@mock_aws
+def test_describe_instance_types_filter_by_burstable_performance_supported():
+    client = boto3.client("ec2", "us-east-1")
+    instance_types = client.describe_instance_types(
+        Filters=[{"Name": "burstable-performance-supported", "Values": ["true"]}]
+    )
+
+    types = [
+        instance_type["InstanceType"]
+        for instance_type in instance_types["InstanceTypes"]
+    ]
+    assert "t2.micro" in types
+
+    # not contain
+    assert "t1.micro" not in types
+
+
+@mock_aws
+def test_describe_instance_types_filter_by_current_generation():
+    client = boto3.client("ec2", "us-east-1")
+    instance_types = client.describe_instance_types(
+        Filters=[{"Name": "current-generation", "Values": ["true"]}]
+    )
+
+    types = [
+        instance_type["InstanceType"]
+        for instance_type in instance_types["InstanceTypes"]
+    ]
+    assert "t2.micro" in types
+
+    # not contain
+    assert "t1.micro" not in types
+
+
+@mock_aws
+def test_describe_instance_types_small_instances():
+    client = boto3.client("ec2", "us-east-1")
+    instance_types = client.describe_instance_types(
+        Filters=[
+            {"Name": "bare-metal", "Values": ["false"]},
+            {"Name": "current-generation", "Values": ["true"]},
+            {"Name": "vcpu-info.default-cores", "Values": ["1"]},
+            {"Name": "memory-info.size-in-mib", "Values": ["512", "1024"]},
+            {"Name": "vcpu-info.valid-threads-per-core", "Values": ["1"]},
+        ]
+    )
+
+    types = {t["InstanceType"] for t in instance_types["InstanceTypes"]}
+    assert types == {
+        "t3.micro",
+        "t3.nano",
+        "t3a.micro",
+        "t3a.nano",
+        "t8i.micro",
+        "t8i.nano",
+    }
+
+
+@mock_aws
+def test_describe_instance_types_invalid_filter():
+    client = boto3.client("ec2", "us-east-1")
+
+    with pytest.raises(ClientError) as exc_info:
+        client.describe_instance_types(
+            Filters=[{"Name": "spam", "Values": ["eggs"]}],
         )
-        err.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
+
+    assert exc_info.value.response["Error"]["Code"] == "InvalidParameterValue"
+    assert (
+        exc_info.value.response["Error"]["Message"].split(":")[0]
+        == "The filter 'spam' is invalid"
+    )
+    assert exc_info.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400

@@ -6,19 +6,25 @@ class DmsClientError(JsonRESTError):
 
 
 class ResourceNotFoundFault(DmsClientError):
-    def __init__(self, message):
-        super(ResourceNotFoundFault, self).__init__("ResourceNotFoundFault", message)
+    def __init__(self, message: str):
+        super().__init__("ResourceNotFoundFault", message)
 
 
 class InvalidResourceStateFault(DmsClientError):
-    def __init__(self, message):
-        super(InvalidResourceStateFault, self).__init__(
-            "InvalidResourceStateFault", message
-        )
+    def __init__(self, message: str):
+        super().__init__("InvalidResourceStateFault", message)
 
 
 class ResourceAlreadyExistsFault(DmsClientError):
-    def __init__(self, message):
-        super(ResourceAlreadyExistsFault, self).__init__(
-            "ResourceAlreadyExistsFault", message
-        )
+    def __init__(self, message: str):
+        super().__init__("ResourceAlreadyExistsFault", message)
+
+
+class ValidationError(DmsClientError):
+    def __init__(self, message: str):
+        super().__init__("ValidationError", message)
+
+
+class InvalidParameterCombinationException(DmsClientError):
+    def __init__(self, message: str):
+        super().__init__("InvalidParameterCombinationException", message)

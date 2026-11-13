@@ -1,91 +1,128 @@
-import boto
-import boto.ec2
 import boto3
-import sure  # noqa # pylint: disable=unused-import
 import pytest
-
 from botocore.exceptions import ClientError
-from moto import mock_ec2, mock_ec2_deprecated
+
+from moto import mock_aws
+
+from .helpers import assert_dryrun_error
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_describe_regions():
-    conn = boto.connect_ec2("the_key", "the_secret")
-    regions = conn.get_all_regions()
-    len(regions).should.be.greater_than(1)
-    for region in regions:
-        region.endpoint.should.contain(region.name)
-
-
-# Has boto3 equivalent
-@mock_ec2_deprecated
-def test_availability_zones():
-    conn = boto.connect_ec2("the_key", "the_secret")
-    regions = conn.get_all_regions()
-    for region in regions:
-        conn = boto.ec2.connect_to_region(region.name)
-        if conn is None:
-            continue
-        for zone in conn.get_all_zones():
-            zone.name.should.contain(region.name)
-
-
-@mock_ec2
-def test_boto3_describe_regions():
     ec2 = boto3.client("ec2", "us-east-1")
     resp = ec2.describe_regions()
-    len(resp["Regions"]).should.be.greater_than(1)
+    assert len(resp["Regions"]) > 1
     for rec in resp["Regions"]:
-        rec["Endpoint"].should.contain(rec["RegionName"])
+        assert rec["RegionName"] in rec["Endpoint"]
 
     test_region = "us-east-1"
     resp = ec2.describe_regions(RegionNames=[test_region])
-    resp["Regions"].should.have.length_of(1)
-    resp["Regions"][0].should.have.key("RegionName").which.should.equal(test_region)
-    resp["Regions"][0].should.have.key("OptInStatus").which.should.equal(
-        "opt-in-not-required"
-    )
+    assert len(resp["Regions"]) == 1
+    assert resp["Regions"][0]["RegionName"] == test_region
+    assert resp["Regions"][0]["OptInStatus"] == "opt-in-not-required"
 
     test_region = "ap-east-1"
     resp = ec2.describe_regions(RegionNames=[test_region])
-    resp["Regions"].should.have.length_of(1)
-    resp["Regions"][0].should.have.key("RegionName").which.should.equal(test_region)
-    resp["Regions"][0].should.have.key("OptInStatus").which.should.equal("not-opted-in")
+    assert len(resp["Regions"]) == 1
+    assert resp["Regions"][0]["RegionName"] == test_region
+    assert resp["Regions"][0]["OptInStatus"] == "not-opted-in"
 
 
-@mock_ec2
-def test_boto3_availability_zones():
+@mock_aws
+def test_availability_zones():
     ec2 = boto3.client("ec2", "us-east-1")
     resp = ec2.describe_regions()
     regions = [r["RegionName"] for r in resp["Regions"]]
     for region in regions:
         conn = boto3.client("ec2", region)
-        resp = conn.describe_availability_zones()
-        for rec in resp["AvailabilityZones"]:
-            rec["ZoneName"].should.contain(region)
+        zones = conn.describe_availability_zones()["AvailabilityZones"]
+        assert len(zones) > 0, f"Region {region} has no availability zones configured"
+        for rec in zones:
+            assert region in rec["ZoneName"]
 
 
-@mock_ec2
+@mock_aws
+def test_availability_zones__parameters():
+    us_east = boto3.client("ec2", "us-east-1")
+    zones = us_east.describe_availability_zones(ZoneNames=["us-east-1b"])[
+        "AvailabilityZones"
+    ]
+    assert len(zones) == 1
+    assert zones[0]["ZoneId"] == "use1-az1"
+    assert zones[0]["Messages"] == []
+
+    zones = us_east.describe_availability_zones(ZoneNames=["us-east-1a", "us-east-1b"])[
+        "AvailabilityZones"
+    ]
+    assert len(zones) == 2
+    assert {zone["ZoneId"] for zone in zones} == {"use1-az1", "use1-az6"}
+
+    zones = us_east.describe_availability_zones(ZoneIds=["use1-az1"])[
+        "AvailabilityZones"
+    ]
+    assert len(zones) == 1
+    assert zones[0]["ZoneId"] == "use1-az1"
+
+    zones = us_east.describe_availability_zones(
+        Filters=[{"Name": "state", "Values": ["unavailable"]}]
+    )["AvailabilityZones"]
+    assert zones == []
+
+    zones = us_east.describe_availability_zones(
+        Filters=[{"Name": "zone-id", "Values": ["use1-az2"]}]
+    )["AvailabilityZones"]
+    assert len(zones) == 1
+    assert zones[0]["ZoneId"] == "use1-az2"
+
+    zones = us_east.describe_availability_zones(
+        Filters=[{"Name": "zone-name", "Values": ["us-east-1b"]}]
+    )["AvailabilityZones"]
+    assert len(zones) == 1
+    assert zones[0]["ZoneId"] == "use1-az1"
+
+    # This shouldn't raise an unhandled exception
+    zones = us_east.describe_availability_zones(Filters=[{"Name": "state"}])[
+        "AvailabilityZones"
+    ]
+    assert len(zones) == 0
+
+    zones = us_east.describe_availability_zones(
+        Filters=[{"Name": "state", "Values": []}]
+    )["AvailabilityZones"]
+    assert len(zones) == 0
+
+
+@mock_aws
 def test_describe_availability_zones_dryrun():
     client = boto3.client("ec2", region_name="us-east-1")
 
     with pytest.raises(ClientError) as ex:
         client.describe_availability_zones(DryRun=True)
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(412)
-    ex.value.response["Error"]["Code"].should.equal("DryRunOperation")
-    ex.value.response["Error"]["Message"].should.equal(
-        "An error occurred (DryRunOperation) when calling the DescribeAvailabilityZones operation: Request would have succeeded, but DryRun flag is set"
-    )
+    assert_dryrun_error(ex)
 
 
-@mock_ec2
-def test_boto3_zoneId_in_availability_zones():
-    conn = boto3.client("ec2", "us-east-1")
+@mock_aws
+@pytest.mark.parametrize(
+    "region,shorthand",
+    [
+        # Regular regions
+        ("eu-central-1", "euc1-az"),
+        ("sa-east-1", "sae1-az"),
+        ("us-east-1", "use1-az"),
+        ("us-west-1", "usw1-az"),
+        # Regions never explicitly specified
+        ("ap-southeast-5", "apse5-az"),
+        # Regions with multiple cardinal points
+        ("ap-northeast-1", "apne1-az"),
+        ("ap-southeast-3", "apse3-az"),
+        # Edge cases with different partitions
+        ("cn-northwest-1", "cnnw1-az"),
+        ("us-gov-east-1", "usge1-az"),
+        ("us-gov-west-1", "usgw1-az"),
+    ],
+)
+def test_zoneId_in_availability_zones(region, shorthand):
+    conn = boto3.client("ec2", region)
     resp = conn.describe_availability_zones()
     for rec in resp["AvailabilityZones"]:
-        rec.get("ZoneId").should.contain("use1")
-    conn = boto3.client("ec2", "us-west-1")
-    resp = conn.describe_availability_zones()
-    for rec in resp["AvailabilityZones"]:
-        rec.get("ZoneId").should.contain("usw1")
+        assert shorthand in rec.get("ZoneId")

@@ -1,18 +1,16 @@
-from xml.etree import ElementTree as ET
 import datetime
+from typing import Any
+from xml.etree import ElementTree as ET
 
-from boto3 import Session
-
-from moto.core import BaseBackend, BaseModel
+from moto.core.base_backend import BackendDict, BaseBackend
+from moto.core.common_models import BaseModel
 
 from .resources import VOICE_DATA
 from .utils import make_arn_for_lexicon
 
-from moto.core import ACCOUNT_ID as DEFAULT_ACCOUNT_ID
-
 
 class Lexicon(BaseModel):
-    def __init__(self, name, content, region_name):
+    def __init__(self, name: str, content: str, account_id: str, region_name: str):
         self.name = name
         self.content = content
         self.size = 0
@@ -20,11 +18,11 @@ class Lexicon(BaseModel):
         self.last_modified = None
         self.language_code = None
         self.lexemes_count = 0
-        self.arn = make_arn_for_lexicon(DEFAULT_ACCOUNT_ID, name, region_name)
+        self.arn = make_arn_for_lexicon(account_id, name, region_name)
 
         self.update()
 
-    def update(self, content=None):
+    def update(self, content: str | None = None) -> None:
         if content is not None:
             self.content = content
 
@@ -32,7 +30,7 @@ class Lexicon(BaseModel):
         try:
             root = ET.fromstring(self.content)
             self.size = len(self.content)
-            self.last_modified = int(
+            self.last_modified = int(  # type: ignore
                 (
                     datetime.datetime.now() - datetime.datetime(1970, 1, 1)
                 ).total_seconds()
@@ -41,14 +39,14 @@ class Lexicon(BaseModel):
 
             for key, value in root.attrib.items():
                 if key.endswith("alphabet"):
-                    self.alphabet = value
+                    self.alphabet = value  # type: ignore
                 elif key.endswith("lang"):
-                    self.language_code = value
+                    self.language_code = value  # type: ignore
 
         except Exception as err:
-            raise ValueError("Failure parsing XML: {0}".format(err))
+            raise ValueError(f"Failure parsing XML: {err}")
 
-    def to_dict(self):
+    def to_dict(self) -> dict[str, Any]:
         return {
             "Attributes": {
                 "Alphabet": self.alphabet,
@@ -60,37 +58,36 @@ class Lexicon(BaseModel):
             }
         }
 
-    def __repr__(self):
-        return "<Lexicon {0}>".format(self.name)
+    def __repr__(self) -> str:
+        return f"<Lexicon {self.name}>"
 
 
 class PollyBackend(BaseBackend):
-    def __init__(self, region_name=None):
-        super(PollyBackend, self).__init__()
-        self.region_name = region_name
+    def __init__(self, region_name: str, account_id: str):
+        super().__init__(region_name, account_id)
+        self._lexicons: dict[str, Lexicon] = {}
 
-        self._lexicons = {}
-
-    def reset(self):
-        region_name = self.region_name
-        self.__dict__ = {}
-        self.__init__(region_name)
-
-    def describe_voices(self, language_code, next_token):
+    def describe_voices(self, language_code: str) -> list[dict[str, Any]]:
+        """
+        Pagination is not yet implemented
+        """
         if language_code is None:
             return VOICE_DATA
 
         return [item for item in VOICE_DATA if item["LanguageCode"] == language_code]
 
-    def delete_lexicon(self, name):
+    def delete_lexicon(self, name: str) -> None:
         # implement here
         del self._lexicons[name]
 
-    def get_lexicon(self, name):
+    def get_lexicon(self, name: str) -> Lexicon:
         # Raises KeyError
         return self._lexicons[name]
 
-    def list_lexicons(self, next_token):
+    def list_lexicons(self) -> list[dict[str, Any]]:
+        """
+        Pagination is not yet implemented
+        """
 
         result = []
 
@@ -102,21 +99,17 @@ class PollyBackend(BaseBackend):
 
         return result
 
-    def put_lexicon(self, name, content):
+    def put_lexicon(self, name: str, content: str) -> None:
         # If lexicon content is bad, it will raise ValueError
         if name in self._lexicons:
             # Regenerated all the stats from the XML
             # but keeps the ARN
-            self._lexicons.update(content)
+            self._lexicons[name].update(content)
         else:
-            lexicon = Lexicon(name, content, region_name=self.region_name)
+            lexicon = Lexicon(
+                name, content, self.account_id, region_name=self.region_name
+            )
             self._lexicons[name] = lexicon
 
 
-polly_backends = {}
-for region in Session().get_available_regions("polly"):
-    polly_backends[region] = PollyBackend(region)
-for region in Session().get_available_regions("polly", partition_name="aws-us-gov"):
-    polly_backends[region] = PollyBackend(region)
-for region in Session().get_available_regions("polly", partition_name="aws-cn"):
-    polly_backends[region] = PollyBackend(region)
+polly_backends = BackendDict(PollyBackend, "polly")

@@ -1,9 +1,8 @@
-from moto.core import ACCOUNT_ID
-
 """
 SES Feedback messages
 Extracted from https://docs.aws.amazon.com/ses/latest/DeveloperGuide/notification-contents.html
 """
+
 COMMON_MAIL = {
     "notificationType": "Bounce, Complaint, or Delivery.",
     "mail": {
@@ -12,7 +11,7 @@ COMMON_MAIL = {
         "source": "sender@example.com",
         "sourceArn": "arn:aws:ses:us-west-2:888888888888:identity/example.com",
         "sourceIp": "127.0.3.0",
-        "sendingAccountId": ACCOUNT_ID,
+        "sendingAccountId": None,
         "destination": ["recipient@example.com"],
         "headersTruncated": False,
         "headers": [

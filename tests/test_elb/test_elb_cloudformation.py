@@ -1,14 +1,12 @@
-import boto3
 import json
-import sure  # noqa # pylint: disable=unused-import
 
-from moto import mock_cloudformation, mock_ec2, mock_elb
+import boto3
+
+from moto import mock_aws
 from tests import EXAMPLE_AMI_ID
 
 
-@mock_ec2
-@mock_elb
-@mock_cloudformation
+@mock_aws
 def test_stack_elb_integration_with_attached_ec2_instances():
     elb_template = {
         "AWSTemplateFormatVersion": "2010-09-09",
@@ -18,7 +16,7 @@ def test_stack_elb_integration_with_attached_ec2_instances():
                 "Properties": {
                     "Instances": [{"Ref": "Ec2Instance1"}],
                     "LoadBalancerName": "test-elb",
-                    "AvailabilityZones": ["us-east-1"],
+                    "AvailabilityZones": ["us-west-1a"],
                     "Listeners": [
                         {
                             "InstancePort": "80",
@@ -46,12 +44,11 @@ def test_stack_elb_integration_with_attached_ec2_instances():
     reservations = ec2.describe_instances()["Reservations"][0]
     ec2_instance = reservations["Instances"][0]
 
-    load_balancer["Instances"][0]["InstanceId"].should.equal(ec2_instance["InstanceId"])
-    load_balancer["AvailabilityZones"].should.equal(["us-east-1"])
+    assert load_balancer["Instances"][0]["InstanceId"] == ec2_instance["InstanceId"]
+    assert load_balancer["AvailabilityZones"] == ["us-west-1a"]
 
 
-@mock_elb
-@mock_cloudformation
+@mock_aws
 def test_stack_elb_integration_with_health_check():
     elb_template = {
         "AWSTemplateFormatVersion": "2010-09-09",
@@ -60,7 +57,7 @@ def test_stack_elb_integration_with_health_check():
                 "Type": "AWS::ElasticLoadBalancing::LoadBalancer",
                 "Properties": {
                     "LoadBalancerName": "test-elb",
-                    "AvailabilityZones": ["us-west-1"],
+                    "AvailabilityZones": ["us-west-1b"],
                     "HealthCheck": {
                         "HealthyThreshold": "3",
                         "Interval": "5",
@@ -88,15 +85,14 @@ def test_stack_elb_integration_with_health_check():
     load_balancer = elb.describe_load_balancers()["LoadBalancerDescriptions"][0]
     health_check = load_balancer["HealthCheck"]
 
-    health_check.should.have.key("HealthyThreshold").equal(3)
-    health_check.should.have.key("Interval").equal(5)
-    health_check.should.have.key("Target").equal("HTTP:80/healthcheck")
-    health_check.should.have.key("Timeout").equal(4)
-    health_check.should.have.key("UnhealthyThreshold").equal(2)
+    assert health_check["HealthyThreshold"] == 3
+    assert health_check["Interval"] == 5
+    assert health_check["Target"] == "HTTP:80/healthcheck"
+    assert health_check["Timeout"] == 4
+    assert health_check["UnhealthyThreshold"] == 2
 
 
-@mock_elb
-@mock_cloudformation
+@mock_aws
 def test_stack_elb_integration_with_update():
     elb_template = {
         "AWSTemplateFormatVersion": "2010-09-09",
@@ -113,7 +109,19 @@ def test_stack_elb_integration_with_update():
                             "Protocol": "HTTP",
                         }
                     ],
-                    "Policies": {"Ref": "AWS::NoValue"},
+                    "Policies": [
+                        {
+                            "PolicyName": "My-SSLNegotiation-Policy",
+                            "PolicyType": "SSLNegotiationPolicyType",
+                            "InstancePorts": ["80"],
+                            "Attributes": [
+                                {
+                                    "Name": "Reference-Security-Policy",
+                                    "Value": "ELBSecurityPolicy-TLS-1-2-2017-01",
+                                }
+                            ],
+                        }
+                    ],
                 },
             }
         },
@@ -127,7 +135,8 @@ def test_stack_elb_integration_with_update():
     # then
     elb = boto3.client("elb", region_name="us-west-1")
     load_balancer = elb.describe_load_balancers()["LoadBalancerDescriptions"][0]
-    load_balancer["AvailabilityZones"].should.equal(["us-west-1a"])
+    assert load_balancer["AvailabilityZones"] == ["us-west-1a"]
+    assert load_balancer["Policies"]["OtherPolicies"] == ["My-SSLNegotiation-Policy"]
 
     # when
     elb_template["Resources"]["MyELB"]["Properties"]["AvailabilityZones"] = [
@@ -138,4 +147,4 @@ def test_stack_elb_integration_with_update():
 
     # then
     load_balancer = elb.describe_load_balancers()["LoadBalancerDescriptions"][0]
-    load_balancer["AvailabilityZones"].should.equal(["us-west-1b"])
+    assert load_balancer["AvailabilityZones"] == ["us-west-1b"]

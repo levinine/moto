@@ -1,159 +1,34 @@
 import copy
-import datetime
-import random
 import re
 import string
-from moto.core.utils import (
-    camelcase_to_underscores,
-    iso_8601_datetime_with_milliseconds,
-)
+from collections.abc import Iterator
+from typing import Any
+
+from moto.core.utils import iso_8601_datetime_with_milliseconds
+from moto.moto_api._internal import mock_random as random
 
 
-def random_id(size=13):
+def random_id(size: int = 13) -> str:
     chars = list(range(10)) + list(string.ascii_uppercase)
     return "".join(str(random.choice(chars)) for x in range(size))
 
 
-def random_cluster_id(size=13):
-    return "j-{0}".format(random_id())
+def random_cluster_id() -> str:
+    return f"j-{random_id()}"
 
 
-def random_step_id(size=13):
-    return "s-{0}".format(random_id())
+def random_step_id() -> str:
+    return f"s-{random_id()}"
 
 
-def random_instance_group_id(size=13):
-    return "i-{0}".format(random_id())
+def random_instance_group_id() -> str:
+    return f"i-{random_id()}"
 
 
-def steps_from_query_string(querystring_dict):
-    steps = []
-    for step in querystring_dict:
-        step["jar"] = step.pop("hadoop_jar_step._jar")
-        step["properties"] = dict(
-            (o["Key"], o["Value"]) for o in step.get("properties", [])
-        )
-        step["args"] = []
-        idx = 1
-        keyfmt = "hadoop_jar_step._args.member.{0}"
-        while keyfmt.format(idx) in step:
-            step["args"].append(step.pop(keyfmt.format(idx)))
-            idx += 1
-        steps.append(step)
-    return steps
-
-
-class Unflattener:
-    @staticmethod
-    def unflatten_complex_params(input_dict, param_name):
-        """Function to unflatten (portions of) dicts with complex keys.  The moto request parser flattens the incoming
-        request bodies, which is generally helpful, but for nested dicts/lists can result in a hard-to-manage
-        parameter exposion.  This function allows one to selectively unflatten a set of dict keys, replacing them
-        with a deep dist/list structure named identically to the root component in the complex name.
-
-        Complex keys are composed of multiple components
-        separated by periods. Components may be prefixed with _, which is stripped.  Lists indexes are represented
-        with two components, 'member' and the index number."""
-        items_to_process = {}
-        for k in input_dict.keys():
-            if k.startswith(param_name):
-                items_to_process[k] = input_dict[k]
-        if len(items_to_process) == 0:
-            return
-
-        for k in items_to_process.keys():
-            del input_dict[k]
-
-        for k in items_to_process.keys():
-            Unflattener._set_deep(k, input_dict, items_to_process[k])
-
-    @staticmethod
-    def _set_deep(complex_key, container, value):
-        keys = complex_key.split(".")
-        keys.reverse()
-
-        while len(keys) > 0:
-            if len(keys) == 1:
-                key = keys.pop().strip("_")
-                Unflattener._add_to_container(container, key, value)
-            else:
-                key = keys.pop().strip("_")
-                if keys[-1] == "member":
-                    keys.pop()
-                    if not Unflattener._key_in_container(container, key):
-                        container = Unflattener._add_to_container(container, key, [])
-                    else:
-                        container = Unflattener._get_child(container, key)
-                else:
-                    if not Unflattener._key_in_container(container, key):
-                        container = Unflattener._add_to_container(container, key, {})
-                    else:
-                        container = Unflattener._get_child(container, key)
-
-    @staticmethod
-    def _add_to_container(container, key, value):
-        if type(container) is dict:
-            container[key] = value
-        elif type(container) is list:
-            i = int(key)
-            while len(container) < i:
-                container.append(None)
-            container[i - 1] = value
-        return value
-
-    @staticmethod
-    def _get_child(container, key):
-        if type(container) is dict:
-            return container[key]
-        elif type(container) is list:
-            i = int(key)
-            return container[i - 1]
-
-    @staticmethod
-    def _key_in_container(container, key):
-        if type(container) is dict:
-            return key in container
-        elif type(container) is list:
-            i = int(key)
-            return len(container) >= i
-
-
-class CamelToUnderscoresWalker:
-    """A class to convert the keys in dict/list hierarchical data structures from CamelCase to snake_case (underscores)"""
-
-    @staticmethod
-    def parse(x):
-        if isinstance(x, dict):
-            return CamelToUnderscoresWalker.parse_dict(x)
-        elif isinstance(x, list):
-            return CamelToUnderscoresWalker.parse_list(x)
-        else:
-            return CamelToUnderscoresWalker.parse_scalar(x)
-
-    @staticmethod
-    def parse_dict(x):
-        temp = {}
-        for key in x.keys():
-            temp[camelcase_to_underscores(key)] = CamelToUnderscoresWalker.parse(x[key])
-        return temp
-
-    @staticmethod
-    def parse_list(x):
-        temp = []
-        for i in x:
-            temp.append(CamelToUnderscoresWalker.parse(i))
-        return temp
-
-    @staticmethod
-    def parse_scalar(x):
-        return x
-
-
-class ReleaseLabel(object):
-
+class ReleaseLabel:
     version_re = re.compile(r"^emr-(\d+)\.(\d+)\.(\d+)$")
 
-    def __init__(self, release_label):
+    def __init__(self, release_label: str):
         major, minor, patch = self.parse(release_label)
 
         self.major = major
@@ -161,33 +36,29 @@ class ReleaseLabel(object):
         self.patch = patch
 
     @classmethod
-    def parse(cls, release_label):
+    def parse(cls, release_label: str) -> tuple[int, int, int]:
         if not release_label:
-            raise ValueError("Invalid empty ReleaseLabel: %r" % release_label)
+            raise ValueError(f"Invalid empty ReleaseLabel: {release_label}")
 
         match = cls.version_re.match(release_label)
         if not match:
-            raise ValueError("Invalid ReleaseLabel: %r" % release_label)
+            raise ValueError(f"Invalid ReleaseLabel: {release_label}")
 
         major, minor, patch = match.groups()
 
-        major = int(major)
-        minor = int(minor)
-        patch = int(patch)
+        return int(major), int(minor), int(patch)
 
-        return major, minor, patch
-
-    def __str__(self):
-        version = "emr-%d.%d.%d" % (self.major, self.minor, self.patch)
+    def __str__(self) -> str:
+        version = f"emr-{self.major}.{self.minor}.{self.patch}"
         return version
 
-    def __repr__(self):
-        return "%s(%r)" % (self.__class__.__name__, str(self))
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}({str(self)})"
 
-    def __iter__(self):
-        return iter((self.major, self.minor, self.patch))
+    def __iter__(self) -> Iterator[tuple[int, int, int]]:
+        return iter((self.major, self.minor, self.patch))  # type: ignore
 
-    def __eq__(self, other):
+    def __eq__(self, other: Any) -> bool:
         if not isinstance(other, self.__class__):
             return NotImplemented
         return (
@@ -196,47 +67,47 @@ class ReleaseLabel(object):
             and self.patch == other.patch
         )
 
-    def __ne__(self, other):
+    def __ne__(self, other: Any) -> bool:
         if not isinstance(other, self.__class__):
             return NotImplemented
         return tuple(self) != tuple(other)
 
-    def __lt__(self, other):
+    def __lt__(self, other: Any) -> bool:
         if not isinstance(other, self.__class__):
             return NotImplemented
         return tuple(self) < tuple(other)
 
-    def __le__(self, other):
+    def __le__(self, other: Any) -> bool:
         if not isinstance(other, self.__class__):
             return NotImplemented
         return tuple(self) <= tuple(other)
 
-    def __gt__(self, other):
+    def __gt__(self, other: Any) -> bool:
         if not isinstance(other, self.__class__):
             return NotImplemented
         return tuple(self) > tuple(other)
 
-    def __ge__(self, other):
+    def __ge__(self, other: Any) -> bool:
         if not isinstance(other, self.__class__):
             return NotImplemented
         return tuple(self) >= tuple(other)
 
 
-class EmrManagedSecurityGroup(object):
+class EmrManagedSecurityGroup:
     class Kind:
         MASTER = "Master"
         SLAVE = "Slave"
         SERVICE = "Service"
 
-    kind = None
+    kind = ""
 
     group_name = ""
     short_name = ""
     desc_fmt = "{short_name} for Elastic MapReduce created on {created}"
 
     @classmethod
-    def description(cls):
-        created = iso_8601_datetime_with_milliseconds(datetime.datetime.now())
+    def description(cls) -> str:
+        created = iso_8601_datetime_with_milliseconds()
         return cls.desc_fmt.format(short_name=cls.short_name, created=created)
 
 
@@ -258,8 +129,7 @@ class EmrManagedServiceAccessSecurityGroup(EmrManagedSecurityGroup):
     short_name = "Service access"
 
 
-class EmrSecurityGroupManager(object):
-
+class EmrSecurityGroupManager:
     MANAGED_RULES_EGRESS = [
         {
             "group_name_or_id": EmrManagedSecurityGroup.Kind.MASTER,
@@ -383,13 +253,16 @@ class EmrSecurityGroupManager(object):
         },
     ]
 
-    def __init__(self, ec2_backend, vpc_id):
+    def __init__(self, ec2_backend: Any, vpc_id: str):
         self.ec2 = ec2_backend
         self.vpc_id = vpc_id
 
     def manage_security_groups(
-        self, master_security_group, slave_security_group, service_access_security_group
-    ):
+        self,
+        master_security_group: str,
+        slave_security_group: str,
+        service_access_security_group: str,
+    ) -> tuple[Any, Any, Any]:
         group_metadata = [
             (
                 master_security_group,
@@ -407,7 +280,7 @@ class EmrSecurityGroupManager(object):
                 EmrManagedServiceAccessSecurityGroup,
             ),
         ]
-        managed_groups = {}
+        managed_groups: dict[str, Any] = {}
         for name, kind, defaults in group_metadata:
             managed_groups[kind] = self._get_or_create_sg(name, defaults)
         self._add_rules_to(managed_groups)
@@ -417,7 +290,7 @@ class EmrSecurityGroupManager(object):
             managed_groups[EmrManagedSecurityGroup.Kind.SERVICE],
         )
 
-    def _get_or_create_sg(self, sg_id, defaults):
+    def _get_or_create_sg(self, sg_id: str, defaults: Any) -> Any:
         find_sg = self.ec2.get_security_group_by_name_or_id
         create_sg = self.ec2.create_security_group
         group_id_or_name = sg_id or defaults.group_name
@@ -425,12 +298,12 @@ class EmrSecurityGroupManager(object):
         if group is None:
             if group_id_or_name != defaults.group_name:
                 raise ValueError(
-                    "The security group '{}' does not exist".format(group_id_or_name)
+                    f"The security group '{group_id_or_name}' does not exist"
                 )
             group = create_sg(defaults.group_name, defaults.description(), self.vpc_id)
         return group
 
-    def _add_rules_to(self, managed_groups):
+    def _add_rules_to(self, managed_groups: dict[str, Any]) -> None:
         rules_metadata = [
             (self.MANAGED_RULES_EGRESS, self.ec2.authorize_security_group_egress),
             (self.MANAGED_RULES_INGRESS, self.ec2.authorize_security_group_ingress),
@@ -447,7 +320,9 @@ class EmrSecurityGroupManager(object):
                     pass
 
     @staticmethod
-    def _render_rules(rules, managed_groups):
+    def _render_rules(  # type: ignore[misc]
+        rules: Any, managed_groups: dict[str, Any]
+    ) -> list[dict[str, Any]]:
         rendered_rules = copy.deepcopy(rules)
         for rule in rendered_rules:
             rule["group_name_or_id"] = managed_groups[rule["group_name_or_id"]].id

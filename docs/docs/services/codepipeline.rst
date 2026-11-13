@@ -12,17 +12,6 @@
 codepipeline
 ============
 
-|start-h3| Example usage |end-h3|
-
-.. sourcecode:: python
-
-            @mock_codepipeline
-            def test_codepipeline_behaviour:
-                boto3.client("codepipeline")
-                ...
-
-
-
 |start-h3| Implemented features for this service |end-h3|
 
 - [ ] acknowledge_job
@@ -38,15 +27,19 @@ codepipeline
 - [ ] get_action_type
 - [ ] get_job_details
 - [X] get_pipeline
-- [ ] get_pipeline_execution
+- [X] get_pipeline_execution
 - [ ] get_pipeline_state
 - [ ] get_third_party_job_details
 - [ ] list_action_executions
 - [ ] list_action_types
-- [ ] list_pipeline_executions
+- [ ] list_deploy_action_execution_targets
+- [X] list_pipeline_executions
 - [X] list_pipelines
+- [ ] list_rule_executions
+- [ ] list_rule_types
 - [X] list_tags_for_resource
 - [ ] list_webhooks
+- [ ] override_stage_condition
 - [ ] poll_for_jobs
 - [ ] poll_for_third_party_jobs
 - [ ] put_action_revision
@@ -58,7 +51,8 @@ codepipeline
 - [ ] put_webhook
 - [ ] register_webhook_with_third_party
 - [ ] retry_stage_execution
-- [ ] start_pipeline_execution
+- [ ] rollback_stage
+- [X] start_pipeline_execution
 - [ ] stop_pipeline_execution
 - [X] tag_resource
 - [X] untag_resource

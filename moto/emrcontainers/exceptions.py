@@ -1,9 +1,11 @@
 """Exceptions raised by the emrcontainers service."""
-from moto.core.exceptions import JsonRESTError
+
+from moto.core.exceptions import ServiceException
 
 
-class ResourceNotFoundException(JsonRESTError):
-    code = 400
+class EMRContainersException(ServiceException):
+    pass
 
-    def __init__(self, resource):
-        super().__init__("ResourceNotFoundException", resource)
+
+class ResourceNotFoundException(EMRContainersException):
+    code = "ResourceNotFoundException"

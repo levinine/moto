@@ -1,12 +1,12 @@
 import json
+import unittest
 from copy import deepcopy
 
 import pytest
-import sure  # noqa # pylint: disable=unused-import
 
 import moto.server as server
-from moto import mock_eks
-from moto.core import ACCOUNT_ID
+from moto import mock_aws, settings
+from moto.core import DEFAULT_ACCOUNT_ID as ACCOUNT_ID
 from moto.eks.exceptions import ResourceInUseException, ResourceNotFoundException
 from moto.eks.models import (
     CLUSTER_EXISTS_MSG,
@@ -18,26 +18,25 @@ from moto.eks.models import (
 from moto.eks.responses import DEFAULT_MAX_RESULTS, DEFAULT_NEXT_TOKEN
 from tests.test_eks.test_eks import all_arn_values_should_be_valid
 from tests.test_eks.test_eks_constants import (
-    AddonAttributes,
-    ClusterAttributes,
     DEFAULT_ENCODING,
     DEFAULT_HTTP_HEADERS,
-    DEFAULT_REGION,
+    NODEROLE_ARN_KEY,
+    NODEROLE_ARN_VALUE,
+    PARTITIONS,
+    ROLE_ARN_KEY,
+    ROLE_ARN_VALUE,
+    SERVICE,
+    SUBNETS_KEY,
+    SUBNETS_VALUE,
+    AddonAttributes,
+    ClusterAttributes,
     Endpoints,
     FargateProfileAttributes,
     HttpHeaders,
     NodegroupAttributes,
-    NODEROLE_ARN_KEY,
-    NODEROLE_ARN_VALUE,
-    PARTITIONS,
     RegExTemplates,
     ResponseAttributes,
-    ROLE_ARN_KEY,
-    ROLE_ARN_VALUE,
-    SERVICE,
     StatusCodes,
-    SUBNETS_KEY,
-    SUBNETS_VALUE,
 )
 
 """
@@ -45,6 +44,7 @@ Test the different server responses
 """
 
 NAME_LIST = ["foo", "bar", "baz", "qux"]
+DEFAULT_REGION = "us-east-1"
 
 
 class TestCluster:
@@ -79,22 +79,24 @@ class TestNodegroup:
     ]
 
 
-@pytest.fixture(autouse=True)
-def test_client():
-    backend = server.create_backend_app(SERVICE)
+@pytest.fixture(autouse=True, name="test_client")
+def fixture_test_client():
+    if settings.TEST_SERVER_MODE:
+        raise unittest.SkipTest("No point in testing this in ServerMode")
+    backend = server.create_backend_app(service=SERVICE)
     yield backend.test_client()
 
 
-@pytest.fixture(scope="function")
-def create_cluster(test_client):
+@pytest.fixture(scope="function", name="create_cluster")
+def fixtue_create_cluster(test_client):
     def create_and_verify_cluster(client, name):
         """Creates one valid cluster and verifies return status code 200."""
         data = deepcopy(TestCluster.data)
         data.update(name=name)
         response = client.post(
-            TestCluster.endpoint, data=json.dumps(data), headers=DEFAULT_HTTP_HEADERS,
+            TestCluster.endpoint, data=json.dumps(data), headers=DEFAULT_HTTP_HEADERS
         )
-        response.status_code.should.equal(StatusCodes.OK)
+        assert response.status_code == StatusCodes.OK
 
         return json.loads(response.data.decode(DEFAULT_ENCODING))[
             ResponseAttributes.CLUSTER
@@ -106,16 +108,16 @@ def create_cluster(test_client):
     yield _execute
 
 
-@pytest.fixture(scope="function", autouse=True)
-def create_nodegroup(test_client):
+@pytest.fixture(scope="function", autouse=True, name="create_nodegroup")
+def fixture_create_nodegroup(test_client):
     def create_and_verify_nodegroup(client, name):
         """Creates one valid nodegroup and verifies return status code 200."""
         data = deepcopy(TestNodegroup.data)
         data.update(nodegroupName=name)
         response = client.post(
-            TestNodegroup.endpoint, data=json.dumps(data), headers=DEFAULT_HTTP_HEADERS,
+            TestNodegroup.endpoint, data=json.dumps(data), headers=DEFAULT_HTTP_HEADERS
         )
-        response.status_code.should.equal(StatusCodes.OK)
+        assert response.status_code == StatusCodes.OK
 
         return json.loads(response.data.decode(DEFAULT_ENCODING))[
             ResponseAttributes.NODEGROUP
@@ -127,11 +129,11 @@ def create_nodegroup(test_client):
     yield _execute
 
 
-@mock_eks
+@mock_aws
 def test_eks_create_single_cluster(create_cluster):
     result_cluster = create_cluster()
 
-    result_cluster[ClusterAttributes.NAME].should.equal(TestCluster.cluster_name)
+    assert result_cluster[ClusterAttributes.NAME] == TestCluster.cluster_name
     all_arn_values_should_be_valid(
         expected_arn_values=TestCluster.expected_arn_values,
         pattern=RegExTemplates.CLUSTER_ARN,
@@ -139,7 +141,7 @@ def test_eks_create_single_cluster(create_cluster):
     )
 
 
-@mock_eks
+@mock_aws
 def test_eks_create_multiple_clusters_with_same_name(test_client, create_cluster):
     create_cluster()
     expected_exception = ResourceInUseException
@@ -160,7 +162,7 @@ def test_eks_create_multiple_clusters_with_same_name(test_client, create_cluster
     should_return_expected_exception(response, expected_exception, expected_data)
 
 
-@mock_eks
+@mock_aws
 def test_eks_create_nodegroup_without_cluster(test_client):
     expected_exception = ResourceNotFoundException
     expected_msg = CLUSTER_NOT_FOUND_MSG.format(clusterName=TestCluster.cluster_name)
@@ -180,13 +182,13 @@ def test_eks_create_nodegroup_without_cluster(test_client):
     should_return_expected_exception(response, expected_exception, expected_data)
 
 
-@mock_eks
+@mock_aws
 def test_eks_create_nodegroup_on_existing_cluster(create_cluster, create_nodegroup):
     create_cluster()
     result_data = create_nodegroup()
 
-    result_data[NodegroupAttributes.NODEGROUP_NAME].should.equal(
-        TestNodegroup.nodegroup_name
+    assert (
+        result_data[NodegroupAttributes.NODEGROUP_NAME] == TestNodegroup.nodegroup_name
     )
     all_arn_values_should_be_valid(
         expected_arn_values=TestNodegroup.expected_arn_values,
@@ -195,7 +197,7 @@ def test_eks_create_nodegroup_on_existing_cluster(create_cluster, create_nodegro
     )
 
 
-@mock_eks
+@mock_aws
 def test_eks_create_multiple_nodegroups_with_same_name(
     test_client, create_cluster, create_nodegroup
 ):
@@ -222,7 +224,7 @@ def test_eks_create_multiple_nodegroups_with_same_name(
     should_return_expected_exception(response, expected_exception, expected_data)
 
 
-@mock_eks
+@mock_aws
 def test_eks_list_clusters(test_client, create_cluster):
     [create_cluster(name) for name in NAME_LIST]
 
@@ -235,12 +237,12 @@ def test_eks_list_clusters(test_client, create_cluster):
         ResponseAttributes.CLUSTERS
     ]
 
-    response.status_code.should.equal(StatusCodes.OK)
-    len(result_data).should.equal(len(NAME_LIST))
-    sorted(result_data).should.equal(sorted(NAME_LIST))
+    assert response.status_code == StatusCodes.OK
+    assert len(result_data) == len(NAME_LIST)
+    assert sorted(result_data) == sorted(NAME_LIST)
 
 
-@mock_eks
+@mock_aws
 def test_eks_list_nodegroups(test_client, create_cluster, create_nodegroup):
     create_cluster()
     [create_nodegroup(name) for name in NAME_LIST]
@@ -256,12 +258,12 @@ def test_eks_list_nodegroups(test_client, create_cluster, create_nodegroup):
         ResponseAttributes.NODEGROUPS
     ]
 
-    response.status_code.should.equal(StatusCodes.OK)
-    sorted(result_data).should.equal(sorted(NAME_LIST))
-    len(result_data).should.equal(len(NAME_LIST))
+    assert response.status_code == StatusCodes.OK
+    assert sorted(result_data) == sorted(NAME_LIST)
+    assert len(result_data) == len(NAME_LIST)
 
 
-@mock_eks
+@mock_aws
 def test_eks_describe_existing_cluster(test_client, create_cluster):
     create_cluster()
 
@@ -272,8 +274,10 @@ def test_eks_describe_existing_cluster(test_client, create_cluster):
         ResponseAttributes.CLUSTER
     ]
 
-    response.status_code.should.equal(StatusCodes.OK)
-    result_data[ClusterAttributes.NAME].should.equal(TestCluster.cluster_name)
+    assert response.status_code == StatusCodes.OK
+    assert result_data[ClusterAttributes.NAME] == TestCluster.cluster_name
+    assert result_data[ClusterAttributes.ENCRYPTION_CONFIG] == []
+    assert ClusterAttributes.REMOTE_NETWORK_CONFIG not in result_data
     all_arn_values_should_be_valid(
         expected_arn_values=TestCluster.expected_arn_values,
         pattern=RegExTemplates.CLUSTER_ARN,
@@ -281,7 +285,7 @@ def test_eks_describe_existing_cluster(test_client, create_cluster):
     )
 
 
-@mock_eks
+@mock_aws
 def test_eks_describe_nonexisting_cluster(test_client):
     expected_exception = ResourceNotFoundException
     expected_msg = CLUSTER_NOT_FOUND_MSG.format(clusterName=TestCluster.cluster_name)
@@ -300,7 +304,7 @@ def test_eks_describe_nonexisting_cluster(test_client):
     should_return_expected_exception(response, expected_exception, expected_data)
 
 
-@mock_eks
+@mock_aws
 def test_eks_describe_existing_nodegroup(test_client, create_cluster, create_nodegroup):
     create_cluster()
     create_nodegroup()
@@ -315,10 +319,10 @@ def test_eks_describe_existing_nodegroup(test_client, create_cluster, create_nod
         ResponseAttributes.NODEGROUP
     ]
 
-    response.status_code.should.equal(StatusCodes.OK)
-    result_data[ClusterAttributes.CLUSTER_NAME].should.equal(TestNodegroup.cluster_name)
-    result_data[NodegroupAttributes.NODEGROUP_NAME].should.equal(
-        TestNodegroup.nodegroup_name
+    assert response.status_code == StatusCodes.OK
+    assert result_data[ClusterAttributes.CLUSTER_NAME] == TestNodegroup.cluster_name
+    assert (
+        result_data[NodegroupAttributes.NODEGROUP_NAME] == TestNodegroup.nodegroup_name
     )
     all_arn_values_should_be_valid(
         expected_arn_values=TestNodegroup.expected_arn_values,
@@ -327,7 +331,7 @@ def test_eks_describe_existing_nodegroup(test_client, create_cluster, create_nod
     )
 
 
-@mock_eks
+@mock_aws
 def test_eks_describe_nonexisting_nodegroup(test_client, create_cluster):
     create_cluster()
     expected_exception = ResourceNotFoundException
@@ -353,7 +357,7 @@ def test_eks_describe_nonexisting_nodegroup(test_client, create_cluster):
     should_return_expected_exception(response, expected_exception, expected_data)
 
 
-@mock_eks
+@mock_aws
 def test_eks_describe_nodegroup_nonexisting_cluster(test_client):
     expected_exception = ResourceNotFoundException
     expected_msg = CLUSTER_NOT_FOUND_MSG.format(clusterName=TestNodegroup.cluster_name)
@@ -375,7 +379,7 @@ def test_eks_describe_nodegroup_nonexisting_cluster(test_client):
     should_return_expected_exception(response, expected_exception, expected_data)
 
 
-@mock_eks
+@mock_aws
 def test_eks_delete_cluster(test_client, create_cluster):
     create_cluster()
 
@@ -386,8 +390,8 @@ def test_eks_delete_cluster(test_client, create_cluster):
         ResponseAttributes.CLUSTER
     ]
 
-    response.status_code.should.equal(StatusCodes.OK)
-    result_data[ClusterAttributes.NAME].should.equal(TestCluster.cluster_name)
+    assert response.status_code == StatusCodes.OK
+    assert result_data[ClusterAttributes.NAME] == TestCluster.cluster_name
     all_arn_values_should_be_valid(
         expected_arn_values=TestCluster.expected_arn_values,
         pattern=RegExTemplates.CLUSTER_ARN,
@@ -395,7 +399,7 @@ def test_eks_delete_cluster(test_client, create_cluster):
     )
 
 
-@mock_eks
+@mock_aws
 def test_eks_delete_nonexisting_cluster(test_client):
     expected_exception = ResourceNotFoundException
     expected_msg = CLUSTER_NOT_FOUND_MSG.format(clusterName=TestCluster.cluster_name)
@@ -414,7 +418,7 @@ def test_eks_delete_nonexisting_cluster(test_client):
     should_return_expected_exception(response, expected_exception, expected_data)
 
 
-@mock_eks
+@mock_aws
 def test_eks_delete_cluster_with_nodegroups(
     test_client, create_cluster, create_nodegroup
 ):
@@ -436,7 +440,7 @@ def test_eks_delete_cluster_with_nodegroups(
     should_return_expected_exception(response, expected_exception, expected_data)
 
 
-@mock_eks
+@mock_aws
 def test_eks_delete_nodegroup(test_client, create_cluster, create_nodegroup):
     create_cluster()
     create_nodegroup()
@@ -451,10 +455,10 @@ def test_eks_delete_nodegroup(test_client, create_cluster, create_nodegroup):
         ResponseAttributes.NODEGROUP
     ]
 
-    response.status_code.should.equal(StatusCodes.OK)
-    result_data[ClusterAttributes.CLUSTER_NAME].should.equal(TestNodegroup.cluster_name)
-    result_data[NodegroupAttributes.NODEGROUP_NAME].should.equal(
-        TestNodegroup.nodegroup_name
+    assert response.status_code == StatusCodes.OK
+    assert result_data[ClusterAttributes.CLUSTER_NAME] == TestNodegroup.cluster_name
+    assert (
+        result_data[NodegroupAttributes.NODEGROUP_NAME] == TestNodegroup.nodegroup_name
     )
     all_arn_values_should_be_valid(
         expected_arn_values=TestNodegroup.expected_arn_values,
@@ -463,7 +467,7 @@ def test_eks_delete_nodegroup(test_client, create_cluster, create_nodegroup):
     )
 
 
-@mock_eks
+@mock_aws
 def test_eks_delete_nonexisting_nodegroup(test_client, create_cluster):
     create_cluster()
     expected_exception = ResourceNotFoundException
@@ -489,7 +493,7 @@ def test_eks_delete_nonexisting_nodegroup(test_client, create_cluster):
     should_return_expected_exception(response, expected_exception, expected_data)
 
 
-@mock_eks
+@mock_aws
 def test_eks_delete_nodegroup_nonexisting_cluster(test_client):
     expected_exception = ResourceNotFoundException
     expected_msg = CLUSTER_NOT_FOUND_MSG.format(
@@ -517,6 +521,8 @@ def test_eks_delete_nodegroup_nonexisting_cluster(test_client):
 def should_return_expected_exception(response, expected_exception, expected_data):
     result_data = json.loads(response.data.decode(DEFAULT_ENCODING))
 
-    response.status_code.should.equal(expected_exception.STATUS)
-    response.headers.get(HttpHeaders.ErrorType).should.equal(expected_exception.TYPE)
-    result_data.should.equal(expected_data)
+    expected_status = {ResourceInUseException: 409, ResourceNotFoundException: 404}
+    assert response.status_code == expected_status[expected_exception]
+    assert response.headers.get(HttpHeaders.ErrorType) == expected_exception.code
+    for key, expected_value in expected_data.items():
+        assert result_data.get(key) == expected_value

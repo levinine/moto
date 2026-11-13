@@ -1,48 +1,56 @@
-from moto.core.responses import BaseResponse
-from .models import iotdata_backends
 import json
 from urllib.parse import unquote
 
+from moto.core.responses import BaseResponse
+
+from .models import IoTDataPlaneBackend, iotdata_backends
+
 
 class IoTDataPlaneResponse(BaseResponse):
-    SERVICE_NAME = "iot-data"
+    use_raw_body = True
+
+    def __init__(self) -> None:
+        super().__init__(service_name="iot-data")
 
     @property
-    def iotdata_backend(self):
-        return iotdata_backends[self.region]
+    def iotdata_backend(self) -> IoTDataPlaneBackend:
+        return iotdata_backends[self.current_account][self.region]
 
-    def update_thing_shadow(self):
+    def update_thing_shadow(self) -> str:
         thing_name = self._get_param("thingName")
-        payload = self.body
+        shadow_name = self.querystring.get("name", [None])[0]
         payload = self.iotdata_backend.update_thing_shadow(
-            thing_name=thing_name, payload=payload
+            thing_name=thing_name,
+            payload=self.body,
+            shadow_name=shadow_name,
         )
         return json.dumps(payload.to_response_dict())
 
-    def get_thing_shadow(self):
+    def get_thing_shadow(self) -> str:
         thing_name = self._get_param("thingName")
-        payload = self.iotdata_backend.get_thing_shadow(thing_name=thing_name)
+        shadow_name = self.querystring.get("name", [None])[0]
+        payload = self.iotdata_backend.get_thing_shadow(
+            thing_name=thing_name, shadow_name=shadow_name
+        )
         return json.dumps(payload.to_dict())
 
-    def delete_thing_shadow(self):
+    def delete_thing_shadow(self) -> str:
         thing_name = self._get_param("thingName")
-        payload = self.iotdata_backend.delete_thing_shadow(thing_name=thing_name)
+        shadow_name = self.querystring.get("name", [None])[0]
+        payload = self.iotdata_backend.delete_thing_shadow(
+            thing_name=thing_name, shadow_name=shadow_name
+        )
         return json.dumps(payload.to_dict())
 
-    def dispatch_publish(self, request, full_url, headers):
-        # This endpoint requires specialized handling because it has
-        # a uri parameter containing forward slashes that is not
-        # correctly url encoded when we're running in server mode.
+    def publish(self) -> str:
+        topic = self.path.split("/topics/")[-1]
+        # a uri parameter containing forward slashes is not correctly url encoded when we're running in server mode.
         # https://github.com/pallets/flask/issues/900
-        self.setup_class(request, full_url, headers)
-        self.querystring["Action"] = ["Publish"]
-        topic = self.path.partition("/topics/")[-1]
-        self.querystring["target"] = [unquote(topic)] if "%" in topic else [topic]
-        return self.call_action()
+        topic = unquote(topic) if "%" in topic else topic
+        self.iotdata_backend.publish(topic=topic, payload=self.body)
+        return json.dumps({})
 
-    def publish(self):
-        topic = self._get_param("topic")
-        qos = self._get_int_param("qos")
-        payload = self._get_param("payload")
-        self.iotdata_backend.publish(topic=topic, qos=qos, payload=payload)
-        return json.dumps(dict())
+    def list_named_shadows_for_thing(self) -> str:
+        thing_name = self._get_param("thingName")
+        shadows = self.iotdata_backend.list_named_shadows_for_thing(thing_name)
+        return json.dumps({"results": shadows})

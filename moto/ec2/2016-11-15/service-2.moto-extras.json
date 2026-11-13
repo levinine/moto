@@ -1,0 +1,34 @@
+{
+  "version": 1.0,
+  "merge": {
+    "shapes": {
+      "AuthFailure": {
+        "type": "structure",
+        "members": {},
+        "error": {
+          "code": "AuthFailure",
+          "httpStatusCode": 401
+        },
+        "exception": true
+      },
+      "DryRunOperation": {
+        "type": "structure",
+        "members": {},
+        "error": {
+          "code": "DryRunOperation",
+          "httpStatusCode": 412
+        },
+        "exception": true
+      },
+      "OperationNotPermitted": {
+        "type": "structure",
+        "members": {},
+        "error": {
+          "code": "OperationNotPermitted",
+          "httpStatusCode": 400
+        },
+        "exception": true
+      }
+    }
+  }
+}

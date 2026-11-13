@@ -1,44 +1,84 @@
-import datetime
-import uuid
+import base64
+import contextlib
 import json
-
-import requests
 import re
-
-from boto3 import Session
-
 from collections import OrderedDict
-from moto.core import BaseBackend, BaseModel, CloudFormationModel
+from collections.abc import Iterable, Iterator
+from datetime import timedelta
+from functools import lru_cache
+from typing import Any, cast
+
+import cryptography
+import requests
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from cryptography.x509 import Name, NameAttribute
+from cryptography.x509.oid import NameOID
+
+from moto.core import DEFAULT_ACCOUNT_ID
+from moto.core.base_backend import BackendDict, BaseBackend
+from moto.core.common_models import BaseModel, CloudFormationModel
+from moto.core.resource_tagging import TaggableResourcesMixin, TaggedResource
 from moto.core.utils import (
-    iso_8601_datetime_with_milliseconds,
     camelcase_to_underscores,
+    iso_8601_datetime_with_milliseconds,
+    unix_time,
+    utcnow,
 )
+from moto.moto_api._internal import mock_random
 from moto.sqs import sqs_backends
+from moto.sqs.exceptions import MissingParameter, QueueDoesNotExist
+from moto.sqs.models import SQSBackend
+from moto.utilities.arns import parse_arn
+from moto.utilities.paginator import paginate
+from moto.utilities.utils import get_partition
 
 from .exceptions import (
-    SNSNotFoundError,
+    BatchEntryIdsNotDistinct,
     DuplicateSnsEndpointError,
+    InternalError,
+    InvalidParameterValue,
+    ResourceNotFoundError,
     SnsEndpointDisabled,
     SNSInvalidParameter,
-    InvalidParameterValue,
-    InternalError,
-    ResourceNotFoundError,
+    SNSNotFoundError,
     TagLimitExceededError,
+    TooManyEntriesInBatchRequest,
+    TopicNotFound,
 )
-from .utils import make_arn_for_topic, make_arn_for_subscription, is_e164
-
-from moto.core import ACCOUNT_ID as DEFAULT_ACCOUNT_ID
+from .utils import (
+    FilterPolicyMatcher,
+    is_e164,
+    make_arn_for_subscription,
+    make_arn_for_topic,
+)
 
 DEFAULT_PAGE_SIZE = 100
 MAXIMUM_MESSAGE_LENGTH = 262144  # 256 KiB
 MAXIMUM_SMS_MESSAGE_BYTES = 1600  # Amazon limit for a single publish SMS action
 
+PAGINATION_MODEL = {
+    "list_config_service_resources": {
+        "input_token": "next_token",
+        "limit_key": "limit",
+        "limit_default": 100,
+        "unique_attribute": "id",
+    }
+}
+
+
+class SMS(BaseModel):
+    def __init__(self, message_id: str, phone_number: str, message: str):
+        self.message_id = message_id
+        self.phone_number = phone_number
+        self.message = message
+
 
 class Topic(CloudFormationModel):
-    def __init__(self, name, sns_backend):
+    def __init__(self, name: str, sns_backend: "SNSBackend"):
         self.name = name
         self.sns_backend = sns_backend
-        self.account_id = DEFAULT_ACCOUNT_ID
+        self.account_id = sns_backend.account_id
         self.display_name = ""
         self.delivery_policy = ""
         self.kms_master_key_id = ""
@@ -48,31 +88,51 @@ class Topic(CloudFormationModel):
         self.subscriptions_pending = 0
         self.subscriptions_confimed = 0
         self.subscriptions_deleted = 0
+        self.sent_notifications: list[
+            tuple[str, str, str | None, dict[str, Any] | None, str | None]
+        ] = []
 
         self._policy_json = self._create_default_topic_policy(
             sns_backend.region_name, self.account_id, name
         )
-        self._tags = {}
-        self.fifo_topic = "false"
-        self.content_based_deduplication = "false"
+        self._tags: dict[str, str] = {}
+        self.fifo_topic = False
+        self.content_based_deduplication = False
 
-    def publish(self, message, subject=None, message_attributes=None):
-        message_id = str(uuid.uuid4())
-        subscriptions, _ = self.sns_backend.list_subscriptions(self.arn)
+    def publish(
+        self,
+        message: str,
+        subject: str | None = None,
+        message_attributes: dict[str, Any] | None = None,
+        group_id: str | None = None,
+        deduplication_id: str | None = None,
+        message_structure: str | None = None,
+    ) -> str:
+        message_id = str(mock_random.uuid4())
+        subscriptions, _ = self.sns_backend.list_subscriptions_by_topic(
+            topic_arn=self.arn
+        )
         for subscription in subscriptions:
             subscription.publish(
                 message,
                 message_id,
                 subject=subject,
                 message_attributes=message_attributes,
+                group_id=group_id,
+                deduplication_id=deduplication_id,
+                message_structure=message_structure,
             )
+
+        self.sent_notifications.append(
+            (message_id, message, subject, message_attributes, group_id)
+        )
         return message_id
 
     @classmethod
-    def has_cfn_attr(cls, attribute):
-        return attribute in ["TopicName"]
+    def has_cfn_attr(cls, attr: str) -> bool:
+        return attr in ["TopicName"]
 
-    def get_cfn_attribute(self, attribute_name):
+    def get_cfn_attribute(self, attribute_name: str) -> str:
         from moto.cloudformation.exceptions import UnformattedGetAttTemplateException
 
         if attribute_name == "TopicName":
@@ -80,34 +140,39 @@ class Topic(CloudFormationModel):
         raise UnformattedGetAttTemplateException()
 
     @property
-    def physical_resource_id(self):
+    def physical_resource_id(self) -> str:
         return self.arn
 
     @property
-    def policy(self):
-        return json.dumps(self._policy_json)
+    def policy(self) -> str:
+        return json.dumps(self._policy_json, separators=(",", ":"))
 
     @policy.setter
-    def policy(self, policy):
+    def policy(self, policy: Any) -> None:
         self._policy_json = json.loads(policy)
 
     @staticmethod
-    def cloudformation_name_type():
+    def cloudformation_name_type() -> str:
         return "TopicName"
 
     @staticmethod
-    def cloudformation_type():
+    def cloudformation_type() -> str:
         # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-sns-topic.html
         return "AWS::SNS::Topic"
 
     @classmethod
-    def create_from_cloudformation_json(
-        cls, resource_name, cloudformation_json, region_name, **kwargs
-    ):
-        sns_backend = sns_backends[region_name]
+    def create_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        resource_name: str,
+        cloudformation_json: Any,
+        account_id: str,
+        region_name: str,
+        **kwargs: Any,
+    ) -> "Topic":
+        sns_backend = sns_backends[account_id][region_name]
         properties = cloudformation_json["Properties"]
 
-        topic = sns_backend.create_topic(resource_name)
+        topic = sns_backend.create_topic(resource_name, properties)
         for subscription in properties.get("Subscription", []):
             sns_backend.subscribe(
                 topic.arn, subscription["Endpoint"], subscription["Protocol"]
@@ -115,33 +180,26 @@ class Topic(CloudFormationModel):
         return topic
 
     @classmethod
-    def update_from_cloudformation_json(
-        cls, original_resource, new_resource_name, cloudformation_json, region_name
-    ):
-        cls.delete_from_cloudformation_json(
-            original_resource.name, cloudformation_json, region_name
-        )
+    def update_from_cloudformation_json(  # type: ignore[misc]
+        cls,
+        original_resource: "Topic",
+        new_resource_name: str,
+        cloudformation_json: Any,
+        account_id: str,
+        region_name: str,
+    ) -> "Topic":
+        original_resource.delete(account_id, region_name)
         return cls.create_from_cloudformation_json(
-            new_resource_name, cloudformation_json, region_name
+            new_resource_name, cloudformation_json, account_id, region_name
         )
 
-    @classmethod
-    def delete_from_cloudformation_json(
-        cls, resource_name, cloudformation_json, region_name
-    ):
-        sns_backend = sns_backends[region_name]
-        properties = cloudformation_json["Properties"]
+    def delete(self, account_id: str, region_name: str) -> None:
+        sns_backend: SNSBackend = sns_backends[account_id][region_name]
+        sns_backend.delete_topic(self.arn)
 
-        topic_name = properties.get(cls.cloudformation_name_type()) or resource_name
-        topic_arn = make_arn_for_topic(
-            DEFAULT_ACCOUNT_ID, topic_name, sns_backend.region_name
-        )
-        subscriptions, _ = sns_backend.list_subscriptions(topic_arn)
-        for subscription in subscriptions:
-            sns_backend.unsubscribe(subscription.arn)
-        sns_backend.delete_topic(topic_arn)
-
-    def _create_default_topic_policy(self, region_name, account_id, name):
+    def _create_default_topic_policy(
+        self, region_name: str, account_id: str, name: str
+    ) -> dict[str, Any]:
         return {
             "Version": "2008-10-17",
             "Id": "__default_policy_ID",
@@ -159,7 +217,6 @@ class Topic(CloudFormationModel):
                         "SNS:Subscribe",
                         "SNS:ListSubscriptionsByTopic",
                         "SNS:Publish",
-                        "SNS:Receive",
                     ],
                     "Resource": make_arn_for_topic(self.account_id, name, region_name),
                     "Condition": {"StringEquals": {"AWS:SourceOwner": str(account_id)}},
@@ -169,24 +226,47 @@ class Topic(CloudFormationModel):
 
 
 class Subscription(BaseModel):
-    def __init__(self, topic, endpoint, protocol):
+    def __init__(self, account_id: str, topic: Topic, endpoint: str, protocol: str):
+        self.account_id = account_id
+        self.owner = account_id
         self.topic = topic
         self.endpoint = endpoint
         self.protocol = protocol
         self.arn = make_arn_for_subscription(self.topic.arn)
-        self.attributes = {}
+        self.attributes: dict[str, Any] = {}
         self._filter_policy = None  # filter policy as a dict, not json.
+        self._filter_policy_matcher: FilterPolicyMatcher | None = None
         self.confirmed = False
 
-    def publish(self, message, message_id, subject=None, message_attributes=None):
-        if not self._matches_filter_policy(message_attributes):
-            return
+    @property
+    def topic_arn(self) -> str:
+        return self.topic.arn
+
+    def publish(
+        self,
+        message: str,
+        message_id: str,
+        subject: str | None = None,
+        message_attributes: dict[str, Any] | None = None,
+        group_id: str | None = None,
+        deduplication_id: str | None = None,
+        message_structure: str | None = None,
+    ) -> None:
+        if self._filter_policy_matcher is not None:
+            if not self._filter_policy_matcher.matches(message_attributes, message):
+                return
+
+        if message_structure == "json":
+            message = self._parse_message_structure(message, self.protocol)
 
         if self.protocol == "sqs":
             queue_name = self.endpoint.split(":")[-1]
             region = self.endpoint.split(":")[3]
-            if self.attributes.get("RawMessageDelivery") != "true":
-                sqs_backends[region].send_message(
+
+            backend: SQSBackend = sqs_backends[self.account_id][region]
+
+            if not self.attributes.get("RawMessageDelivery"):
+                backend.send_message(
                     queue_name,
                     json.dumps(
                         self.get_post_data(
@@ -199,24 +279,32 @@ class Subscription(BaseModel):
                         indent=2,
                         separators=(",", ": "),
                     ),
+                    deduplication_id=deduplication_id,
+                    group_id=group_id,
+                    validate_group_id=False,
                 )
             else:
                 raw_message_attributes = {}
-                for key, value in message_attributes.items():
-                    type = "string_value"
+                for key, value in (message_attributes or {}).items():
+                    attr_type = "StringValue"
                     type_value = value["Value"]
                     if value["Type"].startswith("Binary"):
-                        type = "binary_value"
+                        attr_type = "BinaryValue"
                     elif value["Type"].startswith("Number"):
-                        type_value = "{0:g}".format(value["Value"])
+                        type_value = str(value["Value"])
 
                     raw_message_attributes[key] = {
-                        "data_type": value["Type"],
-                        type: type_value,
+                        "DataType": value["Type"],
+                        attr_type: type_value,
                     }
 
-                sqs_backends[region].send_message(
-                    queue_name, message, message_attributes=raw_message_attributes
+                backend.send_message(
+                    queue_name,
+                    message,
+                    message_attributes=raw_message_attributes,
+                    deduplication_id=deduplication_id,
+                    group_id=group_id,
+                    validate_group_id=False,
                 )
         elif self.protocol in ["http", "https"]:
             post_data = self.get_post_data(message, message_id, subject)
@@ -239,169 +327,204 @@ class Subscription(BaseModel):
                 qualifier = arr[-1]
                 function_name = arr[-2]
             else:
-                assert False
+                raise AssertionError()
 
-            from moto.awslambda import lambda_backends
+            from moto.awslambda.utils import get_backend
 
-            lambda_backends[region].send_sns_message(
+            get_backend(self.account_id, region).send_sns_message(
                 function_name, message, subject=subject, qualifier=qualifier
             )
 
-    def _matches_filter_policy(self, message_attributes):
-        # TODO: support Anything-but matching, prefix matching and
-        #       numeric value matching.
-        if not self._filter_policy:
-            return True
-
-        if message_attributes is None:
-            message_attributes = {}
-
-        def _field_match(field, rules, message_attributes):
-            for rule in rules:
-                #  TODO: boolean value matching is not supported, SNS behavior unknown
-                if isinstance(rule, str):
-                    if field not in message_attributes:
-                        return False
-                    if message_attributes[field]["Value"] == rule:
-                        return True
-                    try:
-                        json_data = json.loads(message_attributes[field]["Value"])
-                        if rule in json_data:
-                            return True
-                    except (ValueError, TypeError):
-                        pass
-                if isinstance(rule, (int, float)):
-                    if field not in message_attributes:
-                        return False
-                    if message_attributes[field]["Type"] == "Number":
-                        attribute_values = [message_attributes[field]["Value"]]
-                    elif message_attributes[field]["Type"] == "String.Array":
-                        try:
-                            attribute_values = json.loads(
-                                message_attributes[field]["Value"]
-                            )
-                            if not isinstance(attribute_values, list):
-                                attribute_values = [attribute_values]
-                        except (ValueError, TypeError):
-                            return False
-                    else:
-                        return False
-
-                    for attribute_values in attribute_values:
-                        # Even the official documentation states a 5 digits of accuracy after the decimal point for numerics, in reality it is 6
-                        # https://docs.aws.amazon.com/sns/latest/dg/sns-subscription-filter-policies.html#subscription-filter-policy-constraints
-                        if int(attribute_values * 1000000) == int(rule * 1000000):
-                            return True
-                if isinstance(rule, dict):
-                    keyword = list(rule.keys())[0]
-                    attributes = list(rule.values())[0]
-                    if keyword == "exists":
-                        if attributes and field in message_attributes:
-                            return True
-                        elif not attributes and field not in message_attributes:
-                            return True
-            return False
-
-        return all(
-            _field_match(field, rules, message_attributes)
-            for field, rules in self._filter_policy.items()
+    def get_post_data(
+        self,
+        message: str,
+        message_id: str,
+        subject: str | None,
+        message_attributes: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        key = self.private_key()
+        cert_subject = [NameAttribute(NameOID.COMMON_NAME, "sns.amazonaws.com")]
+        issuer = [
+            NameAttribute(NameOID.COUNTRY_NAME, "US"),
+            NameAttribute(NameOID.ORGANIZATION_NAME, "Amazon"),
+            NameAttribute(NameOID.COMMON_NAME, "Amazon RSA 2048 M01"),
+        ]
+        # SNS supports two signing algorithms
+        # User can choose which algorithm they want by updating the topic attribute 'SignatureVersion'
+        # Signature Version "1" == SHA1, "2" == SHA256
+        #
+        # Because cryptography doesn't support SHA1 anymore for certificates, we always use SignatureVersion="2"
+        signature_version = "2"
+        algo = hashes.SHA256() if signature_version == "2" else hashes.SHA1()
+        cert = (
+            cryptography.x509.CertificateBuilder()
+            .subject_name(Name(cert_subject))
+            .issuer_name(Name(issuer))
+            .public_key(key.public_key())
+            .serial_number(cryptography.x509.random_serial_number())
+            .not_valid_before(utcnow())
+            .not_valid_after(utcnow() + timedelta(days=365))
+            .sign(key, algo)  # type: ignore
+        )
+        key_name = (
+            f"SimpleNotificationService-{str(mock_random.uuid4()).replace('-', '')}.pem"
         )
 
-    def get_post_data(self, message, message_id, subject, message_attributes=None):
-        post_data = {
+        timestamp = iso_8601_datetime_with_milliseconds()
+        string_to_sign = f"""Message
+{message}
+MessageId
+{message_id}
+Timestamp
+{timestamp}
+TopicArn
+{self.topic.arn}
+Type
+Notification
+"""
+        signature = key.sign(
+            string_to_sign.encode("UTF-8"), padding.PKCS1v15(), hashes.SHA256()
+        )
+
+        # Retrieving the PEM is done via an unauthorized request
+        # We don't know in what account this was done - so just store in the default account
+        # We do know what region it is in, as the URL is `sns.{region}.amazonaws.com/name.pem`
+        region = self.topic.sns_backend.region_name
+        default_sns_backend = sns_backends[DEFAULT_ACCOUNT_ID][region]
+        default_sns_backend._message_public_keys[key_name] = cert.public_bytes(
+            serialization.Encoding.PEM
+        )
+
+        post_data: dict[str, Any] = {
             "Type": "Notification",
             "MessageId": message_id,
             "TopicArn": self.topic.arn,
-            "Subject": subject,
             "Message": message,
-            "Timestamp": iso_8601_datetime_with_milliseconds(
-                datetime.datetime.utcnow()
-            ),
-            "SignatureVersion": "1",
-            "Signature": "EXAMPLElDMXvB8r9R83tGoNn0ecwd5UjllzsvSvbItzfaMpN2nk5HVSw7XnOn/49IkxDKz8YrlH2qJXj2iZB0Zo2O71c4qQk1fMUDi3LGpij7RCW7AW9vYYsSqIKRnFS94ilu7NFhUzLiieYr4BKHpdTmdD6c0esKEYBpabxDSc=",
-            "SigningCertURL": "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-f3ecfb7224c7233fe7bb5f59f96de52f.pem",
-            "UnsubscribeURL": "https://sns.us-east-1.amazonaws.com/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:us-east-1:{}:some-topic:2bcfbf39-05c3-41de-beaa-fcfcc21c8f55".format(
-                DEFAULT_ACCOUNT_ID
-            ),
+            "Timestamp": timestamp,
+            "SignatureVersion": signature_version,
+            "Signature": base64.b64encode(signature).decode("utf-8"),
+            "SigningCertURL": f"https://sns.{region}.amazonaws.com/{key_name}",
+            "UnsubscribeURL": f"https://sns.us-east-1.amazonaws.com/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:us-east-1:{self.account_id}:{self.topic.name}:2bcfbf39-05c3-41de-beaa-fcfcc21c8f55",
         }
+        if subject:
+            post_data["Subject"] = subject
         if message_attributes:
             post_data["MessageAttributes"] = message_attributes
         return post_data
 
+    @lru_cache
+    def private_key(self) -> rsa.RSAPrivateKey:
+        return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+    def _parse_message_structure(self, message: str, protocol: str) -> str:
+        try:
+            structured_message = json.loads(message)
+            message = (
+                structured_message.get(self.protocol) or structured_message["default"]
+            )
+
+            return message
+        except json.JSONDecodeError:
+            raise InvalidParameterValue(
+                "Message is not valid JSON.",
+            )
+        except KeyError:
+            raise InvalidParameterValue(
+                f"Message does not contain {protocol} or default keys.",
+            )
+
 
 class PlatformApplication(BaseModel):
-    def __init__(self, region, name, platform, attributes):
+    def __init__(
+        self,
+        account_id: str,
+        region: str,
+        name: str,
+        platform: str,
+        attributes: dict[str, str],
+    ):
         self.region = region
         self.name = name
         self.platform = platform
         self.attributes = attributes
-
-    @property
-    def arn(self):
-        return "arn:aws:sns:{region}:{AccountId}:app/{platform}/{name}".format(
-            region=self.region,
-            platform=self.platform,
-            name=self.name,
-            AccountId=DEFAULT_ACCOUNT_ID,
-        )
+        self.arn = f"arn:{get_partition(region)}:sns:{region}:{account_id}:app/{platform}/{name}"
 
 
 class PlatformEndpoint(BaseModel):
-    def __init__(self, region, application, custom_user_data, token, attributes):
+    def __init__(
+        self,
+        account_id: str,
+        region: str,
+        application: PlatformApplication,
+        custom_user_data: str,
+        token: str,
+        attributes: dict[str, Any],
+    ):
         self.region = region
         self.application = application
         self.custom_user_data = custom_user_data
         self.token = token
         self.attributes = attributes
-        self.id = uuid.uuid4()
-        self.messages = OrderedDict()
+        self.id = mock_random.uuid4()
+        self.arn = f"arn:{get_partition(region)}:sns:{region}:{account_id}:endpoint/{self.application.platform}/{self.application.name}/{self.id}"
+        self.messages: dict[str, str] = OrderedDict()
         self.__fixup_attributes()
 
-    def __fixup_attributes(self):
+    def __fixup_attributes(self) -> None:
         # When AWS returns the attributes dict, it always contains these two elements, so we need to
         # automatically ensure they exist as well.
         if "Token" not in self.attributes:
             self.attributes["Token"] = self.token
-        if "Enabled" in self.attributes:
-            enabled = self.attributes["Enabled"]
-            self.attributes["Enabled"] = enabled.lower()
-        else:
-            self.attributes["Enabled"] = "true"
+        if "Enabled" not in self.attributes:
+            self.attributes["Enabled"] = True
 
     @property
-    def enabled(self):
-        return json.loads(self.attributes.get("Enabled", "true").lower())
+    def enabled(self) -> bool:
+        return self.attributes.get("Enabled", True) is True
 
-    @property
-    def arn(self):
-        return "arn:aws:sns:{region}:{AccountId}:endpoint/{platform}/{name}/{id}".format(
-            region=self.region,
-            AccountId=DEFAULT_ACCOUNT_ID,
-            platform=self.application.platform,
-            name=self.application.name,
-            id=self.id,
-        )
-
-    def publish(self, message):
+    def publish(self, message: str) -> str:
         if not self.enabled:
-            raise SnsEndpointDisabled("Endpoint %s disabled" % self.id)
+            raise SnsEndpointDisabled("Endpoint is disabled")
 
         # This is where we would actually send a message
-        message_id = str(uuid.uuid4())
+        message_id = str(mock_random.uuid4())
         self.messages[message_id] = message
         return message_id
 
 
-class SNSBackend(BaseBackend):
-    def __init__(self, region_name):
-        super(SNSBackend, self).__init__()
-        self.topics = OrderedDict()
+class SNSBackend(BaseBackend, TaggableResourcesMixin):
+    """
+    Responsible for mocking calls to SNS. Integration with SQS/HTTP/etc is supported.
+
+    If you're using the decorators, you can verify the message signature send to an HTTP endpoint.
+
+    Messages published to a topic are persisted in the backend. If you need to verify that a message was published successfully, you can use the internal API to check the message was published successfully:
+
+    .. sourcecode:: python
+
+        from moto.core import DEFAULT_ACCOUNT_ID
+        from moto.sns import sns_backends
+        sns_backend = sns_backends[DEFAULT_ACCOUNT_ID]["us-east-1"]  # Use the appropriate account/region
+        all_send_notifications = sns_backend.topics[topic_arn].sent_notifications
+
+    Note that, as this is an internal API, the exact format may differ per versions.
+    """
+
+    SERVICE_NAMESPACE = "sns"
+
+    def __init__(self, region_name: str, account_id: str):
+        super().__init__(region_name, account_id)
+        self.topics: dict[str, Topic] = OrderedDict()
         self.subscriptions: OrderedDict[str, Subscription] = OrderedDict()
-        self.applications = {}
-        self.platform_endpoints = {}
+        self.applications: dict[str, PlatformApplication] = {}
+        self.platform_endpoints: dict[str, PlatformEndpoint] = {}
         self.region_name = region_name
-        self.sms_attributes = {}
-        self.sms_messages = OrderedDict()
+        self.sms_attributes: dict[str, str] = {}
+        # We're storing the messages twice here
+        # The tuple is for backwards compatibility; the object is to expose this data to the MotoAPI
+        # We should combine these in a next major release, when we're allowed to break compatibility
+        self.sms_messages: dict[str, tuple[str, str]] = OrderedDict()
+        self.sms_message_objects: dict[str, SMS] = {}
         self.opt_out_numbers = [
             "+447420500600",
             "+447420505401",
@@ -413,29 +536,26 @@ class SNSBackend(BaseBackend):
             "+447700900907",
         ]
 
-    def reset(self):
-        region_name = self.region_name
-        self.__dict__ = {}
-        self.__init__(region_name)
+        self._message_public_keys: dict[str, bytes] = {}
 
-    @staticmethod
-    def default_vpc_endpoint_service(service_region, zones):
-        """List of dicts representing default VPC endpoints for this service."""
-        return BaseBackend.default_vpc_endpoint_service_factory(
-            service_region, zones, "sns"
-        )
+    def get_sms_attributes(self, filter_list: set[str]) -> dict[str, str]:
+        if len(filter_list) > 0:
+            return {k: v for k, v in self.sms_attributes.items() if k in filter_list}
+        else:
+            return self.sms_attributes
 
-    def update_sms_attributes(self, attrs):
+    def set_sms_attributes(self, attrs: dict[str, str]) -> None:
         self.sms_attributes.update(attrs)
 
-    def create_topic(self, name, attributes=None, tags=None):
-
+    def create_topic(
+        self,
+        name: str,
+        attributes: dict[str, str] | None = None,
+        tags: dict[str, str] | None = None,
+    ) -> Topic:
         if attributes is None:
             attributes = {}
-        if (
-            attributes.get("FifoTopic")
-            and attributes.get("FifoTopic").lower() == "true"
-        ):
+        if attributes.get("FifoTopic"):
             fails_constraints = not re.match(r"^[a-zA-Z0-9_-]{1,256}\.fifo$", name)
             msg = "Fifo Topic names must end with .fifo and must be made up of only uppercase and lowercase ASCII letters, numbers, underscores, and hyphens, and must be between 1 and 256 characters long."
 
@@ -462,73 +582,109 @@ class SNSBackend(BaseBackend):
             self.topics[candidate_topic.arn] = candidate_topic
             return candidate_topic
 
-    def _get_values_nexttoken(self, values_map, next_token=None):
-        if next_token is None or not next_token:
-            next_token = 0
-        next_token = int(next_token)
-        values = list(values_map.values())[next_token : next_token + DEFAULT_PAGE_SIZE]
+    def _get_values_nexttoken(
+        self, values_map: dict[str, Any], next_token: str | None = None
+    ) -> tuple[list[Any], int | None]:
+        i_next_token = int(next_token or "0")
+        values = list(values_map.values())[
+            i_next_token : i_next_token + DEFAULT_PAGE_SIZE
+        ]
         if len(values) == DEFAULT_PAGE_SIZE:
-            next_token = next_token + DEFAULT_PAGE_SIZE
+            i_next_token = i_next_token + DEFAULT_PAGE_SIZE
         else:
-            next_token = None
-        return values, next_token
+            i_next_token = None  # type: ignore
+        return values, i_next_token
 
-    def _get_topic_subscriptions(self, topic):
+    def _get_topic_subscriptions(self, topic: Topic) -> list[Subscription]:
         return [sub for sub in self.subscriptions.values() if sub.topic == topic]
 
-    def list_topics(self, next_token=None):
+    def list_topics(
+        self, next_token: str | None = None
+    ) -> tuple[list[Topic], int | None]:
         return self._get_values_nexttoken(self.topics, next_token)
 
-    def delete_topic_subscriptions(self, topic):
+    def delete_topic_subscriptions(self, topic: Topic) -> None:
         for key, value in dict(self.subscriptions).items():
             if value.topic == topic:
                 self.subscriptions.pop(key)
 
-    def delete_topic(self, arn):
-        try:
+    def delete_topic(self, arn: str) -> None:
+        with contextlib.suppress(TopicNotFound):
             topic = self.get_topic(arn)
             self.delete_topic_subscriptions(topic)
-            self.topics.pop(arn)
-        except KeyError:
-            raise SNSNotFoundError("Topic with arn {0} not found".format(arn))
+            parsed_arn = parse_arn(arn)
+            sns_backends[parsed_arn.account][parsed_arn.region].topics.pop(arn, None)
 
-    def get_topic(self, arn):
+    def get_topic(self, arn: str) -> Topic:
+        parsed_arn = parse_arn(arn)
         try:
-            return self.topics[arn]
+            return sns_backends[parsed_arn.account][self.region_name].topics[arn]
         except KeyError:
-            raise SNSNotFoundError("Topic with arn {0} not found".format(arn))
+            raise TopicNotFound
 
-    def set_topic_attribute(self, topic_arn, attribute_name, attribute_value):
+    def set_topic_attribute(
+        self, topic_arn: str, attribute_name: str, attribute_value: str
+    ) -> None:
         topic = self.get_topic(topic_arn)
         setattr(topic, attribute_name, attribute_value)
 
-    def subscribe(self, topic_arn, endpoint, protocol):
+    def subscribe(self, topic_arn: str, endpoint: str, protocol: str) -> Subscription:
+        topic = self.get_topic(topic_arn)
         if protocol == "sms":
             if re.search(r"[./-]{2,}", endpoint) or re.search(
                 r"(^[./-]|[./-]$)", endpoint
             ):
-                raise SNSInvalidParameter("Invalid SMS endpoint: {}".format(endpoint))
+                raise SNSInvalidParameter(f"Invalid SMS endpoint: {endpoint}")
 
             reduced_endpoint = re.sub(r"[./-]", "", endpoint)
 
             if not is_e164(reduced_endpoint):
-                raise SNSInvalidParameter("Invalid SMS endpoint: {}".format(endpoint))
+                raise SNSInvalidParameter(f"Invalid SMS endpoint: {endpoint}")
+
+        if protocol == "sqs":
+            try:
+                arn = parse_arn(endpoint)
+            except ValueError:
+                raise SNSInvalidParameter("Invalid parameter: SQS endpoint ARN")
+
+            backend: SQSBackend = sqs_backends[arn.account][arn.region]
+            topic = self.get_topic(topic_arn)
+            try:
+                queue = backend.get_queue(arn.resource_id)
+                if not topic.fifo_topic and queue.fifo_queue:
+                    raise SNSInvalidParameter(
+                        "Invalid parameter: Invalid parameter: Endpoint Reason: FIFO SQS Queues can not be subscribed to standard SNS topics"
+                    )
+            except QueueDoesNotExist:
+                # Subscribing to an unknown queue is apparently not a problem
+                pass
 
         # AWS doesn't create duplicates
         old_subscription = self._find_subscription(topic_arn, endpoint, protocol)
         if old_subscription:
             return old_subscription
-        topic = self.get_topic(topic_arn)
-        subscription = Subscription(topic, endpoint, protocol)
+
+        if protocol == "application":
+            try:
+                # Validate the endpoint exists, assuming it's a new subscription
+                # Existing subscriptions are still found if an endpoint is deleted, at least for a short period
+                self.get_endpoint(endpoint)
+            except SNSNotFoundError:
+                # Space between `arn{endpoint}` is lacking in AWS as well
+                raise SNSInvalidParameter(
+                    f"Invalid parameter: Endpoint Reason: Endpoint does not exist for endpoint arn{endpoint}"
+                )
+
+        subscription = Subscription(self.account_id, topic, endpoint, protocol)
         attributes = {
-            "PendingConfirmation": "false",
-            "ConfirmationWasAuthenticated": "true",
+            "PendingConfirmation": False,
+            "ConfirmationWasAuthenticated": True,
             "Endpoint": endpoint,
             "TopicArn": topic_arn,
             "Protocol": protocol,
             "SubscriptionArn": subscription.arn,
-            "Owner": DEFAULT_ACCOUNT_ID,
-            "RawMessageDelivery": "false",
+            "Owner": self.account_id,
+            "RawMessageDelivery": False,
         }
 
         if protocol in ["http", "https"]:
@@ -538,7 +694,9 @@ class SNSBackend(BaseBackend):
         self.subscriptions[subscription.arn] = subscription
         return subscription
 
-    def _find_subscription(self, topic_arn, endpoint, protocol):
+    def _find_subscription(
+        self, topic_arn: str, endpoint: str, protocol: str
+    ) -> Subscription | None:
         for subscription in self.subscriptions.values():
             if (
                 subscription.topic.arn == topic_arn
@@ -548,29 +706,36 @@ class SNSBackend(BaseBackend):
                 return subscription
         return None
 
-    def unsubscribe(self, subscription_arn):
+    def unsubscribe(self, subscription_arn: str) -> None:
         self.subscriptions.pop(subscription_arn, None)
 
-    def list_subscriptions(self, topic_arn=None, next_token=None):
-        if topic_arn:
-            topic = self.get_topic(topic_arn)
-            filtered = OrderedDict(
-                [(sub.arn, sub) for sub in self._get_topic_subscriptions(topic)]
-            )
-            return self._get_values_nexttoken(filtered, next_token)
-        else:
-            return self._get_values_nexttoken(self.subscriptions, next_token)
+    def list_subscriptions(
+        self, next_token: str | None = None
+    ) -> tuple[list[Subscription], int | None]:
+        return self._get_values_nexttoken(self.subscriptions, next_token)
+
+    def list_subscriptions_by_topic(
+        self, topic_arn: str, next_token: str | None = None
+    ) -> tuple[list[Subscription], int | None]:
+        topic = self.get_topic(topic_arn)
+        filtered = OrderedDict(
+            [(sub.arn, sub) for sub in self._get_topic_subscriptions(topic)]
+        )
+        return self._get_values_nexttoken(filtered, next_token)
 
     def publish(
         self,
-        message,
-        arn=None,
-        phone_number=None,
-        subject=None,
-        message_attributes=None,
-    ):
+        message: str,
+        arn: str | None,
+        phone_number: str | None = None,
+        subject: str | None = None,
+        message_attributes: dict[str, Any] | None = None,
+        group_id: str | None = None,
+        deduplication_id: str | None = None,
+        message_structure: str | None = None,
+    ) -> str:
         if subject is not None and len(subject) > 100:
-            # Note that the AWS docs around length are wrong: https://github.com/spulec/moto/issues/1503
+            # Note that the AWS docs around length are wrong: https://github.com/getmoto/moto/issues/1503
             raise ValueError("Subject must be less than 100 characters")
 
         if phone_number:
@@ -578,8 +743,11 @@ class SNSBackend(BaseBackend):
             if len(message) > MAXIMUM_SMS_MESSAGE_BYTES:
                 raise ValueError("SMS message must be less than 1600 bytes")
 
-            message_id = str(uuid.uuid4())
+            message_id = str(mock_random.uuid4())
             self.sms_messages[message_id] = (phone_number, message)
+            self.sms_message_objects[message_id] = SMS(
+                message_id, phone_number, message
+            )
             return message_id
 
         if len(message) > MAXIMUM_MESSAGE_LENGTH:
@@ -587,128 +755,256 @@ class SNSBackend(BaseBackend):
                 "An error occurred (InvalidParameter) when calling the Publish operation: Invalid parameter: Message too long"
             )
 
+        if message_structure is not None and message_structure != "json":
+            raise InvalidParameterValue("MessageStructure must be 'json' if provided")
+
         try:
-            topic = self.get_topic(arn)
+            topic = self.get_topic(arn)  # type: ignore
+
+            if topic.fifo_topic:
+                if not group_id:
+                    # MessageGroupId is a mandatory parameter for all
+                    # messages in a fifo queue
+                    raise MissingParameter("MessageGroupId")
+                deduplication_id_required = not topic.content_based_deduplication
+                if not deduplication_id and deduplication_id_required:
+                    raise InvalidParameterValue(
+                        "The topic should either have ContentBasedDeduplication enabled or MessageDeduplicationId provided explicitly"
+                    )
+            elif deduplication_id:
+                raise InvalidParameterValue(
+                    "Invalid parameter: MessageDeduplicationId "
+                    "Reason: The request includes MessageDeduplicationId parameter that is not valid for this topic type"
+                )
+
             message_id = topic.publish(
-                message, subject=subject, message_attributes=message_attributes
+                message,
+                subject=subject,
+                message_attributes=message_attributes,
+                group_id=group_id,
+                deduplication_id=deduplication_id,
+                message_structure=message_structure,
             )
         except SNSNotFoundError:
-            endpoint = self.get_endpoint(arn)
+            endpoint = self.get_endpoint(arn)  # type: ignore
             message_id = endpoint.publish(message)
         return message_id
 
-    def create_platform_application(self, region, name, platform, attributes):
-        application = PlatformApplication(region, name, platform, attributes)
+    def create_platform_application(
+        self, name: str, platform: str, attributes: dict[str, str]
+    ) -> PlatformApplication:
+        application = PlatformApplication(
+            self.account_id, self.region_name, name, platform, attributes
+        )
         self.applications[application.arn] = application
         return application
 
-    def get_application(self, arn):
+    def get_application(self, arn: str) -> PlatformApplication:
         try:
             return self.applications[arn]
         except KeyError:
-            raise SNSNotFoundError("Application with arn {0} not found".format(arn))
+            raise SNSNotFoundError("PlatformApplication does not exist")
 
-    def set_application_attributes(self, arn, attributes):
+    def set_platform_application_attributes(
+        self, arn: str, attributes: dict[str, Any]
+    ) -> PlatformApplication:
         application = self.get_application(arn)
         application.attributes.update(attributes)
         return application
 
-    def list_platform_applications(self):
+    def list_platform_applications(self) -> Iterable[PlatformApplication]:
         return self.applications.values()
 
-    def delete_platform_application(self, platform_arn):
+    def delete_platform_application(self, platform_arn: str) -> None:
         self.applications.pop(platform_arn)
+        endpoints = self.list_endpoints_by_platform_application(platform_arn)
+        for endpoint in endpoints:
+            self.platform_endpoints.pop(endpoint.arn)
 
     def create_platform_endpoint(
-        self, region, application, custom_user_data, token, attributes
-    ):
+        self,
+        application: PlatformApplication,
+        custom_user_data: str,
+        token: str,
+        attributes: dict[str, str],
+    ) -> PlatformEndpoint:
         for endpoint in self.platform_endpoints.values():
             if token == endpoint.token:
-                if (
-                    attributes.get("Enabled", "").lower()
-                    == endpoint.attributes["Enabled"]
-                ):
+                same_user_data = custom_user_data == endpoint.custom_user_data
+                same_attrs = (
+                    attributes.get("Enabled", True) == endpoint.attributes["Enabled"]
+                )
+
+                if same_user_data and same_attrs:
                     return endpoint
                 raise DuplicateSnsEndpointError(
-                    "Duplicate endpoint token with different attributes: %s" % token
+                    f"Invalid parameter: Token Reason: Endpoint {endpoint.arn} already exists with the same Token, but different attributes."
                 )
         platform_endpoint = PlatformEndpoint(
-            region, application, custom_user_data, token, attributes
+            self.account_id,
+            self.region_name,
+            application,
+            custom_user_data,
+            token,
+            attributes,
         )
         self.platform_endpoints[platform_endpoint.arn] = platform_endpoint
         return platform_endpoint
 
-    def list_endpoints_by_platform_application(self, application_arn):
+    def list_endpoints_by_platform_application(
+        self, application_arn: str
+    ) -> list[PlatformEndpoint]:
         return [
             endpoint
             for endpoint in self.platform_endpoints.values()
             if endpoint.application.arn == application_arn
         ]
 
-    def get_endpoint(self, arn):
+    def get_endpoint(self, arn: str) -> PlatformEndpoint:
         try:
             return self.platform_endpoints[arn]
         except KeyError:
             raise SNSNotFoundError("Endpoint does not exist")
 
-    def set_endpoint_attributes(self, arn, attributes):
+    def set_endpoint_attributes(
+        self, arn: str, attributes: dict[str, Any]
+    ) -> PlatformEndpoint:
         endpoint = self.get_endpoint(arn)
-        if "Enabled" in attributes:
-            attributes["Enabled"] = attributes["Enabled"].lower()
         endpoint.attributes.update(attributes)
         return endpoint
 
-    def delete_endpoint(self, arn):
+    def delete_endpoint(self, arn: str) -> None:
         try:
             del self.platform_endpoints[arn]
         except KeyError:
-            raise SNSNotFoundError("Endpoint with arn {0} not found".format(arn))
+            pass  # idempotent operation
 
-    def get_subscription_attributes(self, arn):
+    def get_subscription_attributes(self, arn: str) -> dict[str, Any]:
         subscription = self.subscriptions.get(arn)
 
         if not subscription:
-            raise SNSNotFoundError(
-                "Subscription does not exist", template="wrapped_single_error"
-            )
+            raise SNSNotFoundError("Subscription does not exist")
+        # AWS does not return the FilterPolicy scope if the FilterPolicy is not set
+        # if the FilterPolicy is set and not the FilterPolicyScope, it returns the default value
+        attributes = {**subscription.attributes}
+        if "FilterPolicyScope" in attributes and not attributes.get("FilterPolicy"):
+            attributes.pop("FilterPolicyScope", None)
+            attributes.pop("FilterPolicy", None)
 
-        return subscription.attributes
+        elif "FilterPolicy" in attributes and "FilterPolicyScope" not in attributes:
+            attributes["FilterPolicyScope"] = "MessageAttributes"
 
-    def set_subscription_attributes(self, arn, name, value):
+        return attributes
+
+    def set_subscription_attributes(self, arn: str, name: str, value: Any) -> None:
         if name not in [
             "RawMessageDelivery",
             "DeliveryPolicy",
             "FilterPolicy",
+            "FilterPolicyScope",
             "RedrivePolicy",
+            "SubscriptionRoleArn",
         ]:
             raise SNSInvalidParameter("AttributeName")
 
         # TODO: should do validation
         _subscription = [_ for _ in self.subscriptions.values() if _.arn == arn]
         if not _subscription:
-            raise SNSNotFoundError("Subscription with arn {0} not found".format(arn))
+            raise SNSNotFoundError(f"Subscription with arn {arn} not found")
         subscription = _subscription[0]
+
+        if name == "FilterPolicy":
+            if value:
+                filter_policy = json.loads(value)
+                # we validate the filter policy differently depending on the scope
+                # we need to always set the scope first
+                filter_policy_scope = subscription.attributes.get("FilterPolicyScope")
+                self._validate_filter_policy(filter_policy, scope=filter_policy_scope)
+                subscription._filter_policy = filter_policy
+                subscription._filter_policy_matcher = FilterPolicyMatcher(
+                    filter_policy, filter_policy_scope
+                )
+            else:
+                subscription._filter_policy = None
+                subscription._filter_policy_matcher = None
 
         subscription.attributes[name] = value
 
-        if name == "FilterPolicy":
-            filter_policy = json.loads(value)
-            self._validate_filter_policy(filter_policy)
-            subscription._filter_policy = filter_policy
-
-    def _validate_filter_policy(self, value):
-        # TODO: extend validation checks
+    def _validate_filter_policy(self, value: Any, scope: str | None) -> None:
         combinations = 1
-        for rules in value.values():
-            combinations *= len(rules)
-        # Even the official documentation states the total combination of values must not exceed 100, in reality it is 150
-        # https://docs.aws.amazon.com/sns/latest/dg/sns-subscription-filter-policies.html#subscription-filter-policy-constraints
+
+        def aggregate_rules(
+            filter_policy: dict[str, Any], depth: int = 1
+        ) -> list[list[Any]]:
+            """
+            This method evaluate the filter policy recursively, and returns only a list of lists of rules.
+            It also calculates the combinations of rules, calculated depending on the nesting of the rules.
+            Example:
+            nested_filter_policy = {
+                "key_a": {
+                    "key_b": {
+                        "key_c": ["value_one", "value_two", "value_three", "value_four"]
+                    }
+                },
+                "key_d": {
+                    "key_e": ["value_one", "value_two", "value_three"]
+                }
+            }
+            This function then iterates on the values of the top level keys of the filter policy: ("key_a", "key_d")
+            If the iterated value is not a list, it means it is a nested property. If the scope is `MessageBody`, it is
+            allowed, we call this method on the value, adding a level to the depth to keep track on how deep the key is.
+            If the value is a list, it means it contains rules: we will append this list of rules in _rules, and
+            calculate the combinations it adds.
+            For the example filter policy containing nested properties, we calculate it this way
+            The first array has four values in a three-level nested key, and the second has three values in a two-level
+            nested key. 3 x 4 x 2 x 3 = 72
+            The return value would be:
+            [["value_one", "value_two", "value_three", "value_four"], ["value_one", "value_two", "value_three"]]
+            It allows us to later iterate of the list of rules in an easy way, to verify its conditions.
+
+            :param filter_policy: a dict, starting at the FilterPolicy
+            :param depth: the depth/level of the rules we are evaluating
+            :return: a list of lists of rules
+            """
+            nonlocal combinations
+            _rules = []
+            for key, _value in filter_policy.items():
+                if isinstance(_value, dict):
+                    if scope == "MessageBody":
+                        # From AWS docs: "unlike attribute-based policies, payload-based policies support property nesting."
+                        _rules.extend(aggregate_rules(_value, depth=depth + 1))
+                    else:
+                        raise SNSInvalidParameter(
+                            "Invalid parameter: Filter policy scope MessageAttributes does not support nested filter policy"
+                        )
+                elif isinstance(_value, list):
+                    if key == "$or":
+                        for val in _value:
+                            _rules.extend(aggregate_rules(val, depth=depth + 1))
+                    else:
+                        _rules.append(_value)
+                    combinations = combinations * len(_value) * depth
+                else:
+                    raise SNSInvalidParameter(
+                        f'Invalid parameter: FilterPolicy: "{key}" must be an object or an array'
+                    )
+            return _rules
+
+        # A filter policy can have a maximum of five attribute names. For a nested policy, only parent keys are counted.
+        if len(value.values()) > 5:
+            raise SNSInvalidParameter(
+                "Invalid parameter: FilterPolicy: Filter policy can not have more than 5 keys"
+            )
+
+        aggregated_rules = aggregate_rules(value)
+        # For the complexity of the filter policy, the total combination of values must not exceed 150.
+        # https://docs.aws.amazon.com/sns/latest/dg/subscription-filter-policy-constraints.html
         if combinations > 150:
             raise SNSInvalidParameter(
                 "Invalid parameter: FilterPolicy: Filter policy is too complex"
             )
 
-        for field, rules in value.items():
+        for rules in aggregated_rules:
             for rule in rules:
                 if rule is None:
                     continue
@@ -723,7 +1019,7 @@ class SNSBackend(BaseBackend):
                 if isinstance(rule, dict):
                     keyword = list(rule.keys())[0]
                     attributes = list(rule.values())[0]
-                    if keyword == "anything-but":
+                    if keyword in ["anything-but", "equals-ignore-case"]:
                         continue
                     elif keyword == "exists":
                         if not isinstance(attributes, bool):
@@ -732,25 +1028,92 @@ class SNSBackend(BaseBackend):
                             )
                         continue
                     elif keyword == "numeric":
+                        # TODO: All of the exceptions listed below contain column pointing where the error is (in AWS response)
+                        # Example: 'Value of < must be numeric\n at [Source: (String)"{"price":[{"numeric":["<","100"]}]}"; line: 1, column: 28]'
+                        # While it probably can be implemented, it doesn't feel as important as the general parameter checking
+
+                        attributes_copy = attributes[:]
+                        if not attributes_copy:
+                            raise SNSInvalidParameter(
+                                "Invalid parameter: Attributes Reason: FilterPolicy: Invalid member in numeric match: ]\n at ..."
+                            )
+
+                        operator = attributes_copy.pop(0)
+
+                        if not isinstance(operator, str):
+                            raise SNSInvalidParameter(
+                                f"Invalid parameter: Attributes Reason: FilterPolicy: Invalid member in numeric match: {(str(operator))}\n at ..."
+                            )
+
+                        if operator not in ("<", "<=", "=", ">", ">="):
+                            raise SNSInvalidParameter(
+                                f"Invalid parameter: Attributes Reason: FilterPolicy: Unrecognized numeric range operator: {(str(operator))}\n at ..."
+                            )
+
+                        try:
+                            value = attributes_copy.pop(0)
+                        except IndexError:
+                            value = None
+
+                        if value is None or not isinstance(value, (int, float)):
+                            raise SNSInvalidParameter(
+                                f"Invalid parameter: Attributes Reason: FilterPolicy: Value of {(str(operator))} must be numeric\n at ..."
+                            )
+
+                        if not attributes_copy:
+                            continue
+
+                        if operator not in (">", ">="):
+                            raise SNSInvalidParameter(
+                                "Invalid parameter: Attributes Reason: FilterPolicy: Too many elements in numeric expression\n at ..."
+                            )
+
+                        second_operator = attributes_copy.pop(0)
+
+                        if second_operator not in ("<", "<="):
+                            raise SNSInvalidParameter(
+                                f"Invalid parameter: Attributes Reason: FilterPolicy: Bad numeric range operator: {(str(second_operator))}\n at ..."
+                            )
+
+                        try:
+                            second_value = attributes_copy.pop(0)
+                        except IndexError:
+                            second_value = None
+
+                        if second_value is None or not isinstance(
+                            second_value, (int, float)
+                        ):
+                            raise SNSInvalidParameter(
+                                f"Invalid parameter: Attributes Reason: FilterPolicy: Value of {(str(second_operator))} must be numeric\n at ..."
+                            )
+
+                        if second_value <= value:
+                            raise SNSInvalidParameter(
+                                "Invalid parameter: Attributes Reason: FilterPolicy: Bottom must be less than top\n at ..."
+                            )
+
                         continue
-                    elif keyword == "prefix":
+                    elif keyword in ["prefix", "suffix"]:
                         continue
                     else:
                         raise SNSInvalidParameter(
-                            "Invalid parameter: FilterPolicy: Unrecognized match type {type}".format(
-                                type=keyword
-                            )
+                            f"Invalid parameter: FilterPolicy: Unrecognized match type {keyword}"
                         )
 
                 raise SNSInvalidParameter(
                     "Invalid parameter: FilterPolicy: Match value must be String, number, true, false, or null"
                 )
 
-    def add_permission(self, topic_arn, label, aws_account_ids, action_names):
-        if topic_arn not in self.topics:
-            raise SNSNotFoundError("Topic does not exist")
-
-        policy = self.topics[topic_arn]._policy_json
+    def add_permission(
+        self,
+        region_name: str,
+        topic_arn: str,
+        label: str,
+        aws_account_ids: list[str],
+        action_names: list[str],
+    ) -> None:
+        topic = self.get_topic(topic_arn)
+        policy = topic._policy_json
         statement = next(
             (
                 statement
@@ -767,9 +1130,10 @@ class SNSBackend(BaseBackend):
             raise SNSInvalidParameter("Policy statement action out of service scope!")
 
         principals = [
-            "arn:aws:iam::{}:root".format(account_id) for account_id in aws_account_ids
+            f"arn:{get_partition(region_name)}:iam::{account_id}:root"
+            for account_id in aws_account_ids
         ]
-        actions = ["SNS:{}".format(action_name) for action_name in action_names]
+        actions = [f"SNS:{action_name}" for action_name in action_names]
 
         statement = {
             "Sid": label,
@@ -779,26 +1143,190 @@ class SNSBackend(BaseBackend):
             "Resource": topic_arn,
         }
 
-        self.topics[topic_arn]._policy_json["Statement"].append(statement)
+        topic._policy_json["Statement"].append(statement)
 
-    def remove_permission(self, topic_arn, label):
-        if topic_arn not in self.topics:
-            raise SNSNotFoundError("Topic does not exist")
-
-        statements = self.topics[topic_arn]._policy_json["Statement"]
+    def remove_permission(self, topic_arn: str, label: str) -> None:
+        topic = self.get_topic(topic_arn)
+        statements = topic._policy_json["Statement"]
         statements = [
             statement for statement in statements if statement["Sid"] != label
         ]
 
-        self.topics[topic_arn]._policy_json["Statement"] = statements
+        topic._policy_json["Statement"] = statements
 
-    def list_tags_for_resource(self, resource_arn):
+    def list_tags_for_resource(self, resource_arn: str) -> dict[str, str]:
         if resource_arn not in self.topics:
             raise ResourceNotFoundError
 
         return self.topics[resource_arn]._tags
 
-    def tag_resource(self, resource_arn, tags):
+    def publish_batch(
+        self, topic_arn: str, publish_batch_request_entries: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+        """
+        The MessageDeduplicationId-parameter has not yet been implemented.
+        """
+        topic = self.get_topic(topic_arn)
+
+        if len(publish_batch_request_entries) > 10:
+            raise TooManyEntriesInBatchRequest
+
+        ids = [m["Id"] for m in publish_batch_request_entries]
+        if len(set(ids)) != len(ids):
+            raise BatchEntryIdsNotDistinct
+
+        if topic.fifo_topic:
+            if not all(
+                "MessageGroupId" in entry for entry in publish_batch_request_entries
+            ):
+                raise SNSInvalidParameter(
+                    "Invalid parameter: The MessageGroupId parameter is required for FIFO topics"
+                )
+
+        successful: list[dict[str, str]] = []
+        failed: list[dict[str, Any]] = []
+
+        for entry in publish_batch_request_entries:
+            try:
+                message_id = self.publish(
+                    message=entry["Message"],
+                    arn=topic_arn,
+                    subject=entry.get("Subject"),
+                    message_attributes=entry.get("MessageAttributes", {}),
+                    group_id=entry.get("MessageGroupId"),
+                    deduplication_id=entry.get("MessageDeduplicationId"),
+                    message_structure=entry.get("MessageStructure"),
+                )
+                successful.append({"MessageId": message_id, "Id": entry["Id"]})
+            except Exception as e:
+                if isinstance(e, InvalidParameterValue):
+                    failed.append(
+                        {
+                            "Id": entry["Id"],
+                            "Code": "InvalidParameter",
+                            "Message": e.message,
+                            "SenderFault": True,
+                        }
+                    )
+        return successful, failed
+
+    def check_if_phone_number_is_opted_out(self, number: str) -> bool:
+        """
+        Current implementation returns True for all numbers ending in '99'
+        """
+        return number.endswith("99")
+
+    def list_phone_numbers_opted_out(self) -> list[str]:
+        return self.opt_out_numbers
+
+    def opt_in_phone_number(self, number: str) -> None:
+        try:
+            self.opt_out_numbers.remove(number)
+        except ValueError:
+            pass
+
+    @paginate(pagination_model=PAGINATION_MODEL)  # type: ignore[misc]
+    def list_config_service_resources(  # type: ignore[misc]
+        self,
+        resource_ids: list[str] | None = None,
+        resource_name: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List SNS topics for AWS Config."""
+        topics = list(self.topics.values())
+
+        if resource_ids:
+            topics = [t for t in topics if t.arn in resource_ids]
+
+        if resource_name:
+            topics = [t for t in topics if t.name == resource_name]
+
+        config_resources = []
+        for topic in topics:
+            config_resources.append(
+                {
+                    "type": "AWS::SNS::Topic",
+                    "id": topic.arn,
+                    "name": topic.name,
+                    "region": self.region_name,
+                }
+            )
+
+        return config_resources
+
+    def get_config_resource(self, resource_id: str) -> dict[str, Any] | None:
+        """Get a specific SNS topic configuration for AWS Config."""
+        if resource_id not in self.topics:
+            return None
+
+        topic = self.topics[resource_id]
+
+        config_item = {
+            "version": "1.3",
+            "accountId": self.account_id,
+            "configurationItemCaptureTime": unix_time(),
+            "configurationItemStatus": "ResourceDiscovered",
+            "configurationStateId": "1",
+            "resourceType": "AWS::SNS::Topic",
+            "resourceId": topic.arn,
+            "resourceName": topic.name,
+            "arn": topic.arn,
+            "awsRegion": self.region_name,
+            "availabilityZone": "Not Applicable",
+            "tags": dict(topic._tags),
+            "configuration": {
+                "topicArn": topic.arn,
+                "displayName": topic.display_name,
+                "policy": topic._policy_json,
+                "deliveryPolicy": topic.delivery_policy,
+                "effectiveDeliveryPolicy": json.loads(topic.effective_delivery_policy),
+                "subscriptionsConfirmed": topic.subscriptions_confimed,
+                "subscriptionsPending": topic.subscriptions_pending,
+                "subscriptionsDeleted": topic.subscriptions_deleted,
+            },
+            "supplementaryConfiguration": {
+                "Tags": json.dumps(
+                    [{"key": k, "value": v} for k, v in topic._tags.items()]
+                )
+            },
+            "configurationItemMD5Hash": "",
+        }
+        configuration = cast(dict[str, Any], config_item["configuration"])
+
+        if topic.kms_master_key_id:
+            configuration["kmsMasterKeyId"] = topic.kms_master_key_id
+
+        if topic.fifo_topic:
+            configuration["fifoTopic"] = True
+            configuration["contentBasedDeduplication"] = (
+                topic.content_based_deduplication
+            )
+
+        return config_item
+
+    def confirm_subscription(self) -> None:
+        pass
+
+    def get_endpoint_attributes(self, arn: str) -> dict[str, str]:
+        endpoint = self.get_endpoint(arn)
+        return endpoint.attributes
+
+    def get_platform_application_attributes(self, arn: str) -> dict[str, str]:
+        application = self.get_application(arn)
+        return application.attributes
+
+    def get_topic_attributes(self) -> None:
+        pass
+
+    # Resource Groups Tagging API (TaggableResourcesMixin method overrides)
+    def iter_tagged_resources(self) -> Iterator[TaggedResource]:
+        for topic in self.topics.values():
+            yield TaggedResource(
+                arn=topic.arn,
+                tags=dict(topic._tags or {}),
+                resource_type="sns:topic",
+            )
+
+    def tag_resource(self, resource_arn: str, tags: dict[str, str]) -> None:
         if resource_arn not in self.topics:
             raise ResourceNotFoundError
 
@@ -810,7 +1338,7 @@ class SNSBackend(BaseBackend):
 
         self.topics[resource_arn]._tags = updated_tags
 
-    def untag_resource(self, resource_arn, tag_keys):
+    def untag_resource(self, resource_arn: str, tag_keys: list[str]) -> None:
         if resource_arn not in self.topics:
             raise ResourceNotFoundError
 
@@ -818,13 +1346,7 @@ class SNSBackend(BaseBackend):
             self.topics[resource_arn]._tags.pop(key, None)
 
 
-sns_backends = {}
-for region in Session().get_available_regions("sns"):
-    sns_backends[region] = SNSBackend(region)
-for region in Session().get_available_regions("sns", partition_name="aws-us-gov"):
-    sns_backends[region] = SNSBackend(region)
-for region in Session().get_available_regions("sns", partition_name="aws-cn"):
-    sns_backends[region] = SNSBackend(region)
+sns_backends = BackendDict(SNSBackend, "sns")
 
 
 DEFAULT_EFFECTIVE_DELIVERY_POLICY = {

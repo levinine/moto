@@ -3,17 +3,17 @@
 The logic to check the details of VPCs and Subnets is shared between the
 "create directory" APIs, so it will not be repeated here.
 """
+
 from datetime import datetime, timezone
 
 import boto3
-from botocore.exceptions import ClientError
 import pytest
+from botocore.exceptions import ClientError
 
-from moto import mock_ds
-from moto.core.utils import get_random_hex
-from moto.ec2 import mock_ec2
+from moto import mock_aws
+from moto.moto_api._internal import mock_random
 
-from .test_ds_simple_ad_directory import TEST_REGION, create_vpc, create_subnets
+from .test_ds_simple_ad_directory import TEST_REGION, create_subnets, create_vpc
 
 
 def create_test_microsoft_ad(ds_client, ec2_client, vpc_settings=None, tags=None):
@@ -27,7 +27,7 @@ def create_test_microsoft_ad(ds_client, ec2_client, vpc_settings=None, tags=None
         tags = []
 
     result = ds_client.create_microsoft_ad(
-        Name=f"test-{get_random_hex(6)}.test",
+        Name=f"test-{mock_random.get_random_hex(6)}.test",
         Password="4MicrosoftADPassword",
         VpcSettings=vpc_settings,
         Tags=tags,
@@ -36,7 +36,7 @@ def create_test_microsoft_ad(ds_client, ec2_client, vpc_settings=None, tags=None
     return result["DirectoryId"]
 
 
-@mock_ds
+@mock_aws
 def test_ds_create_microsoft_ad_validations():
     """Test validation errs that aren't caught by botocore.
 
@@ -44,7 +44,7 @@ def test_ds_create_microsoft_ad_validations():
     this verifies that it is invoked from create_microsoft_ad().
     """
     client = boto3.client("ds", region_name=TEST_REGION)
-    random_num = get_random_hex(6)
+    random_num = mock_random.get_random_hex(6)
 
     # Verify ValidationException error messages are accumulated properly.
     bad_name = f"bad_name_{random_num}"
@@ -77,9 +77,9 @@ def test_ds_create_microsoft_ad_validations():
         f"Member must satisfy enum value set: [Enterprise, Standard]" in err["Message"]
     )
     assert (
-        fr"Value '{bad_name}' at 'name' failed to satisfy constraint: "
-        fr"Member must satisfy regular expression pattern: "
-        fr"^([a-zA-Z0-9]+[\.-])+([a-zA-Z0-9])+$" in err["Message"]
+        rf"Value '{bad_name}' at 'name' failed to satisfy constraint: "
+        rf"Member must satisfy regular expression pattern: "
+        rf"^([a-zA-Z0-9]+[\.-])+([a-zA-Z0-9])+$" in err["Message"]
     )
 
     too_long = (
@@ -120,15 +120,14 @@ def test_ds_create_microsoft_ad_validations():
     assert err["Code"] == "ValidationException"
     assert "1 validation error detected" in err["Message"]
     assert (
-        fr"Value '['{bad_vpc_settings['SubnetIds'][0]}']' at "
-        fr"'vpcSettings.subnetIds' failed to satisfy constraint: "
-        fr"Member must satisfy regular expression pattern: "
-        fr"^(subnet-[0-9a-f]{{8}}|subnet-[0-9a-f]{{17}})$" in err["Message"]
+        rf"Value '['{bad_vpc_settings['SubnetIds'][0]}']' at "
+        rf"'vpcSettings.subnetIds' failed to satisfy constraint: "
+        rf"Member must satisfy regular expression pattern: "
+        rf"^(subnet-[0-9a-f]{{8}}|subnet-[0-9a-f]{{17}})$" in err["Message"]
     )
 
 
-@mock_ec2
-@mock_ds
+@mock_aws
 def test_ds_create_microsoft_ad_good_args():
     """Test creation of Microsoft AD directory using good arguments."""
     client = boto3.client("ds", region_name=TEST_REGION)
@@ -153,8 +152,7 @@ def test_ds_create_microsoft_ad_good_args():
     )
 
 
-@mock_ec2
-@mock_ds
+@mock_aws
 def test_ds_create_microsoft_ad_delete():
     """Test deletion of Microsoft AD directory."""
     client = boto3.client("ds", region_name=TEST_REGION)
@@ -166,8 +164,7 @@ def test_ds_create_microsoft_ad_delete():
     assert result["DirectoryId"] == directory_id
 
 
-@mock_ec2
-@mock_ds
+@mock_aws
 def test_ds_create_microsoft_ad_describe():
     """Test describe_directory() for Microsoft AD directory."""
     client = boto3.client("ds", region_name=TEST_REGION)
@@ -196,8 +193,7 @@ def test_ds_create_microsoft_ad_describe():
     assert "NextToken" not in result
 
 
-@mock_ec2
-@mock_ds
+@mock_aws
 def test_ds_create_microsoft_ad_tags():
     """Test that AD directory tags can be added and retrieved."""
     client = boto3.client("ds", region_name=TEST_REGION)
@@ -211,8 +207,7 @@ def test_ds_create_microsoft_ad_tags():
     assert result["Tags"] == added_tags
 
 
-@mock_ec2
-@mock_ds
+@mock_aws
 def test_ds_get_microsoft_ad_directory_limits():
     """Test return value for directory limits."""
     client = boto3.client("ds", region_name=TEST_REGION)
@@ -232,3 +227,131 @@ def test_ds_get_microsoft_ad_directory_limits():
     assert limits["CloudOnlyMicrosoftADLimitReached"]
     assert not limits["ConnectedDirectoriesLimitReached"]
     assert not limits["CloudOnlyDirectoriesCurrentCount"]
+
+
+@mock_aws
+def test_enable_describe_disable_ldaps():
+    """Test good and bad invocations of describe_directories()."""
+    client = boto3.client("ds", region_name=TEST_REGION)
+    ec2_client = boto3.client("ec2", region_name=TEST_REGION)
+
+    directory_id = create_test_microsoft_ad(client, ec2_client)
+
+    # Describe LDAPS settings for Microsoft AD without LDAPS enabled
+    ldaps = client.describe_ldaps_settings(DirectoryId=directory_id)[
+        "LDAPSSettingsInfo"
+    ]
+    assert ldaps == []
+
+    # Enable LDAPS for Microsoft AD and verify it is enabled
+    client.enable_ldaps(DirectoryId=directory_id, Type="Client")
+    ldaps = client.describe_ldaps_settings(DirectoryId=directory_id)[
+        "LDAPSSettingsInfo"
+    ]
+    assert len(ldaps) == 1
+    assert ldaps[0]["LDAPSStatus"] == "Enabled"
+
+    # Disable LDAPS for Microsoft AD and verify it is disabled
+    client.disable_ldaps(DirectoryId=directory_id, Type="Client")
+    ldaps = client.describe_ldaps_settings(DirectoryId=directory_id)[
+        "LDAPSSettingsInfo"
+    ]
+    assert len(ldaps) == 1
+    assert ldaps[0]["LDAPSStatus"] == "Disabled"
+
+
+@mock_aws
+def test_describe_settings():
+    client = boto3.client("ds", region_name=TEST_REGION)
+    ec2_client = boto3.client("ec2", region_name=TEST_REGION)
+    directory_id = create_test_microsoft_ad(client, ec2_client)
+
+    # Describe the settings for a Microsoft AD directory
+    settings = client.describe_settings(DirectoryId=directory_id)["SettingEntries"]
+    assert len(settings) > 0
+    assert "TLS_1_0" in [s["Name"] for s in settings]
+
+
+@mock_aws
+def test_update_settings():
+    client = boto3.client("ds", region_name=TEST_REGION)
+    ec2_client = boto3.client("ec2", region_name=TEST_REGION)
+    directory_id = create_test_microsoft_ad(client, ec2_client)
+
+    # Check the current setting for TLS 1.0
+    directory_settings = client.describe_settings(DirectoryId=directory_id)[
+        "SettingEntries"
+    ]
+    tls_1_0_setting = next(
+        (s for s in directory_settings if s["Name"] == "TLS_1_0"), None
+    )
+    assert tls_1_0_setting["AppliedValue"] == "Enable"
+
+    new_setting = {"Name": "TLS_1_0", "Value": "Disable"}
+    client.update_settings(DirectoryId=directory_id, Settings=[new_setting])
+
+    # Check the updated setting for TLS 1.0
+    new_directory_settings = client.describe_settings(DirectoryId=directory_id)[
+        "SettingEntries"
+    ]
+    new_tls_1_0_setting = next(
+        (s for s in new_directory_settings if s["Name"] == "TLS_1_0"), None
+    )
+    assert new_tls_1_0_setting["AppliedValue"] == "Disable"
+
+
+@mock_aws
+def test_enable_radius():
+    """Test enabling RADIUS for MicrosoftAD and verifying settings are stored."""
+    client = boto3.client("ds", region_name=TEST_REGION)
+    ec2_client = boto3.client("ec2", region_name=TEST_REGION)
+
+    directory_id = create_test_microsoft_ad(client, ec2_client)
+
+    radius_settings = {
+        "RadiusServers": ["10.0.0.1"],
+        "RadiusPort": 1812,
+        "RadiusTimeout": 30,
+        "RadiusRetries": 3,
+        "SharedSecret": "supersecret",
+        "AuthenticationProtocol": "MS-CHAPv2",
+        "DisplayLabel": "MFA",
+        "UseSameUsername": True,
+    }
+    client.enable_radius(DirectoryId=directory_id, RadiusSettings=radius_settings)
+
+    directory = client.describe_directories(DirectoryIds=[directory_id])[
+        "DirectoryDescriptions"
+    ][0]
+    assert directory["RadiusStatus"] == "Completed"
+    assert directory["RadiusSettings"]["RadiusServers"] == ["10.0.0.1"]
+    assert directory["RadiusSettings"]["RadiusPort"] == 1812
+    assert directory["RadiusSettings"]["AuthenticationProtocol"] == "MS-CHAPv2"
+
+
+@mock_aws
+def test_disable_radius():
+    """Test disabling RADIUS after enabling it for MicrosoftAD."""
+    client = boto3.client("ds", region_name=TEST_REGION)
+    ec2_client = boto3.client("ec2", region_name=TEST_REGION)
+
+    directory_id = create_test_microsoft_ad(client, ec2_client)
+
+    radius_settings = {
+        "RadiusServers": ["10.0.0.1"],
+        "RadiusPort": 1812,
+        "RadiusTimeout": 30,
+        "RadiusRetries": 3,
+        "SharedSecret": "supersecret",
+        "AuthenticationProtocol": "MS-CHAPv2",
+        "DisplayLabel": "MFA",
+        "UseSameUsername": True,
+    }
+    client.enable_radius(DirectoryId=directory_id, RadiusSettings=radius_settings)
+    client.disable_radius(DirectoryId=directory_id)
+
+    directory = client.describe_directories(DirectoryIds=[directory_id])[
+        "DirectoryDescriptions"
+    ][0]
+    assert "RadiusStatus" not in directory
+    assert directory["RadiusSettings"] == {}

@@ -1,12 +1,12 @@
 """Test different server responses."""
+
 import json
-import sure  # noqa # pylint: disable=unused-import
 
 import moto.server as server
-from moto import mock_cloudtrail
+from moto import mock_aws
 
 
-@mock_cloudtrail
+@mock_aws
 def test_cloudtrail_list():
     backend = server.create_backend_app("cloudtrail")
     test_client = backend.test_client()
@@ -16,4 +16,4 @@ def test_cloudtrail_list():
     }
     res = test_client.post("/", headers=headers)
     data = json.loads(res.data)
-    data.should.equal({"Trails": []})
+    assert data == {"Trails": []}

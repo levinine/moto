@@ -1,20 +1,20 @@
 """Unit tests specific to the tag-related ConfigService APIs.
 
- These APIs include:
-   list_tags_for_resource
-   tag_resource
-   untag_resource
+These APIs include:
+  list_tags_for_resource
+  tag_resource
+  untag_resource
 
 """
-import boto3
-from botocore.exceptions import ClientError
-from botocore.exceptions import ParamValidationError
-import pytest
 
-from moto.config import mock_config
+import boto3
+import pytest
+from botocore.exceptions import ClientError
+
+from moto import mock_aws
 from moto.config.models import MAX_TAGS_IN_ARG
-from moto.config.models import random_string
-from moto.core import ACCOUNT_ID
+from moto.core import DEFAULT_ACCOUNT_ID as ACCOUNT_ID
+from moto.moto_api._internal import mock_random
 
 TEST_REGION = "us-east-1"
 
@@ -31,7 +31,7 @@ def config_aggregators_info(client):
             {"Key": f"{x}", "Value": f"{x}"} for x in range(idx * 10, idx * 10 + 10)
         ]
         response = client.put_configuration_aggregator(
-            ConfigurationAggregatorName=f"testing_{idx}_{random_string()}",
+            ConfigurationAggregatorName=f"testing_{idx}_{mock_random.get_random_string()}",
             AccountAggregationSources=[
                 {"AccountIds": [ACCOUNT_ID], "AllAwsRegions": True}
             ],
@@ -39,12 +39,12 @@ def config_aggregators_info(client):
         )
         config_info = response["ConfigurationAggregator"]
         config_aggs.append(
-            {"arn": config_info["ConfigurationAggregatorArn"], "tags": tags,}
+            {"arn": config_info["ConfigurationAggregatorArn"], "tags": tags}
         )
     return config_aggs
 
 
-@mock_config
+@mock_aws
 def test_tag_resource():
     """Test the ConfigSource API tag_resource()."""
     client = boto3.client("config", region_name=TEST_REGION)
@@ -90,14 +90,6 @@ def test_tag_resource():
         "less than or equal to 50"
     ) in cerr.value.response["Error"]["Message"]
 
-    # Try specifying an invalid key.
-    with pytest.raises(ParamValidationError) as cerr:
-        client.tag_resource(ResourceArn=good_arn, Tags=[{"Test": "abc"}])
-    assert cerr.typename == "ParamValidationError"
-    assert 'Unknown parameter in Tags[0]: "Test", must be one of: Key, Value' in str(
-        cerr
-    )
-
     # Verify keys added to ConfigurationAggregator.
     rsp = client.list_tags_for_resource(ResourceArn=good_arn)
     tags = rsp["Tags"]
@@ -126,7 +118,7 @@ def test_tag_resource():
     assert tags == updated_rsp["Tags"]
 
     # Verify keys added to ConfigRule.
-    config_rule_name = f"config-rule-test-{random_string()}"
+    config_rule_name = f"config-rule-test-{mock_random.get_random_string()}"
     client.put_config_rule(
         ConfigRule={
             "ConfigRuleName": config_rule_name,
@@ -149,7 +141,7 @@ def test_tag_resource():
     assert tags == updated_rsp["Tags"]
 
 
-@mock_config
+@mock_aws
 def test_untag_resource():
     """Test the ConfigSource API untag_resource()."""
     client = boto3.client("config", region_name=TEST_REGION)
@@ -186,7 +178,7 @@ def test_untag_resource():
     # Try specifying more than 50 keys.
     with pytest.raises(ClientError) as cerr:
         client.untag_resource(
-            ResourceArn=good_arn, TagKeys=[f"{x}" for x in range(MAX_TAGS_IN_ARG + 1)],
+            ResourceArn=good_arn, TagKeys=[f"{x}" for x in range(MAX_TAGS_IN_ARG + 1)]
         )
     assert cerr.value.response["Error"]["Code"] == "ValidationException"
     assert (
@@ -248,7 +240,7 @@ def test_untag_resource():
 
     # Verify keys removed from ConfigRule.  Add a new tag to the current set
     # of tags, then delete the new tag.  The original set of tags should remain.
-    rule_name = f"config-rule-delete-tags-test-{random_string()}"
+    rule_name = f"config-rule-delete-tags-test-{mock_random.get_random_string()}"
     client.put_config_rule(
         ConfigRule={
             "ConfigRuleName": rule_name,
@@ -270,7 +262,7 @@ def test_untag_resource():
     assert tags == updated_rsp["Tags"]
 
 
-@mock_config
+@mock_aws
 def test_list_tags_for_resource():
     """Test the ConfigSource API list_tags_for_resource()."""
     client = boto3.client("config", region_name=TEST_REGION)

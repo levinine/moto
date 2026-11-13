@@ -1,104 +1,90 @@
-from moto.core.exceptions import RESTError
+from typing import Any
+
+from moto.core.exceptions import ServiceException
 
 
-class ELBClientError(RESTError):
-    code = 400
+class ELBClientError(ServiceException):
+    pass
 
 
 class DuplicateTagKeysError(ELBClientError):
-    def __init__(self, cidr):
-        super(DuplicateTagKeysError, self).__init__(
-            "DuplicateTagKeys", "Tag key was specified more than once: {0}".format(cidr)
+    def __init__(self, cidr: Any):
+        super().__init__(
+            "DuplicateTagKeys", f"Tag key was specified more than once: {cidr}"
         )
 
 
 class LoadBalancerNotFoundError(ELBClientError):
-    def __init__(self):
-        super(LoadBalancerNotFoundError, self).__init__(
-            "LoadBalancerNotFound", "The specified load balancer does not exist."
-        )
+    code = "LoadBalancerNotFound"
+    message = "The specified load balancer does not exist."
 
 
 class ListenerNotFoundError(ELBClientError):
-    def __init__(self):
-        super(ListenerNotFoundError, self).__init__(
-            "ListenerNotFound", "The specified listener does not exist."
-        )
+    def __init__(self) -> None:
+        super().__init__("ListenerNotFound", "The specified listener does not exist.")
 
 
 class SubnetNotFoundError(ELBClientError):
-    def __init__(self):
-        super(SubnetNotFoundError, self).__init__(
-            "SubnetNotFound", "The specified subnet does not exist."
-        )
+    def __init__(self) -> None:
+        super().__init__("SubnetNotFound", "The specified subnet does not exist.")
 
 
 class TargetGroupNotFoundError(ELBClientError):
-    def __init__(self):
-        super(TargetGroupNotFoundError, self).__init__(
-            "TargetGroupNotFound", "The specified target group does not exist."
-        )
+    def __init__(self) -> None:
+        super().__init__("TargetGroupNotFound", "One or more target groups not found")
 
 
 class TooManyTagsError(ELBClientError):
-    def __init__(self):
-        super(TooManyTagsError, self).__init__(
-            "TooManyTagsError",
-            "The quota for the number of tags that can be assigned to a load balancer has been reached",
-        )
+    code = "TooManyTags"
+    message = "The quota for the number of tags that can be assigned to a load balancer has been reached"
+
+
+class TooManyCertificatesError(ELBClientError):
+    code = "TooManyCertificates"
+    message = "You've reached the limit on the number of certificates per load balancer"
 
 
 class BadHealthCheckDefinition(ELBClientError):
-    def __init__(self):
-        super(BadHealthCheckDefinition, self).__init__(
-            "ValidationError",
-            "HealthCheck Target must begin with one of HTTP, TCP, HTTPS, SSL",
-        )
+    code = "ValidationError"
+    message = "HealthCheck Target must begin with one of HTTP, TCP, HTTPS, SSL"
 
 
 class DuplicateListenerError(ELBClientError):
-    def __init__(self):
-        super(DuplicateListenerError, self).__init__(
-            "DuplicateListener", "A listener with the specified port already exists."
-        )
+    code = "DuplicateListener"
+    message = "A listener with the specified port already exists."
 
 
 class DuplicateLoadBalancerName(ELBClientError):
-    def __init__(self):
-        super(DuplicateLoadBalancerName, self).__init__(
-            "DuplicateLoadBalancerName",
-            "A load balancer with the specified name already exists.",
-        )
+    code = "DuplicateLoadBalancerName"
+    message = "A load balancer with the specified name already exists."
 
 
 class DuplicateTargetGroupName(ELBClientError):
-    def __init__(self):
-        super(DuplicateTargetGroupName, self).__init__(
-            "DuplicateTargetGroupName",
-            "A target group with the specified name already exists.",
-        )
+    code = "DuplicateTargetGroupName"
+    message = "A target group with the specified name already exists."
 
 
 class InvalidTargetError(ELBClientError):
-    def __init__(self):
-        super(InvalidTargetError, self).__init__(
+    code = "InvalidTarget"
+    message = "The specified target does not exist or is not in the same VPC as the target group."
+
+
+class TargetNotRunning(ELBClientError):
+    def __init__(self, instance_id: str) -> None:
+        super().__init__(
             "InvalidTarget",
-            "The specified target does not exist or is not in the same VPC as the target group.",
+            f"The following targets are not in a running state and cannot be registered: '{instance_id}'",
         )
 
 
 class EmptyListenersError(ELBClientError):
-    def __init__(self):
-        super(EmptyListenersError, self).__init__(
-            "ValidationError", "Listeners cannot be empty"
-        )
+    def __init__(self) -> None:
+        super().__init__("ValidationError", "Listeners cannot be empty")
 
 
 class PriorityInUseError(ELBClientError):
-    def __init__(self):
-        super(PriorityInUseError, self).__init__(
-            "PriorityInUse", "The specified priority is in use."
-        )
+    def __init__(self) -> None:
+        super().__init__("PriorityInUse", "The specified priority is in use.")
 
 
 class InvalidConditionFieldError(ELBClientError):
@@ -111,87 +97,98 @@ class InvalidConditionFieldError(ELBClientError):
         "source-ip",
     ]
 
-    def __init__(self, invalid_name):
-        super(InvalidConditionFieldError, self).__init__(
+    def __init__(self, invalid_name: str):
+        valid = ",".join(self.VALID_FIELDS)
+        super().__init__(
             "ValidationError",
-            "Condition field '%s' must be one of '[%s]'"
-            % (invalid_name, ",".join(self.VALID_FIELDS)),
+            f"Condition field '{invalid_name}' must be one of '[{valid}]'",
         )
 
 
 class InvalidConditionValueError(ELBClientError):
-    def __init__(self, msg):
-        super(InvalidConditionValueError, self).__init__("ValidationError", msg)
+    code = "ValidationError"
 
 
 class InvalidActionTypeError(ELBClientError):
-    def __init__(self, invalid_name, index):
-        super(InvalidActionTypeError, self).__init__(
+    def __init__(self, invalid_name: Any, index: int):
+        super().__init__(
             "ValidationError",
-            "1 validation error detected: Value '%s' at 'actions.%s.member.type' failed to satisfy constraint: Member must satisfy enum value set: [forward, redirect, fixed-response]"
-            % (invalid_name, index),
+            f"1 validation error detected: Value '{invalid_name}' at 'actions.{index}.member.type' failed to satisfy constraint: Member must satisfy enum value set: [forward, redirect, fixed-response]",
         )
 
 
 class ActionTargetGroupNotFoundError(ELBClientError):
-    def __init__(self, arn):
-        super(ActionTargetGroupNotFoundError, self).__init__(
-            "TargetGroupNotFound", "Target group '%s' not found" % arn
-        )
+    def __init__(self, arn: str):
+        super().__init__("TargetGroupNotFound", f"Target group '{arn}' not found")
 
 
 class ListenerOrBalancerMissingError(ELBClientError):
-    def __init__(self, arn):
-        super(ListenerOrBalancerMissingError, self).__init__(
+    def __init__(self) -> None:
+        super().__init__(
             "ValidationError",
             "You must specify either listener ARNs or a load balancer ARN",
         )
 
 
 class InvalidDescribeRulesRequest(ELBClientError):
-    def __init__(self, msg):
-        super(InvalidDescribeRulesRequest, self).__init__("ValidationError", msg)
+    code = "ValidationError"
 
 
 class ResourceInUseError(ELBClientError):
-    def __init__(self, msg="A specified resource is in use"):
-        super(ResourceInUseError, self).__init__("ResourceInUse", msg)
+    def __init__(self, msg: str = "A specified resource is in use"):
+        super().__init__("ResourceInUse", msg)
 
 
 class RuleNotFoundError(ELBClientError):
-    def __init__(self):
-        super(RuleNotFoundError, self).__init__(
-            "RuleNotFound", "The specified rule does not exist."
-        )
+    def __init__(self, msg: str | None = None):
+        msg = msg or "The specified rule does not exist."
+        super().__init__("RuleNotFound", msg)
 
 
 class DuplicatePriorityError(ELBClientError):
-    def __init__(self, invalid_value):
-        super(DuplicatePriorityError, self).__init__(
-            "ValidationError",
-            "Priority '%s' was provided multiple times" % invalid_value,
+    def __init__(self, invalid_value: str):
+        super().__init__(
+            "ValidationError", f"Priority '{invalid_value}' was provided multiple times"
         )
 
 
 class InvalidTargetGroupNameError(ELBClientError):
-    def __init__(self, msg):
-        super(InvalidTargetGroupNameError, self).__init__("ValidationError", msg)
+    code = "ValidationError"
 
 
 class InvalidModifyRuleArgumentsError(ELBClientError):
-    def __init__(self):
-        super(InvalidModifyRuleArgumentsError, self).__init__(
+    def __init__(self) -> None:
+        super().__init__(
             "ValidationError", "Either conditions or actions must be specified"
         )
 
 
 class InvalidStatusCodeActionTypeError(ELBClientError):
-    def __init__(self, msg):
-        super(InvalidStatusCodeActionTypeError, self).__init__("ValidationError", msg)
+    code = "ValidationError"
 
 
 class InvalidLoadBalancerActionException(ELBClientError):
-    def __init__(self, msg):
-        super(InvalidLoadBalancerActionException, self).__init__(
-            "InvalidLoadBalancerAction", msg
+    code = "InvalidLoadBalancerAction"
+
+
+class ValidationError(ELBClientError):
+    code = "ValidationError"
+
+
+class InvalidConfigurationRequest(ELBClientError):
+    code = "InvalidConfigurationRequest"
+
+
+class InvalidProtocol(ELBClientError):
+    def __init__(self, protocol: str, valid_protocols: list[str]):
+        msg = f"Listener protocol '{protocol}' must be one of '{', '.join(valid_protocols)}'"
+        super().__init__("ValidationError", msg)
+
+
+class InvalidProtocolValue(ELBClientError):
+    def __init__(self, protocol: str, valid_protocols: list[str]):
+        msg = (
+            f"1 validation error detected: Value '{protocol}' at 'protocol' failed to satisfy constraint: "
+            f"Member must satisfy enum value set: [{', '.join(valid_protocols)}]"
         )
+        super().__init__("ValidationError", msg)

@@ -1,17 +1,17 @@
 import os
+from unittest import SkipTest
 
 import boto3
 import pytest
-import sure  # noqa # pylint: disable=unused-import
 from botocore.exceptions import ClientError
 from freezegun import freeze_time
-from unittest import SkipTest
 
-from moto import mock_managedblockchain
+from moto import mock_aws
+
 from . import helpers
 
 
-@mock_managedblockchain
+@mock_aws
 def test_vote_on_proposal_one_member_total_yes():
     conn = boto3.client("managedblockchain", region_name="us-east-1")
 
@@ -28,20 +28,17 @@ def test_vote_on_proposal_one_member_total_yes():
     member_id = response["MemberId"]
 
     # Create proposal
-    response = conn.create_proposal(
-        NetworkId=network_id,
-        MemberId=member_id,
-        Actions=helpers.default_policy_actions,
-    )
-    proposal_id = response["ProposalId"]
+    proposal_id = conn.create_proposal(
+        NetworkId=network_id, MemberId=member_id, Actions=helpers.default_policy_actions
+    )["ProposalId"]
 
     # Get proposal details
     response = conn.get_proposal(NetworkId=network_id, ProposalId=proposal_id)
-    response["Proposal"]["NetworkId"].should.equal(network_id)
-    response["Proposal"]["Status"].should.equal("IN_PROGRESS")
+    assert response["Proposal"]["NetworkId"] == network_id
+    assert response["Proposal"]["Status"] == "IN_PROGRESS"
 
     # Vote yes
-    response = conn.vote_on_proposal(
+    conn.vote_on_proposal(
         NetworkId=network_id,
         ProposalId=proposal_id,
         VoterMemberId=member_id,
@@ -50,17 +47,17 @@ def test_vote_on_proposal_one_member_total_yes():
 
     # List proposal votes
     response = conn.list_proposal_votes(NetworkId=network_id, ProposalId=proposal_id)
-    response["ProposalVotes"][0]["MemberId"].should.equal(member_id)
+    assert response["ProposalVotes"][0]["MemberId"] == member_id
 
     # Get proposal details - should be APPROVED
     response = conn.get_proposal(NetworkId=network_id, ProposalId=proposal_id)
-    response["Proposal"]["Status"].should.equal("APPROVED")
-    response["Proposal"]["YesVoteCount"].should.equal(1)
-    response["Proposal"]["NoVoteCount"].should.equal(0)
-    response["Proposal"]["OutstandingVoteCount"].should.equal(0)
+    assert response["Proposal"]["Status"] == "APPROVED"
+    assert response["Proposal"]["YesVoteCount"] == 1
+    assert response["Proposal"]["NoVoteCount"] == 0
+    assert response["Proposal"]["OutstandingVoteCount"] == 0
 
 
-@mock_managedblockchain
+@mock_aws
 def test_vote_on_proposal_one_member_total_no():
     conn = boto3.client("managedblockchain", region_name="us-east-1")
 
@@ -77,39 +74,33 @@ def test_vote_on_proposal_one_member_total_no():
     member_id = response["MemberId"]
 
     # Create proposal
-    response = conn.create_proposal(
-        NetworkId=network_id,
-        MemberId=member_id,
-        Actions=helpers.default_policy_actions,
-    )
-    proposal_id = response["ProposalId"]
+    proposal_id = conn.create_proposal(
+        NetworkId=network_id, MemberId=member_id, Actions=helpers.default_policy_actions
+    )["ProposalId"]
 
     # Get proposal details
     response = conn.get_proposal(NetworkId=network_id, ProposalId=proposal_id)
-    response["Proposal"]["NetworkId"].should.equal(network_id)
-    response["Proposal"]["Status"].should.equal("IN_PROGRESS")
+    assert response["Proposal"]["NetworkId"] == network_id
+    assert response["Proposal"]["Status"] == "IN_PROGRESS"
 
     # Vote no
-    response = conn.vote_on_proposal(
-        NetworkId=network_id,
-        ProposalId=proposal_id,
-        VoterMemberId=member_id,
-        Vote="NO",
+    conn.vote_on_proposal(
+        NetworkId=network_id, ProposalId=proposal_id, VoterMemberId=member_id, Vote="NO"
     )
 
     # List proposal votes
     response = conn.list_proposal_votes(NetworkId=network_id, ProposalId=proposal_id)
-    response["ProposalVotes"][0]["MemberId"].should.equal(member_id)
+    assert response["ProposalVotes"][0]["MemberId"] == member_id
 
     # Get proposal details - should be REJECTED
     response = conn.get_proposal(NetworkId=network_id, ProposalId=proposal_id)
-    response["Proposal"]["Status"].should.equal("REJECTED")
-    response["Proposal"]["YesVoteCount"].should.equal(0)
-    response["Proposal"]["NoVoteCount"].should.equal(1)
-    response["Proposal"]["OutstandingVoteCount"].should.equal(0)
+    assert response["Proposal"]["Status"] == "REJECTED"
+    assert response["Proposal"]["YesVoteCount"] == 0
+    assert response["Proposal"]["NoVoteCount"] == 1
+    assert response["Proposal"]["OutstandingVoteCount"] == 0
 
 
-@mock_managedblockchain
+@mock_aws
 def test_vote_on_proposal_yes_greater_than():
     conn = boto3.client("managedblockchain", region_name="us-east-1")
 
@@ -133,16 +124,12 @@ def test_vote_on_proposal_yes_greater_than():
     network_id = response["NetworkId"]
     member_id = response["MemberId"]
 
-    response = conn.create_proposal(
-        NetworkId=network_id,
-        MemberId=member_id,
-        Actions=helpers.default_policy_actions,
-    )
-
-    proposal_id = response["ProposalId"]
+    proposal_id = conn.create_proposal(
+        NetworkId=network_id, MemberId=member_id, Actions=helpers.default_policy_actions
+    )["ProposalId"]
 
     # Vote yes
-    response = conn.vote_on_proposal(
+    conn.vote_on_proposal(
         NetworkId=network_id,
         ProposalId=proposal_id,
         VoterMemberId=member_id,
@@ -154,26 +141,21 @@ def test_vote_on_proposal_yes_greater_than():
     invitation_id = response["Invitations"][0]["InvitationId"]
 
     # Create the member
-    response = conn.create_member(
+    member_id2 = conn.create_member(
         InvitationId=invitation_id,
         NetworkId=network_id,
         MemberConfiguration=helpers.create_member_configuration(
             "testmember2", "admin", "Admin12345", False, "Test Member 2"
         ),
-    )
-    member_id2 = response["MemberId"]
+    )["MemberId"]
 
     # Create another proposal
-    response = conn.create_proposal(
-        NetworkId=network_id,
-        MemberId=member_id,
-        Actions=helpers.default_policy_actions,
-    )
-
-    proposal_id = response["ProposalId"]
+    proposal_id = conn.create_proposal(
+        NetworkId=network_id, MemberId=member_id, Actions=helpers.default_policy_actions
+    )["ProposalId"]
 
     # Vote yes with member 1
-    response = conn.vote_on_proposal(
+    conn.vote_on_proposal(
         NetworkId=network_id,
         ProposalId=proposal_id,
         VoterMemberId=member_id,
@@ -182,11 +164,11 @@ def test_vote_on_proposal_yes_greater_than():
 
     # Get proposal details
     response = conn.get_proposal(NetworkId=network_id, ProposalId=proposal_id)
-    response["Proposal"]["NetworkId"].should.equal(network_id)
-    response["Proposal"]["Status"].should.equal("IN_PROGRESS")
+    assert response["Proposal"]["NetworkId"] == network_id
+    assert response["Proposal"]["Status"] == "IN_PROGRESS"
 
     # Vote no with member 2
-    response = conn.vote_on_proposal(
+    conn.vote_on_proposal(
         NetworkId=network_id,
         ProposalId=proposal_id,
         VoterMemberId=member_id2,
@@ -195,10 +177,10 @@ def test_vote_on_proposal_yes_greater_than():
 
     # Get proposal details
     response = conn.get_proposal(NetworkId=network_id, ProposalId=proposal_id)
-    response["Proposal"]["Status"].should.equal("REJECTED")
+    assert response["Proposal"]["Status"] == "REJECTED"
 
 
-@mock_managedblockchain
+@mock_aws
 def test_vote_on_proposal_no_greater_than():
     conn = boto3.client("managedblockchain", region_name="us-east-1")
 
@@ -222,16 +204,12 @@ def test_vote_on_proposal_no_greater_than():
     network_id = response["NetworkId"]
     member_id = response["MemberId"]
 
-    response = conn.create_proposal(
-        NetworkId=network_id,
-        MemberId=member_id,
-        Actions=helpers.default_policy_actions,
-    )
-
-    proposal_id = response["ProposalId"]
+    proposal_id = conn.create_proposal(
+        NetworkId=network_id, MemberId=member_id, Actions=helpers.default_policy_actions
+    )["ProposalId"]
 
     # Vote yes
-    response = conn.vote_on_proposal(
+    conn.vote_on_proposal(
         NetworkId=network_id,
         ProposalId=proposal_id,
         VoterMemberId=member_id,
@@ -243,34 +221,26 @@ def test_vote_on_proposal_no_greater_than():
     invitation_id = response["Invitations"][0]["InvitationId"]
 
     # Create the member
-    response = conn.create_member(
+    member_id2 = conn.create_member(
         InvitationId=invitation_id,
         NetworkId=network_id,
         MemberConfiguration=helpers.create_member_configuration(
             "testmember2", "admin", "Admin12345", False, "Test Member 2"
         ),
-    )
-    member_id2 = response["MemberId"]
+    )["MemberId"]
 
     # Create another proposal
-    response = conn.create_proposal(
-        NetworkId=network_id,
-        MemberId=member_id,
-        Actions=helpers.default_policy_actions,
-    )
-
-    proposal_id = response["ProposalId"]
+    proposal_id = conn.create_proposal(
+        NetworkId=network_id, MemberId=member_id, Actions=helpers.default_policy_actions
+    )["ProposalId"]
 
     # Vote no with member 1
-    response = conn.vote_on_proposal(
-        NetworkId=network_id,
-        ProposalId=proposal_id,
-        VoterMemberId=member_id,
-        Vote="NO",
+    conn.vote_on_proposal(
+        NetworkId=network_id, ProposalId=proposal_id, VoterMemberId=member_id, Vote="NO"
     )
 
     # Vote no with member 2
-    response = conn.vote_on_proposal(
+    conn.vote_on_proposal(
         NetworkId=network_id,
         ProposalId=proposal_id,
         VoterMemberId=member_id2,
@@ -279,11 +249,11 @@ def test_vote_on_proposal_no_greater_than():
 
     # Get proposal details
     response = conn.get_proposal(NetworkId=network_id, ProposalId=proposal_id)
-    response["Proposal"]["NetworkId"].should.equal(network_id)
-    response["Proposal"]["Status"].should.equal("REJECTED")
+    assert response["Proposal"]["NetworkId"] == network_id
+    assert response["Proposal"]["Status"] == "REJECTED"
 
 
-@mock_managedblockchain
+@mock_aws
 def test_vote_on_proposal_expiredproposal():
     if os.environ.get("TEST_SERVER_MODE", "false").lower() == "true":
         raise SkipTest("Cant manipulate time in server mode")
@@ -311,13 +281,11 @@ def test_vote_on_proposal_expiredproposal():
         network_id = response["NetworkId"]
         member_id = response["MemberId"]
 
-        response = conn.create_proposal(
+        proposal_id = conn.create_proposal(
             NetworkId=network_id,
             MemberId=member_id,
             Actions=helpers.default_policy_actions,
-        )
-
-        proposal_id = response["ProposalId"]
+        )["ProposalId"]
 
     with freeze_time("2015-02-01 12:00:00"):
         # Vote yes - should set status to expired
@@ -329,17 +297,18 @@ def test_vote_on_proposal_expiredproposal():
                 Vote="YES",
             )
         err = ex.value.response["Error"]
-        err["Code"].should.equal("InvalidRequestException")
-        err["Message"].should.contain(
-            "Proposal {0} is expired and you cannot vote on it.".format(proposal_id)
+        assert err["Code"] == "InvalidRequestException"
+        assert (
+            f"Proposal {proposal_id} is expired and you cannot vote on it."
+            in err["Message"]
         )
 
         # Get proposal details - should be EXPIRED
         response = conn.get_proposal(NetworkId=network_id, ProposalId=proposal_id)
-        response["Proposal"]["Status"].should.equal("EXPIRED")
+        assert response["Proposal"]["Status"] == "EXPIRED"
 
 
-@mock_managedblockchain
+@mock_aws
 def test_vote_on_proposal_status_check():
     conn = boto3.client("managedblockchain", region_name="us-east-1")
 
@@ -356,16 +325,15 @@ def test_vote_on_proposal_status_check():
     member_id = response["MemberId"]
 
     # Create 2 more members
-    for counter in range(2, 4):
-        response = conn.create_proposal(
+    for _ in range(2, 4):
+        proposal_id = conn.create_proposal(
             NetworkId=network_id,
             MemberId=member_id,
             Actions=helpers.default_policy_actions,
-        )
-        proposal_id = response["ProposalId"]
+        )["ProposalId"]
 
         # Vote yes
-        response = conn.vote_on_proposal(
+        conn.vote_on_proposal(
             NetworkId=network_id,
             ProposalId=proposal_id,
             VoterMemberId=member_id,
@@ -382,7 +350,7 @@ def test_vote_on_proposal_status_check():
         )[0]
 
         # Create the member
-        response = conn.create_member(
+        member_id = conn.create_member(
             InvitationId=invitation_id,
             NetworkId=network_id,
             MemberConfiguration=helpers.create_member_configuration(
@@ -392,8 +360,7 @@ def test_vote_on_proposal_status_check():
                 False,
                 "Test Member " + str(counter),
             ),
-        )
-        member_id = response["MemberId"]
+        )["MemberId"]
         memberidlist[counter - 1] = member_id
 
     # Should be no more pending invitations
@@ -401,19 +368,15 @@ def test_vote_on_proposal_status_check():
     pendinginvs = helpers.select_invitation_id_for_network(
         response["Invitations"], network_id, "PENDING"
     )
-    pendinginvs.should.have.length_of(0)
+    assert len(pendinginvs) == 0
 
     # Create another proposal
-    response = conn.create_proposal(
-        NetworkId=network_id,
-        MemberId=member_id,
-        Actions=helpers.default_policy_actions,
-    )
-
-    proposal_id = response["ProposalId"]
+    proposal_id = conn.create_proposal(
+        NetworkId=network_id, MemberId=member_id, Actions=helpers.default_policy_actions
+    )["ProposalId"]
 
     # Vote yes with member 1
-    response = conn.vote_on_proposal(
+    conn.vote_on_proposal(
         NetworkId=network_id,
         ProposalId=proposal_id,
         VoterMemberId=memberidlist[0],
@@ -421,7 +384,7 @@ def test_vote_on_proposal_status_check():
     )
 
     # Vote yes with member 2
-    response = conn.vote_on_proposal(
+    conn.vote_on_proposal(
         NetworkId=network_id,
         ProposalId=proposal_id,
         VoterMemberId=memberidlist[1],
@@ -430,15 +393,15 @@ def test_vote_on_proposal_status_check():
 
     # Get proposal details - now approved (2 yes, 1 outstanding)
     response = conn.get_proposal(NetworkId=network_id, ProposalId=proposal_id)
-    response["Proposal"]["NetworkId"].should.equal(network_id)
-    response["Proposal"]["Status"].should.equal("APPROVED")
+    assert response["Proposal"]["NetworkId"] == network_id
+    assert response["Proposal"]["Status"] == "APPROVED"
 
     # Should be one pending invitation
     response = conn.list_invitations()
     pendinginvs = helpers.select_invitation_id_for_network(
         response["Invitations"], network_id, "PENDING"
     )
-    pendinginvs.should.have.length_of(1)
+    assert len(pendinginvs) == 1
 
     # Vote with member 3 - should throw an exception and not create a new invitation
     with pytest.raises(ClientError) as ex:
@@ -449,18 +412,18 @@ def test_vote_on_proposal_status_check():
             Vote="YES",
         )
     err = ex.value.response["Error"]
-    err["Code"].should.equal("InvalidRequestException")
-    err["Message"].should.contain("and you cannot vote on it")
+    assert err["Code"] == "InvalidRequestException"
+    assert "and you cannot vote on it" in err["Message"]
 
     # Should still be one pending invitation
     response = conn.list_invitations()
     pendinginvs = helpers.select_invitation_id_for_network(
         response["Invitations"], network_id, "PENDING"
     )
-    pendinginvs.should.have.length_of(1)
+    assert len(pendinginvs) == 1
 
 
-@mock_managedblockchain
+@mock_aws
 def test_vote_on_proposal_badnetwork():
     conn = boto3.client("managedblockchain", region_name="us-east-1")
 
@@ -472,24 +435,23 @@ def test_vote_on_proposal_badnetwork():
             Vote="YES",
         )
     err = ex.value.response["Error"]
-    err["Code"].should.equal("ResourceNotFoundException")
-    err["Message"].should.contain("Network n-ABCDEFGHIJKLMNOP0123456789 not found")
+    assert err["Code"] == "ResourceNotFoundException"
+    assert "Network n-ABCDEFGHIJKLMNOP0123456789 not found" in err["Message"]
 
 
-@mock_managedblockchain
+@mock_aws
 def test_vote_on_proposal_badproposal():
     conn = boto3.client("managedblockchain", region_name="us-east-1")
 
     # Create network - need a good network
-    response = conn.create_network(
+    network_id = conn.create_network(
         Name="testnetwork1",
         Framework="HYPERLEDGER_FABRIC",
         FrameworkVersion="1.2",
         FrameworkConfiguration=helpers.default_frameworkconfiguration,
         VotingPolicy=helpers.default_votingpolicy,
         MemberConfiguration=helpers.default_memberconfiguration,
-    )
-    network_id = response["NetworkId"]
+    )["NetworkId"]
 
     with pytest.raises(ClientError) as ex:
         conn.vote_on_proposal(
@@ -499,11 +461,11 @@ def test_vote_on_proposal_badproposal():
             Vote="YES",
         )
     err = ex.value.response["Error"]
-    err["Code"].should.equal("ResourceNotFoundException")
-    err["Message"].should.contain("Proposal p-ABCDEFGHIJKLMNOP0123456789 not found")
+    assert err["Code"] == "ResourceNotFoundException"
+    assert "Proposal p-ABCDEFGHIJKLMNOP0123456789 not found" in err["Message"]
 
 
-@mock_managedblockchain
+@mock_aws
 def test_vote_on_proposal_badmember():
     conn = boto3.client("managedblockchain", region_name="us-east-1")
 
@@ -519,13 +481,9 @@ def test_vote_on_proposal_badmember():
     network_id = response["NetworkId"]
     member_id = response["MemberId"]
 
-    response = conn.create_proposal(
-        NetworkId=network_id,
-        MemberId=member_id,
-        Actions=helpers.default_policy_actions,
-    )
-
-    proposal_id = response["ProposalId"]
+    proposal_id = conn.create_proposal(
+        NetworkId=network_id, MemberId=member_id, Actions=helpers.default_policy_actions
+    )["ProposalId"]
 
     with pytest.raises(ClientError) as ex:
         conn.vote_on_proposal(
@@ -535,11 +493,11 @@ def test_vote_on_proposal_badmember():
             Vote="YES",
         )
     err = ex.value.response["Error"]
-    err["Code"].should.equal("ResourceNotFoundException")
-    err["Message"].should.contain("Member m-ABCDEFGHIJKLMNOP0123456789 not found")
+    assert err["Code"] == "ResourceNotFoundException"
+    assert "Member m-ABCDEFGHIJKLMNOP0123456789 not found" in err["Message"]
 
 
-@mock_managedblockchain
+@mock_aws
 def test_vote_on_proposal_badvote():
     conn = boto3.client("managedblockchain", region_name="us-east-1")
 
@@ -556,9 +514,7 @@ def test_vote_on_proposal_badvote():
     member_id = response["MemberId"]
 
     response = conn.create_proposal(
-        NetworkId=network_id,
-        MemberId=member_id,
-        Actions=helpers.default_policy_actions,
+        NetworkId=network_id, MemberId=member_id, Actions=helpers.default_policy_actions
     )
 
     proposal_id = response["ProposalId"]
@@ -571,11 +527,11 @@ def test_vote_on_proposal_badvote():
             Vote="FOO",
         )
     err = ex.value.response["Error"]
-    err["Code"].should.equal("BadRequestException")
-    err["Message"].should.contain("Invalid request body")
+    assert err["Code"] == "BadRequestException"
+    assert "Invalid request body" in err["Message"]
 
 
-@mock_managedblockchain
+@mock_aws
 def test_vote_on_proposal_alreadyvoted():
     conn = boto3.client("managedblockchain", region_name="us-east-1")
 
@@ -600,15 +556,13 @@ def test_vote_on_proposal_alreadyvoted():
     member_id = response["MemberId"]
 
     response = conn.create_proposal(
-        NetworkId=network_id,
-        MemberId=member_id,
-        Actions=helpers.default_policy_actions,
+        NetworkId=network_id, MemberId=member_id, Actions=helpers.default_policy_actions
     )
 
     proposal_id = response["ProposalId"]
 
     # Vote yes
-    response = conn.vote_on_proposal(
+    conn.vote_on_proposal(
         NetworkId=network_id,
         ProposalId=proposal_id,
         VoterMemberId=member_id,
@@ -620,7 +574,7 @@ def test_vote_on_proposal_alreadyvoted():
     invitation_id = response["Invitations"][0]["InvitationId"]
 
     # Create the member
-    response = conn.create_member(
+    conn.create_member(
         InvitationId=invitation_id,
         NetworkId=network_id,
         MemberConfiguration=helpers.create_member_configuration(
@@ -629,21 +583,17 @@ def test_vote_on_proposal_alreadyvoted():
     )
 
     # Create another proposal
-    response = conn.create_proposal(
-        NetworkId=network_id,
-        MemberId=member_id,
-        Actions=helpers.default_policy_actions,
-    )
-
-    proposal_id = response["ProposalId"]
+    proposal_id = conn.create_proposal(
+        NetworkId=network_id, MemberId=member_id, Actions=helpers.default_policy_actions
+    )["ProposalId"]
 
     # Get proposal details
     response = conn.get_proposal(NetworkId=network_id, ProposalId=proposal_id)
-    response["Proposal"]["NetworkId"].should.equal(network_id)
-    response["Proposal"]["Status"].should.equal("IN_PROGRESS")
+    assert response["Proposal"]["NetworkId"] == network_id
+    assert response["Proposal"]["Status"] == "IN_PROGRESS"
 
     # Vote yes with member 1
-    response = conn.vote_on_proposal(
+    conn.vote_on_proposal(
         NetworkId=network_id,
         ProposalId=proposal_id,
         VoterMemberId=member_id,
@@ -659,13 +609,14 @@ def test_vote_on_proposal_alreadyvoted():
             Vote="YES",
         )
     err = ex.value.response["Error"]
-    err["Code"].should.equal("ResourceAlreadyExistsException")
-    err["Message"].should.contain(
-        "Member {0} has already voted on proposal {1}.".format(member_id, proposal_id)
+    assert err["Code"] == "ResourceAlreadyExistsException"
+    assert (
+        f"Member {member_id} has already voted on proposal {proposal_id}."
+        in err["Message"]
     )
 
 
-@mock_managedblockchain
+@mock_aws
 def test_list_proposal_votes_badnetwork():
     conn = boto3.client("managedblockchain", region_name="us-east-1")
 
@@ -675,29 +626,28 @@ def test_list_proposal_votes_badnetwork():
             ProposalId="p-ABCDEFGHIJKLMNOP0123456789",
         )
     err = ex.value.response["Error"]
-    err["Code"].should.equal("ResourceNotFoundException")
-    err["Message"].should.contain("Network n-ABCDEFGHIJKLMNOP0123456789 not found")
+    assert err["Code"] == "ResourceNotFoundException"
+    assert "Network n-ABCDEFGHIJKLMNOP0123456789 not found" in err["Message"]
 
 
-@mock_managedblockchain
+@mock_aws
 def test_list_proposal_votes_badproposal():
     conn = boto3.client("managedblockchain", region_name="us-east-1")
 
     # Create network
-    response = conn.create_network(
+    network_id = conn.create_network(
         Name="testnetwork1",
         Framework="HYPERLEDGER_FABRIC",
         FrameworkVersion="1.2",
         FrameworkConfiguration=helpers.default_frameworkconfiguration,
         VotingPolicy=helpers.default_votingpolicy,
         MemberConfiguration=helpers.default_memberconfiguration,
-    )
-    network_id = response["NetworkId"]
+    )["NetworkId"]
 
     with pytest.raises(ClientError) as ex:
         conn.list_proposal_votes(
-            NetworkId=network_id, ProposalId="p-ABCDEFGHIJKLMNOP0123456789",
+            NetworkId=network_id, ProposalId="p-ABCDEFGHIJKLMNOP0123456789"
         )
     err = ex.value.response["Error"]
-    err["Code"].should.equal("ResourceNotFoundException")
-    err["Message"].should.contain("Proposal p-ABCDEFGHIJKLMNOP0123456789 not found")
+    assert err["Code"] == "ResourceNotFoundException"
+    assert "Proposal p-ABCDEFGHIJKLMNOP0123456789 not found" in err["Message"]

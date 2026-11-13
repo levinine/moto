@@ -1,14 +1,18 @@
+import re
+
 import boto3
 import pytest
-import sure  # noqa # pylint: disable=unused-import
-from moto import mock_applicationautoscaling, mock_ecs
+
+from moto import mock_aws
+from moto.core import DEFAULT_ACCOUNT_ID as ACCOUNT_ID
+from tests.test_dynamodb import dynamodb_aws_verified
 
 DEFAULT_REGION = "us-east-1"
 DEFAULT_ECS_CLUSTER = "default"
 DEFAULT_ECS_TASK = "test_ecs_task"
 DEFAULT_ECS_SERVICE = "sample-webapp"
 DEFAULT_SERVICE_NAMESPACE = "ecs"
-DEFAULT_RESOURCE_ID = "service/{}/{}".format(DEFAULT_ECS_CLUSTER, DEFAULT_ECS_SERVICE)
+DEFAULT_RESOURCE_ID = f"service/{DEFAULT_ECS_CLUSTER}/{DEFAULT_ECS_SERVICE}"
 DEFAULT_SCALABLE_DIMENSION = "ecs:service:DesiredCount"
 DEFAULT_MIN_CAPACITY = 1
 DEFAULT_MAX_CAPACITY = 1
@@ -47,8 +51,34 @@ def _create_ecs_defaults(ecs, create_service=True):
         )
 
 
-@mock_ecs
-@mock_applicationautoscaling
+def delete_scheduled_actions():
+    service_namespaces = ["custom-resource", "dynamodb", "ecs"]
+    client = boto3.client("application-autoscaling", region_name=DEFAULT_REGION)
+
+    for namespace in service_namespaces:
+        actions = client.describe_scheduled_actions(ServiceNamespace=namespace)[
+            "ScheduledActions"
+        ]
+        for a in actions:
+            client.delete_scheduled_action(
+                ServiceNamespace=namespace,
+                ScheduledActionName=a["ScheduledActionName"],
+                ResourceId=a["ResourceId"],
+                ScalableDimension=a["ScalableDimension"],
+            )
+
+        targets = client.describe_scalable_targets(ServiceNamespace=namespace)[
+            "ScalableTargets"
+        ]
+        for t in targets:
+            client.deregister_scalable_target(
+                ServiceNamespace=namespace,
+                ResourceId=t["ResourceId"],
+                ScalableDimension=t["ScalableDimension"],
+            )
+
+
+@mock_aws
 def test_describe_scalable_targets_one_basic_ecs_success():
     ecs = boto3.client("ecs", region_name=DEFAULT_REGION)
     _create_ecs_defaults(ecs)
@@ -61,19 +91,16 @@ def test_describe_scalable_targets_one_basic_ecs_success():
     response = client.describe_scalable_targets(
         ServiceNamespace=DEFAULT_SERVICE_NAMESPACE
     )
-    response["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
-    len(response["ScalableTargets"]).should.equal(1)
+    assert response["ResponseMetadata"]["HTTPStatusCode"] == 200
+    assert len(response["ScalableTargets"]) == 1
     t = response["ScalableTargets"][0]
-    t.should.have.key("ServiceNamespace").which.should.equal(DEFAULT_SERVICE_NAMESPACE)
-    t.should.have.key("ResourceId").which.should.equal(DEFAULT_RESOURCE_ID)
-    t.should.have.key("ScalableDimension").which.should.equal(
-        DEFAULT_SCALABLE_DIMENSION
-    )
-    t.should.have.key("CreationTime").which.should.be.a("datetime.datetime")
+    assert t["ServiceNamespace"] == DEFAULT_SERVICE_NAMESPACE
+    assert t["ResourceId"] == DEFAULT_RESOURCE_ID
+    assert t["ScalableDimension"] == DEFAULT_SCALABLE_DIMENSION
+    assert "CreationTime" in t
 
 
-@mock_ecs
-@mock_applicationautoscaling
+@mock_aws
 def test_describe_scalable_targets_one_full_ecs_success():
     ecs = boto3.client("ecs", region_name=DEFAULT_REGION)
     _create_ecs_defaults(ecs)
@@ -82,26 +109,23 @@ def test_describe_scalable_targets_one_full_ecs_success():
     response = client.describe_scalable_targets(
         ServiceNamespace=DEFAULT_SERVICE_NAMESPACE
     )
-    response["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
-    len(response["ScalableTargets"]).should.equal(1)
+    assert response["ResponseMetadata"]["HTTPStatusCode"] == 200
+    assert len(response["ScalableTargets"]) == 1
     t = response["ScalableTargets"][0]
-    t.should.have.key("ServiceNamespace").which.should.equal(DEFAULT_SERVICE_NAMESPACE)
-    t.should.have.key("ResourceId").which.should.equal(DEFAULT_RESOURCE_ID)
-    t.should.have.key("ScalableDimension").which.should.equal(
-        DEFAULT_SCALABLE_DIMENSION
-    )
-    t.should.have.key("MinCapacity").which.should.equal(DEFAULT_MIN_CAPACITY)
-    t.should.have.key("MaxCapacity").which.should.equal(DEFAULT_MAX_CAPACITY)
-    t.should.have.key("RoleARN").which.should.equal(DEFAULT_ROLE_ARN)
-    t.should.have.key("CreationTime").which.should.be.a("datetime.datetime")
-    t.should.have.key("SuspendedState")
-    t["SuspendedState"]["DynamicScalingInSuspended"].should.equal(
-        DEFAULT_SUSPENDED_STATE["DynamicScalingInSuspended"]
+    assert t["ServiceNamespace"] == DEFAULT_SERVICE_NAMESPACE
+    assert t["ResourceId"] == DEFAULT_RESOURCE_ID
+    assert t["ScalableDimension"] == DEFAULT_SCALABLE_DIMENSION
+    assert t["MinCapacity"] == DEFAULT_MIN_CAPACITY
+    assert t["MaxCapacity"] == DEFAULT_MAX_CAPACITY
+    assert t["RoleARN"] == DEFAULT_ROLE_ARN
+    assert "CreationTime" in t
+    assert (
+        t["SuspendedState"]["DynamicScalingInSuspended"]
+        == DEFAULT_SUSPENDED_STATE["DynamicScalingInSuspended"]
     )
 
 
-@mock_ecs
-@mock_applicationautoscaling
+@mock_aws
 def test_describe_scalable_targets_only_return_ecs_targets():
     ecs = boto3.client("ecs", region_name=DEFAULT_REGION)
     _create_ecs_defaults(ecs, create_service=False)
@@ -121,12 +145,12 @@ def test_describe_scalable_targets_only_return_ecs_targets():
     register_scalable_target(
         client,
         ServiceNamespace="ecs",
-        ResourceId="service/{}/test1".format(DEFAULT_ECS_CLUSTER),
+        ResourceId=f"service/{DEFAULT_ECS_CLUSTER}/test1",
     )
     register_scalable_target(
         client,
         ServiceNamespace="ecs",
-        ResourceId="service/{}/test2".format(DEFAULT_ECS_CLUSTER),
+        ResourceId=f"service/{DEFAULT_ECS_CLUSTER}/test2",
     )
     register_scalable_target(
         client,
@@ -137,12 +161,11 @@ def test_describe_scalable_targets_only_return_ecs_targets():
     response = client.describe_scalable_targets(
         ServiceNamespace=DEFAULT_SERVICE_NAMESPACE
     )
-    response["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
-    len(response["ScalableTargets"]).should.equal(2)
+    assert response["ResponseMetadata"]["HTTPStatusCode"] == 200
+    assert len(response["ScalableTargets"]) == 2
 
 
-@mock_ecs
-@mock_applicationautoscaling
+@mock_aws
 def test_describe_scalable_targets_next_token_success():
     ecs = boto3.client("ecs", region_name=DEFAULT_REGION)
     _create_ecs_defaults(ecs, create_service=False)
@@ -157,22 +180,22 @@ def test_describe_scalable_targets_next_token_success():
         register_scalable_target(
             client,
             ServiceNamespace="ecs",
-            ResourceId="service/{}/{}".format(DEFAULT_ECS_CLUSTER, i),
+            ResourceId=f"service/{DEFAULT_ECS_CLUSTER}/{i}",
         )
     response = client.describe_scalable_targets(
         ServiceNamespace=DEFAULT_SERVICE_NAMESPACE
     )
-    response["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
-    len(response["ScalableTargets"]).should.equal(50)
-    response["ScalableTargets"][0]["ResourceId"].should.equal("service/default/0")
-    response.should.have.key("NextToken").which.should.equal("49")
+    assert response["ResponseMetadata"]["HTTPStatusCode"] == 200
+    assert len(response["ScalableTargets"]) == 50
+    assert response["ScalableTargets"][0]["ResourceId"] == "service/default/0"
+    assert response["NextToken"] == "49"
     response = client.describe_scalable_targets(
         ServiceNamespace=DEFAULT_SERVICE_NAMESPACE, NextToken=str(response["NextToken"])
     )
-    response["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
-    len(response["ScalableTargets"]).should.equal(50)
-    response["ScalableTargets"][0]["ResourceId"].should.equal("service/default/50")
-    response.should_not.have.key("NextToken")
+    assert response["ResponseMetadata"]["HTTPStatusCode"] == 200
+    assert len(response["ScalableTargets"]) == 50
+    assert response["ScalableTargets"][0]["ResourceId"] == "service/default/50"
+    assert "NextToken" not in response
 
 
 def register_scalable_target(client, **kwargs):
@@ -188,10 +211,8 @@ def register_scalable_target(client, **kwargs):
     )
 
 
-@mock_ecs
-@mock_applicationautoscaling
+@mock_aws
 def test_register_scalable_target_resource_id_variations():
-
     # Required to register an ECS target in moto
     ecs = boto3.client("ecs", region_name=DEFAULT_REGION)
     _create_ecs_defaults(ecs)
@@ -258,18 +279,17 @@ def test_register_scalable_target_resource_id_variations():
             MaxCapacity=8,
         )
         response = client.describe_scalable_targets(ServiceNamespace=namespace)
-        response["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
+        assert response["ResponseMetadata"]["HTTPStatusCode"] == 200
         num_targets = 2 if namespace == "dynamodb" and "index" in resource_id else 1
-        len(response["ScalableTargets"]).should.equal(num_targets)
+        assert len(response["ScalableTargets"]) == num_targets
         t = response["ScalableTargets"][-1]
-        t.should.have.key("ServiceNamespace").which.should.equal(namespace)
-        t.should.have.key("ResourceId").which.should.equal(resource_id)
-        t.should.have.key("ScalableDimension").which.should.equal(scalable_dimension)
-        t.should.have.key("CreationTime").which.should.be.a("datetime.datetime")
+        assert t["ServiceNamespace"] == namespace
+        assert t["ResourceId"] == resource_id
+        assert t["ScalableDimension"] == scalable_dimension
+        assert "CreationTime" in t
 
 
-@mock_ecs
-@mock_applicationautoscaling
+@mock_aws
 def test_register_scalable_target_updates_existing_target():
     ecs = boto3.client("ecs", region_name=DEFAULT_REGION)
     _create_ecs_defaults(ecs)
@@ -284,7 +304,7 @@ def test_register_scalable_target_updates_existing_target():
         "ScheduledScalingSuspended": False,
     }
 
-    client.register_scalable_target(
+    response = client.register_scalable_target(
         ServiceNamespace=DEFAULT_SERVICE_NAMESPACE,
         ResourceId=DEFAULT_RESOURCE_ID,
         ScalableDimension=DEFAULT_SCALABLE_DIMENSION,
@@ -292,99 +312,33 @@ def test_register_scalable_target_updates_existing_target():
         MaxCapacity=updated_max_capacity,
         SuspendedState=updated_suspended_state,
     )
+    expected_arn_prefix = f"arn:aws:application-autoscaling:{DEFAULT_REGION}:{ACCOUNT_ID}:scalable-target/"
+    assert response["ScalableTargetARN"].startswith(expected_arn_prefix)
+
     response = client.describe_scalable_targets(
         ServiceNamespace=DEFAULT_SERVICE_NAMESPACE
     )
 
-    len(response["ScalableTargets"]).should.equal(1)
+    assert len(response["ScalableTargets"]) == 1
     t = response["ScalableTargets"][0]
-    t.should.have.key("MinCapacity").which.should.equal(updated_min_capacity)
-    t.should.have.key("MaxCapacity").which.should.equal(updated_max_capacity)
-    t.should.have.key("SuspendedState")
-    t["SuspendedState"]["DynamicScalingInSuspended"].should.equal(
-        updated_suspended_state["DynamicScalingInSuspended"]
+    assert t["ScalableTargetARN"].startswith(expected_arn_prefix)
+    assert t["MinCapacity"] == updated_min_capacity
+    assert t["MaxCapacity"] == updated_max_capacity
+    assert (
+        t["SuspendedState"]["DynamicScalingInSuspended"]
+        == updated_suspended_state["DynamicScalingInSuspended"]
     )
-    t["SuspendedState"]["DynamicScalingOutSuspended"].should.equal(
-        updated_suspended_state["DynamicScalingOutSuspended"]
+    assert (
+        t["SuspendedState"]["DynamicScalingOutSuspended"]
+        == updated_suspended_state["DynamicScalingOutSuspended"]
     )
-    t["SuspendedState"]["ScheduledScalingSuspended"].should.equal(
-        updated_suspended_state["ScheduledScalingSuspended"]
-    )
-
-
-@pytest.mark.parametrize(
-    ["policy_type", "policy_body_kwargs"],
-    [
-        [
-            "TargetTrackingScaling",
-            {
-                "TargetTrackingScalingPolicyConfiguration": {
-                    "TargetValue": 70.0,
-                    "PredefinedMetricSpecification": {
-                        "PredefinedMetricType": "SageMakerVariantInvocationsPerInstance"
-                    },
-                }
-            },
-        ],
-        [
-            "TargetTrackingScaling",
-            {
-                "StepScalingPolicyConfiguration": {
-                    "AdjustmentType": "ChangeCapacity",
-                    "StepAdjustments": [{"ScalingAdjustment": 10,},],
-                    "MinAdjustmentMagnitude": 2,
-                },
-            },
-        ],
-    ],
-)
-@mock_applicationautoscaling
-def test_put_scaling_policy(policy_type, policy_body_kwargs):
-    client = boto3.client("application-autoscaling", region_name=DEFAULT_REGION)
-    namespace = "sagemaker"
-    resource_id = "endpoint/MyEndPoint/variant/MyVariant"
-    scalable_dimension = "sagemaker:variant:DesiredInstanceCount"
-
-    client.register_scalable_target(
-        ServiceNamespace=namespace,
-        ResourceId=resource_id,
-        ScalableDimension=scalable_dimension,
-        MinCapacity=1,
-        MaxCapacity=8,
-    )
-
-    policy_name = "MyPolicy"
-
-    with pytest.raises(client.exceptions.ValidationException) as e:
-        client.put_scaling_policy(
-            PolicyName=policy_name,
-            ServiceNamespace=namespace,
-            ResourceId=resource_id,
-            ScalableDimension=scalable_dimension,
-            PolicyType="ABCDEFG",
-            **policy_body_kwargs
-        )
-    e.value.response["Error"]["Message"].should.match(
-        r"Unknown policy type .* specified."
-    )
-
-    response = client.put_scaling_policy(
-        PolicyName=policy_name,
-        ServiceNamespace=namespace,
-        ResourceId=resource_id,
-        ScalableDimension=scalable_dimension,
-        PolicyType=policy_type,
-        **policy_body_kwargs
-    )
-    response["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
-    response["PolicyARN"].should.match(
-        r"arn:aws:autoscaling:.*1:scalingPolicy:.*:resource/{}/{}:policyName/{}".format(
-            namespace, resource_id, policy_name
-        )
+    assert (
+        t["SuspendedState"]["ScheduledScalingSuspended"]
+        == updated_suspended_state["ScheduledScalingSuspended"]
     )
 
 
-@mock_applicationautoscaling
+@mock_aws
 def test_describe_scaling_policies():
     client = boto3.client("application-autoscaling", region_name=DEFAULT_REGION)
     namespace = "sagemaker"
@@ -416,7 +370,7 @@ def test_describe_scaling_policies():
         PolicyType=policy_type,
         TargetTrackingScalingPolicyConfiguration=policy_body,
     )
-    response["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
+    assert response["ResponseMetadata"]["HTTPStatusCode"] == 200
 
     response = client.describe_scaling_policies(
         PolicyNames=[policy_name],
@@ -424,23 +378,25 @@ def test_describe_scaling_policies():
         ResourceId=resource_id,
         ScalableDimension=scalable_dimension,
     )
-    response["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
+    assert response["ResponseMetadata"]["HTTPStatusCode"] == 200
     policy = response["ScalingPolicies"][0]
-    policy["PolicyName"].should.equal(policy_name)
-    policy["ServiceNamespace"].should.equal(namespace)
-    policy["ResourceId"].should.equal(resource_id)
-    policy["ScalableDimension"].should.equal(scalable_dimension)
-    policy["PolicyType"].should.equal(policy_type)
-    policy["TargetTrackingScalingPolicyConfiguration"].should.equal(policy_body)
-    policy["PolicyARN"].should.match(
-        r"arn:aws:autoscaling:.*1:scalingPolicy:.*:resource/{}/{}:policyName/{}".format(
-            namespace, resource_id, policy_name
+    assert policy["PolicyName"] == policy_name
+    assert policy["ServiceNamespace"] == namespace
+    assert policy["ResourceId"] == resource_id
+    assert policy["ScalableDimension"] == scalable_dimension
+    assert policy["PolicyType"] == policy_type
+    assert policy["TargetTrackingScalingPolicyConfiguration"] == policy_body
+    assert (
+        re.match(
+            pattern=rf"arn:aws:autoscaling:{DEFAULT_REGION}:{ACCOUNT_ID}:scalingPolicy:.*:resource/{namespace}/{resource_id}:policyName/{policy_name}",
+            string=policy["PolicyARN"],
         )
+        is not None
     )
-    policy.should.have.key("CreationTime").which.should.be.a("datetime.datetime")
+    assert "CreationTime" in policy
 
 
-@mock_applicationautoscaling
+@mock_aws
 def test_delete_scaling_policies():
     client = boto3.client("application-autoscaling", region_name=DEFAULT_REGION)
     namespace = "sagemaker"
@@ -471,7 +427,7 @@ def test_delete_scaling_policies():
             ResourceId=resource_id,
             ScalableDimension=scalable_dimension,
         )
-    e.value.response["Error"]["Message"].should.match(r"No scaling policy found .*")
+    assert "No scaling policy found" in e.value.response["Error"]["Message"]
 
     response = client.put_scaling_policy(
         PolicyName=policy_name,
@@ -481,7 +437,7 @@ def test_delete_scaling_policies():
         PolicyType=policy_type,
         TargetTrackingScalingPolicyConfiguration=policy_body,
     )
-    response["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
+    assert response["ResponseMetadata"]["HTTPStatusCode"] == 200
 
     response = client.delete_scaling_policy(
         PolicyName=policy_name,
@@ -489,7 +445,7 @@ def test_delete_scaling_policies():
         ResourceId=resource_id,
         ScalableDimension=scalable_dimension,
     )
-    response["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
+    assert response["ResponseMetadata"]["HTTPStatusCode"] == 200
 
     response = client.describe_scaling_policies(
         PolicyNames=[policy_name],
@@ -497,11 +453,11 @@ def test_delete_scaling_policies():
         ResourceId=resource_id,
         ScalableDimension=scalable_dimension,
     )
-    response["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
-    len(response["ScalingPolicies"]).should.equal(0)
+    assert response["ResponseMetadata"]["HTTPStatusCode"] == 200
+    assert len(response["ScalingPolicies"]) == 0
 
 
-@mock_applicationautoscaling
+@mock_aws
 def test_deregister_scalable_target():
     client = boto3.client("application-autoscaling", region_name=DEFAULT_REGION)
     namespace = "sagemaker"
@@ -517,7 +473,7 @@ def test_deregister_scalable_target():
     )
 
     response = client.describe_scalable_targets(ServiceNamespace=namespace)
-    len(response["ScalableTargets"]).should.equal(1)
+    assert len(response["ScalableTargets"]) == 1
 
     client.deregister_scalable_target(
         ServiceNamespace=namespace,
@@ -526,7 +482,7 @@ def test_deregister_scalable_target():
     )
 
     response = client.describe_scalable_targets(ServiceNamespace=namespace)
-    len(response["ScalableTargets"]).should.equal(0)
+    assert len(response["ScalableTargets"]) == 0
 
     with pytest.raises(client.exceptions.ValidationException) as e:
         client.deregister_scalable_target(
@@ -534,4 +490,181 @@ def test_deregister_scalable_target():
             ResourceId=resource_id,
             ScalableDimension=scalable_dimension,
         )
-    e.value.response["Error"]["Message"].should.match(r"No scalable target found .*")
+    assert "No scalable target found" in e.value.response["Error"]["Message"]
+
+
+@mock_aws
+def test_delete_scheduled_action():
+    client = boto3.client("application-autoscaling", region_name="eu-west-1")
+    resp = client.describe_scheduled_actions(ServiceNamespace="ecs")
+    assert len(resp["ScheduledActions"]) == 0
+
+    for i in range(3):
+        client.put_scheduled_action(
+            ServiceNamespace="ecs",
+            ScheduledActionName=f"ecs_action_{i}",
+            ResourceId=f"ecs:cluster:{i}",
+            ScalableDimension="ecs:service:DesiredCount",
+        )
+
+    resp = client.describe_scheduled_actions(ServiceNamespace="ecs")
+    assert len(resp["ScheduledActions"]) == 3
+
+    client.delete_scheduled_action(
+        ServiceNamespace="ecs",
+        ScheduledActionName="ecs_action_0",
+        ResourceId="ecs:cluster:0",
+        ScalableDimension="ecs:service:DesiredCount",
+    )
+
+    resp = client.describe_scheduled_actions(ServiceNamespace="ecs")
+    assert len(resp["ScheduledActions"]) == 2
+
+
+@mock_aws
+def test_describe_scheduled_actions():
+    client = boto3.client("application-autoscaling", region_name="eu-west-1")
+    resp = client.describe_scheduled_actions(ServiceNamespace="ecs")
+    assert len(resp["ScheduledActions"]) == 0
+
+    for i in range(3):
+        client.put_scheduled_action(
+            ServiceNamespace="ecs",
+            ScheduledActionName=f"ecs_action_{i}",
+            ResourceId=f"ecs:cluster:{i}",
+            ScalableDimension="ecs:service:DesiredCount",
+        )
+        client.put_scheduled_action(
+            ServiceNamespace="dynamodb",
+            ScheduledActionName=f"ddb_action_{i}",
+            ResourceId=f"table/table_{i}",
+            ScalableDimension="dynamodb:table:ReadCapacityUnits",
+        )
+
+    resp = client.describe_scheduled_actions(ServiceNamespace="ecs")
+    assert len(resp["ScheduledActions"]) == 3
+
+    resp = client.describe_scheduled_actions(ServiceNamespace="ec2")
+    assert len(resp["ScheduledActions"]) == 0
+
+    resp = client.describe_scheduled_actions(
+        ServiceNamespace="dynamodb", ScheduledActionNames=["ddb_action_0"]
+    )
+    assert len(resp["ScheduledActions"]) == 1
+
+    resp = client.describe_scheduled_actions(
+        ServiceNamespace="dynamodb",
+        ResourceId="table/table_0",
+        ScalableDimension="dynamodb:table:ReadCapacityUnits",
+    )
+    assert len(resp["ScheduledActions"]) == 1
+
+    resp = client.describe_scheduled_actions(
+        ServiceNamespace="dynamodb",
+        ResourceId="table/table_0",
+        ScalableDimension="dynamodb:table:WriteCapacityUnits",
+    )
+    assert len(resp["ScheduledActions"]) == 0
+
+
+@dynamodb_aws_verified()
+@pytest.mark.aws_verified
+def test_put_scheduled_action(table_name=None):
+    client = boto3.client("application-autoscaling", region_name="us-east-1")
+    try:
+        resource_id = f"table/{table_name}"
+        client.register_scalable_target(
+            ServiceNamespace="dynamodb",
+            ResourceId=resource_id,
+            ScalableDimension="dynamodb:table:ReadCapacityUnits",
+            MinCapacity=1,
+            MaxCapacity=100,
+        )
+        client.put_scheduled_action(
+            ServiceNamespace="dynamodb",
+            Schedule="rate(2 minutes)",
+            ScheduledActionName="action_name",
+            ResourceId=resource_id,
+            ScalableDimension="dynamodb:table:ReadCapacityUnits",
+            ScalableTargetAction={"MinCapacity": 1, "MaxCapacity": 5},
+        )
+
+        resp = client.describe_scheduled_actions(ServiceNamespace="dynamodb")
+        assert len(resp["ScheduledActions"]) == 1
+
+        action = resp["ScheduledActions"][0]
+        assert action["ScheduledActionName"] == "action_name"
+        assert action["ServiceNamespace"] == "dynamodb"
+        assert action["ResourceId"] == resource_id
+        assert action["ScalableDimension"] == "dynamodb:table:ReadCapacityUnits"
+        assert "CreationTime" in action
+
+        # Verify it's possible to create a second action against the same Dimension
+        client.put_scheduled_action(
+            ServiceNamespace="dynamodb",
+            Schedule="rate(1 hour)",
+            ScheduledActionName="action_name2",
+            ResourceId=resource_id,
+            ScalableDimension="dynamodb:table:ReadCapacityUnits",
+            ScalableTargetAction={"MinCapacity": 1, "MaxCapacity": 5},
+        )
+        actions = client.describe_scheduled_actions(ServiceNamespace="dynamodb")[
+            "ScheduledActions"
+        ]
+        assert len(actions) == 2
+
+        action1 = [a for a in actions if a["ScheduledActionName"] == "action_name"][0]
+        action2 = [a for a in actions if a["ScheduledActionName"] == "action_name2"][0]
+
+        assert action1["ResourceId"] == resource_id
+        assert action2["ResourceId"] == resource_id
+
+        # AWS includes a random ID
+        # arn:aws:autoscaling:us-east-1:{ACCOUNT_ID}:scheduledAction:2e767478-3c94-463b-8d0c-5a5fb3ee04cf:resource/dynamodb/table/{table_name}:scheduledActionName/action_name
+        assert action1["ScheduledActionARN"].endswith(
+            f"dynamodb/table/{table_name}:scheduledActionName/action_name"
+        )
+        assert action2["ScheduledActionARN"].endswith(
+            f"dynamodb/table/{table_name}:scheduledActionName/action_name2"
+        )
+
+        assert action1["Schedule"] == "rate(2 minutes)"
+        assert action2["Schedule"] == "rate(1 hour)"
+    finally:
+        delete_scheduled_actions()
+
+
+@mock_aws
+def test_put_scheduled_action__use_update():
+    client = boto3.client("application-autoscaling", region_name="ap-southeast-1")
+    client.put_scheduled_action(
+        ServiceNamespace="ecs",
+        ScheduledActionName="action_name",
+        ResourceId="ecs:cluster:x",
+        ScalableDimension="ecs:service:DesiredCount",
+    )
+    client.put_scheduled_action(
+        ServiceNamespace="ecs",
+        ScheduledActionName="action_name",
+        ResourceId="ecs:cluster:x",
+        ScalableDimension="ecs:service:DesiredCount",
+        ScalableTargetAction={
+            "MinCapacity": 12,
+            "MaxCapacity": 23,
+        },
+    )
+
+    resp = client.describe_scheduled_actions(ServiceNamespace="ecs")
+    assert len(resp["ScheduledActions"]) == 1
+
+    action = resp["ScheduledActions"][0]
+    assert action["ScheduledActionName"] == "action_name"
+    assert (
+        action["ScheduledActionARN"]
+        == f"arn:aws:autoscaling:ap-southeast-1:{ACCOUNT_ID}:scheduledAction:ecs/ecs:cluster:x:scheduledActionName/action_name"
+    )
+    assert action["ServiceNamespace"] == "ecs"
+    assert action["ResourceId"] == "ecs:cluster:x"
+    assert action["ScalableDimension"] == "ecs:service:DesiredCount"
+    assert "CreationTime" in action
+    assert action["ScalableTargetAction"] == {"MaxCapacity": 23, "MinCapacity": 12}

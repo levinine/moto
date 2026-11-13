@@ -12,22 +12,11 @@
 cognito-identity
 ================
 
-|start-h3| Example usage |end-h3|
-
-.. sourcecode:: python
-
-            @mock_cognitoidentity
-            def test_cognito-identity_behaviour:
-                boto3.client("cognito-identity")
-                ...
-
-
-
 |start-h3| Implemented features for this service |end-h3|
 
 - [X] create_identity_pool
 - [ ] delete_identities
-- [ ] delete_identity_pool
+- [X] delete_identity_pool
 - [ ] describe_identity
 - [X] describe_identity_pool
 - [X] get_credentials_for_identity
@@ -37,7 +26,15 @@ cognito-identity
 - [X] get_open_id_token_for_developer_identity
 - [ ] get_principal_tag_attribute_map
 - [X] list_identities
-- [ ] list_identity_pools
+  
+The MaxResults-parameter has not yet been implemented
+
+
+- [X] list_identity_pools
+  
+The MaxResults-parameter has not yet been implemented
+
+
 - [ ] list_tags_for_resource
 - [ ] lookup_developer_identity
 - [ ] merge_developer_identities
@@ -48,4 +45,8 @@ cognito-identity
 - [ ] unlink_identity
 - [ ] untag_resource
 - [X] update_identity_pool
+  
+The AllowClassic-parameter has not yet been implemented
+
+
 

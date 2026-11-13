@@ -1,27 +1,19 @@
-from moto.core.exceptions import RESTError
+from moto.core.exceptions import ServiceException
 
 
-class AutoscalingClientError(RESTError):
-    code = 400
+class AutoscalingClientError(ServiceException):
+    pass
 
 
-class ResourceContentionError(RESTError):
-    code = 500
-
-    def __init__(self):
-        super(ResourceContentionError, self).__init__(
-            "ResourceContentionError",
-            "You already have a pending update to an Auto Scaling resource (for example, a group, instance, or load balancer).",
-        )
-
-
-class InvalidInstanceError(AutoscalingClientError):
-    def __init__(self, instance_id):
-        super(InvalidInstanceError, self).__init__(
-            "ValidationError", "Instance [{0}] is invalid.".format(instance_id)
-        )
+class ResourceContentionError(AutoscalingClientError):
+    code = "ResourceContention"
+    message = "You already have a pending update to an Auto Scaling resource (for example, a group, instance, or load balancer)."
 
 
 class ValidationError(AutoscalingClientError):
-    def __init__(self, message):
-        super(ValidationError, self).__init__("ValidationError", message)
+    code = "ValidationError"
+
+
+class InvalidInstanceError(ValidationError):
+    def __init__(self, instance_id: str):
+        super().__init__(f"Instance [{instance_id}] is invalid.")

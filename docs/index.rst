@@ -22,8 +22,8 @@ Additional Resources
 * `Moto Issue Tracker`_
 
 .. _AWS infrastructure: http://aws.amazon.com/
-.. _Moto Issue Tracker: https://github.com/spulec/moto/issues
-.. _Moto Source Repository: https://github.com/spulec/moto
+.. _Moto Issue Tracker: https://github.com/getmoto/moto/issues
+.. _Moto Source Repository: https://github.com/getmoto/moto
 
 .. toctree::
    :maxdepth: 2
@@ -32,10 +32,18 @@ Additional Resources
 
    docs/getting_started
    docs/server_mode
+   docs/proxy_mode
    docs/faq
-   docs/boto
    docs/iam
    docs/aws_config
+   docs/multi_account
+   docs/releases
+
+.. toctree::
+  :hidden:
+  :caption: Configuration
+
+  docs/configuration/index
 
 .. toctree::
   :maxdepth: 1
@@ -43,6 +51,8 @@ Additional Resources
   :caption: Implemented Services
 
   docs/services/index
+  docs/services/cf
+  docs/services/patching_other_services
 
 .. toctree::
   :maxdepth: 1
@@ -67,3 +77,4 @@ Additional Resources
   docs/contributing/development_tips/urls
   docs/contributing/development_tips/tests
   docs/contributing/development_tips/utilities
+  docs/contributing/development_tips/new_state_transitions

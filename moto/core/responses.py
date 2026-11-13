@@ -1,281 +1,293 @@
-import functools
-from collections import defaultdict
-import datetime
+from __future__ import annotations
+
+import gzip
 import json
 import logging
+import os
 import re
-import requests
-
-import pytz
-
-from moto.core.exceptions import DryRunClientError
-
-from jinja2 import Environment, DictLoader, TemplateNotFound
-
+from collections import ChainMap, OrderedDict
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import (
+    Any,
+    TypeVar,
+    cast,
+)
 from urllib.parse import parse_qs, parse_qsl, urlparse
 
-import xmltodict
+from botocore.model import OperationNotFoundError
 from werkzeug.exceptions import HTTPException
+from werkzeug.http import http_date
 
-import boto3
-from collections import OrderedDict
-from moto.core.utils import camelcase_to_underscores, method_names_from_class
-from moto.utilities.utils import load_resource
 from moto import settings
+from moto.core.authorization import ActionAuthenticatorMixin
+from moto.core.common_types import TYPE_IF_NONE, TYPE_RESPONSE
+from moto.core.exceptions import ServiceException
+from moto.core.model import OperationModel, ServiceModel
+from moto.core.parse import PROTOCOL_PARSERS, XFormedDict
+from moto.core.request import Request, determine_request_protocol
+from moto.core.routing import NotFound, get_service_router
+from moto.core.serialize import (
+    ResponseSerializer,
+    XFormedAttributePicker,
+    get_serializer_class,
+    never_return,
+)
+from moto.core.utils import (
+    camelcase_to_underscores,
+    get_pagination_model,
+    get_service_model,
+    get_value,
+    method_names_from_class,
+    set_value,
+    utcnow,
+)
+from moto.utilities.aws_headers import gen_amzn_requestid_long
+from moto.utilities.constants import APPLICATION_CBOR
+from moto.utilities.paginator import paginate
+from moto.utilities.utils import get_partition
 
 log = logging.getLogger(__name__)
 
 
-def _decode_dict(d):
-    decoded = OrderedDict()
-    for key, value in d.items():
-        if isinstance(key, bytes):
-            newkey = key.decode("utf-8")
-        elif isinstance(key, (list, tuple)):
-            newkey = []
-            for k in key:
-                if isinstance(k, bytes):
-                    newkey.append(k.decode("utf-8"))
-                else:
-                    newkey.append(k)
-        else:
-            newkey = key
+ResponseShape = TypeVar("ResponseShape", bound="BaseResponse")
 
-        if isinstance(value, bytes):
-            newvalue = value.decode("utf-8")
-        elif isinstance(value, (list, tuple)):
-            newvalue = []
-            for v in value:
-                if isinstance(v, bytes):
-                    newvalue.append(v.decode("utf-8"))
-                else:
-                    newvalue.append(v)
-        else:
-            newvalue = value
-
-        decoded[newkey] = newvalue
-    return decoded
+boto3_service_name = {"awslambda": "lambda"}
 
 
-class DynamicDictLoader(DictLoader):
-    """
-    Note: There's a bug in jinja2 pre-2.7.3 DictLoader where caching does not work.
-      Including the fixed (current) method version here to ensure performance benefit
-      even for those using older jinja versions.
-    """
-
-    def get_source(self, environment, template):
-        if template in self.mapping:
-            source = self.mapping[template]
-            return source, None, lambda: source == self.mapping.get(template)
-        raise TemplateNotFound(template)
-
-    def update(self, mapping):
-        self.mapping.update(mapping)
-
-    def contains(self, template):
-        return bool(template in self.mapping)
+@dataclass
+class ActionContext:
+    service_model: ServiceModel
+    operation_model: OperationModel
+    serializer_class: type[ResponseSerializer]
+    response: BaseResponse
 
 
-class _TemplateEnvironmentMixin(object):
-    LEFT_PATTERN = re.compile(r"[\s\n]+<")
-    RIGHT_PATTERN = re.compile(r">[\s\n]+")
+class ActionResult:
+    """Wrapper class for serializable results returned from `responses.py` methods."""
 
-    def __init__(self):
-        super(_TemplateEnvironmentMixin, self).__init__()
-        self.loader = DynamicDictLoader({})
-        self.environment = Environment(
-            loader=self.loader, autoescape=self.should_autoescape
-        )
+    def __init__(self, result: object) -> None:
+        self._result = result
 
     @property
-    def should_autoescape(self):
-        # Allow for subclass to overwrite
-        return False
+    def result(self) -> object:
+        return self._result
 
-    def contains_template(self, template_id):
-        return self.loader.contains(template_id)
-
-    def response_template(self, source):
-        template_id = id(source)
-        if not self.contains_template(template_id):
-            collapsed = re.sub(
-                self.RIGHT_PATTERN, ">", re.sub(self.LEFT_PATTERN, "<", source)
-            )
-            self.loader.update({template_id: collapsed})
-            self.environment = Environment(
-                loader=self.loader,
-                autoescape=self.should_autoescape,
-                trim_blocks=True,
-                lstrip_blocks=True,
-            )
-        return self.environment.get_template(template_id)
-
-
-class ActionAuthenticatorMixin(object):
-
-    request_count = 0
-
-    def _authenticate_and_authorize_action(self, iam_request_cls):
-        if (
-            ActionAuthenticatorMixin.request_count
-            >= settings.INITIAL_NO_AUTH_ACTION_COUNT
-        ):
-            iam_request = iam_request_cls(
-                method=self.method, path=self.path, data=self.data, headers=self.headers
-            )
-            iam_request.check_signature()
-            iam_request.check_action_permitted()
-        else:
-            ActionAuthenticatorMixin.request_count += 1
-
-    def _authenticate_and_authorize_normal_action(self):
-        from moto.iam.access_control import IAMRequest
-
-        self._authenticate_and_authorize_action(IAMRequest)
-
-    def _authenticate_and_authorize_s3_action(self):
-        from moto.iam.access_control import S3IAMRequest
-
-        self._authenticate_and_authorize_action(S3IAMRequest)
-
-    @staticmethod
-    def set_initial_no_auth_action_count(initial_no_auth_action_count):
-        def decorator(function):
-            def wrapper(*args, **kwargs):
-                if settings.TEST_SERVER_MODE:
-                    response = requests.post(
-                        "http://localhost:5000/moto-api/reset-auth",
-                        data=str(initial_no_auth_action_count).encode("utf-8"),
-                    )
-                    original_initial_no_auth_action_count = response.json()[
-                        "PREVIOUS_INITIAL_NO_AUTH_ACTION_COUNT"
-                    ]
-                else:
-                    original_initial_no_auth_action_count = (
-                        settings.INITIAL_NO_AUTH_ACTION_COUNT
-                    )
-                    original_request_count = ActionAuthenticatorMixin.request_count
-                    settings.INITIAL_NO_AUTH_ACTION_COUNT = initial_no_auth_action_count
-                    ActionAuthenticatorMixin.request_count = 0
-                try:
-                    result = function(*args, **kwargs)
-                finally:
-                    if settings.TEST_SERVER_MODE:
-                        requests.post(
-                            "http://localhost:5000/moto-api/reset-auth",
-                            data=str(original_initial_no_auth_action_count).encode(
-                                "utf-8"
-                            ),
-                        )
-                    else:
-                        ActionAuthenticatorMixin.request_count = original_request_count
-                        settings.INITIAL_NO_AUTH_ACTION_COUNT = (
-                            original_initial_no_auth_action_count
-                        )
-                return result
-
-            functools.update_wrapper(wrapper, function)
-            wrapper.__wrapped__ = function
-            return wrapper
-
-        return decorator
+    def execute_result(self, context: ActionContext) -> TYPE_RESPONSE:
+        """
+        Execute the result in the context of the given service and operation model.
+        This is a placeholder for any logic that might be needed to process the result
+        based on the service and operation context.
+        """
+        serializer_cls = context.serializer_class
+        response_transformers = getattr(
+            context.response, "RESPONSE_KEY_PATH_TO_TRANSFORMER", None
+        )
+        value_picker = XFormedAttributePicker(
+            response_transformers=response_transformers
+        )
+        serializer = serializer_cls(
+            operation_model=context.operation_model,
+            pretty_print=settings.PRETTIFY_RESPONSES,
+            value_picker=value_picker,
+        )
+        serialized = serializer.serialize(self.result)
+        return serialized["status_code"], serialized["headers"], serialized["body"]  # type: ignore[return-value]
 
 
-class BaseResponse(_TemplateEnvironmentMixin, ActionAuthenticatorMixin):
+class PaginatedResult(ActionResult):
+    def execute_result(self, context: ActionContext) -> TYPE_RESPONSE:
+        service_name = str(context.service_model.service_name)
+        operation_name = str(context.operation_model.name)
+        pagination_model = get_pagination_model(service_name)
+        paging_config = pagination_model[operation_name]
+        paging_config.setdefault("limit_default", 100)
+
+        kwargs = context.response.params
+        if isinstance(kwargs, XFormedDict):
+            kwargs = kwargs.original_dict()
+
+        def get_result_to_paginate(**_: Any) -> Any:
+            return get_value(self._result, paging_config["result_key"])
+
+        get_result_to_paginate.__name__ = operation_name
+        paginator = paginate(pagination_model)(get_result_to_paginate)
+        paginated_results, next_token = paginator(**kwargs)
+        set_value(self._result, paging_config["result_key"], paginated_results)
+        set_value(self._result, paging_config["output_token"], next_token)
+        return super().execute_result(context)
+
+
+class EmptyResult(ActionResult):
+    """A special ActionResult that represents an empty result."""
+
+    def __init__(self) -> None:
+        super().__init__(None)
+
+
+class BaseResponse(ActionAuthenticatorMixin):
+    PROTOCOL_PARSER_MAP_TYPE: Any = dict
+    RESPONSE_KEY_PATH_TO_TRANSFORMER: dict[str, Callable[[Any], Any]] = {}
 
     default_region = "us-east-1"
     # to extract region, use [^.]
-    region_regex = re.compile(r"\.(?P<region>[a-z]{2}-[a-z]+-\d{1})\.amazonaws\.com")
+    # Note that the URL region can be anything, thanks to our MOTO_ALLOW_NONEXISTENT_REGION-config - so we can't have a very specific regex
+    region_regex = re.compile(r"\.(?P<region>[^.]+)\.amazonaws\.com")
     region_from_useragent_regex = re.compile(
         r"region/(?P<region>[a-z]{2}-[a-z]+-\d{1})"
     )
-    # Note: technically, we could remove "member" from the regex below... (leaving it for clarity)
-    param_list_regex = re.compile(r"^(\.?[^.]*(\.member|\.[^.]+)?)\.(\d+)\.?")
-    param_regex = re.compile(r"([^\.]*)\.(\w+)(\..+)?")
     access_key_regex = re.compile(
         r"AWS.*(?P<access_key>(?<![A-Z0-9])[A-Z0-9]{20}(?![A-Z0-9]))[:/]"
     )
-    aws_service_spec = None
+
+    #: Keep the incoming body as bytes, instead of decoding it to a string
+    use_raw_body = False
+
+    def __init__(self, service_name: str | None = None):
+        super().__init__()
+        self.service_name = service_name
+        self.allow_request_decompression = True
+        self.automated_parameter_parsing = False
+
+    @property
+    def boto3_service_name(self) -> str:
+        if self.service_name is None:
+            return ""
+        return boto3_service_name.get(self.service_name, self.service_name)
 
     @classmethod
-    def dispatch(cls, *args, **kwargs):
+    def dispatch(cls, *args: Any, **kwargs: Any) -> Any:  # type: ignore[misc]
         return cls()._dispatch(*args, **kwargs)
 
-    def setup_class(self, request, full_url, headers):
-        querystring = OrderedDict()
-        if hasattr(request, "body"):
-            # Boto
-            self.body = request.body
-        else:
-            # Flask server
+    def decompress_request_body(self, request: Request) -> None:
+        # https://github.com/getmoto/moto/issues/6692
+        # Content coming from SDK's can be GZipped for performance reasons
+        if request.content_encoding == "gzip" and self.allow_request_decompression:
+            request.stream = gzip.GzipFile(fileobj=request.stream)  # type: ignore[assignment]
+            request.get_data(parse_form_data=True)
 
-            # FIXME: At least in Flask==0.10.1, request.data is an empty string
-            # and the information we want is in request.form. Keeping self.body
-            # definition for back-compatibility
-            self.body = request.data
+    def setup_class(
+        self,
+        request: Request,
+        full_url: str | None = None,
+        headers: Any = None,
+        use_raw_body: bool | None = None,
+    ) -> None:
+        """
+        full_url and headers are carried by the request itself.  They remain
+        parameters for the callers that pass them through explicitly.
 
-            querystring = OrderedDict()
-            for key, value in request.form.items():
-                querystring[key] = [value]
+        use_raw_body overrides the class-level default for a single call.
+        """
+        use_raw_body = self.use_raw_body if use_raw_body is None else use_raw_body
+        if request.mimetype == APPLICATION_CBOR:
+            # Binary body, which must not be decoded or parsed as a querystring
+            use_raw_body = True
+        # Only a real WSGI server supplies its own Date header - in every other
+        # mode moto is the entire stack and has to supply it itself.  This used
+        # to be inferred from the type name, which stopped working once every
+        # mode started handing us the same normalized Request.
+        self.is_werkzeug_request = request.from_wsgi_server
+        full_url = request.raw_url if full_url is None else full_url
+        headers = request.headers if headers is None else headers
+        self.decompress_request_body(request)
+        self.normalized_request = request
+        self.parsed_url = urlparse(full_url)
+        querystring: dict[str, Any] = OrderedDict()
+        self.body: Any = request.data
 
-        raw_body = self.body
-        if isinstance(self.body, bytes):
+        # TODO: self.form_data is only used by s3 and can be replaced with self.normalized_request.values
+        self.form_data = request.form
+        for key, value in request.form.items():
+            querystring[key] = [value]
+
+        # TODO: This is all s3 only and can be removed and fixed in s3.
+        if "key" in request.form:
+            if "file" in request.form:
+                self.body = request.form["file"]
+            else:
+                # Body comes through as part of the form, if no content-type is set on the PUT-request
+                # form = ImmutableMultiDict([('some data 123 321', '')])
+                form = request.form
+                for k, _ in form.items():
+                    self.body = k
+        if request.files:
+            for _, uploaded in request.files.items():
+                self.body = uploaded.stream.read()
+                uploaded.stream.close()
+            if querystring.get("key"):
+                filename = os.path.basename(request.files["file"].filename or "")
+                querystring["key"] = [
+                    querystring["key"][0].replace("${filename}", filename)
+                ]
+
+        if hasattr(self.body, "read"):
+            self.body = self.body.read()
+        self.raw_body = self.body
+
+        if isinstance(self.body, bytes) and not use_raw_body:
             self.body = self.body.decode("utf-8")
 
         if not querystring:
-            querystring.update(
-                parse_qs(urlparse(full_url).query, keep_blank_values=True)
-            )
+            querystring.update(parse_qs(self.parsed_url.query, keep_blank_values=True))
         if not querystring:
-            if (
-                "json" in request.headers.get("content-type", [])
-                and self.aws_service_spec
-            ):
-                decoded = json.loads(self.body)
-
-                target = request.headers.get("x-amz-target") or request.headers.get(
-                    "X-Amz-Target"
-                )
-                service, method = target.split(".")
-                input_spec = self.aws_service_spec.input_spec(method)
-                flat = flatten_json_request_body("", decoded, input_spec)
-                for key, value in flat.items():
-                    querystring[key] = [value]
-            elif self.body:
+            if self.body and not use_raw_body:
                 try:
                     querystring.update(
                         OrderedDict(
                             (key, [value])
                             for key, value in parse_qsl(
-                                raw_body, keep_blank_values=True
+                                self.body, keep_blank_values=True
                             )
                         )
                     )
-                except (UnicodeEncodeError, UnicodeDecodeError):
+                except (UnicodeEncodeError, UnicodeDecodeError, AttributeError):
                     pass  # ignore encoding errors, as the body may not contain a legitimate querystring
         if not querystring:
             querystring.update(headers)
 
-        try:
-            querystring = _decode_dict(querystring)
-        except UnicodeDecodeError:
-            pass  # ignore decoding errors, as the body may not contain a legitimate querystring
-
         self.uri = full_url
-        self.path = urlparse(full_url).path
+
+        self.path = self.parsed_url.path
+        self.raw_path = request.raw_path
+
         self.querystring = querystring
         self.data = querystring
         self.method = request.method
         self.region = self.get_region_from_url(request, full_url)
-        self.uri_match = None
+        self.partition = get_partition(self.region)
+        self.uri_match: dict[str, Any] = {}
 
-        self.headers = request.headers
-        if "host" not in self.headers:
-            self.headers["host"] = urlparse(full_url).netloc
-        self.response_headers = {"server": "amazon.com"}
+        if "host" not in request.headers:
+            # request.headers is an immutable view over the WSGI environ, so the
+            # fallback has to be written to the environ itself.
+            request.environ["HTTP_HOST"] = self.parsed_url.netloc
 
-    def get_region_from_url(self, request, full_url):
+        # Typed loosely on purpose: services reach into this for arbitrary x-amz-* values
+        # TODO: normalize headers type.
+        self.headers: Any = request.headers
+        self.response_headers = {
+            "server": "amazon.com",
+        }
+        if not self.is_werkzeug_request:
+            self.response_headers["date"] = http_date(utcnow())
+
+        if self.automated_parameter_parsing and self._get_action():
+            self.parse_parameters(request)
+
+        # Register visit with IAM
+        from moto.iam.models import mark_account_as_visited
+
+        self.access_key = self.get_access_key()
+        self.current_account = self.get_current_account()
+        mark_account_as_visited(
+            account_id=self.current_account,
+            access_key=self.access_key,
+            service=self.service_name,  # type: ignore[arg-type]
+            region=self.region,
+        )
+
+    def get_region_from_url(self, request: Any, full_url: str) -> str:
         url_match = self.region_regex.search(full_url)
         user_agent_match = self.region_from_useragent_regex.search(
             request.headers.get("User-Agent", "")
@@ -293,7 +305,7 @@ class BaseResponse(_TemplateEnvironmentMixin, ActionAuthenticatorMixin):
             region = self.default_region
         return region
 
-    def get_current_user(self):
+    def get_access_key(self) -> str:
         """
         Returns the access key id used in this request as the current user id
         """
@@ -303,137 +315,167 @@ class BaseResponse(_TemplateEnvironmentMixin, ActionAuthenticatorMixin):
                 return match.group(1)
 
         if self.querystring.get("AWSAccessKeyId"):
-            return self.querystring.get("AWSAccessKeyId")
+            return self.querystring["AWSAccessKeyId"][0]
         else:
-            # Should we raise an unauthorized exception instead?
-            return "111122223333"
+            return "AKIAEXAMPLE"
 
-    def _dispatch(self, request, full_url, headers):
+    def get_current_account(self) -> str:
+        # PRIO 1: Check if we have a Environment Variable set
+        if "MOTO_ACCOUNT_ID" in os.environ:
+            return os.environ["MOTO_ACCOUNT_ID"]
+
+        # PRIO 2: Check if we have a specific request header that specifies the Account ID
+        if "x-moto-account-id" in self.headers:
+            return self.headers["x-moto-account-id"]
+
+        # PRIO 3: Use the access key to get the Account ID
+        # PRIO 4: This method will return the default Account ID as a last resort
+        from moto.iam.models import get_account_id_from
+
+        return get_account_id_from(self.get_access_key())
+
+    def _dispatch(
+        self, request: Request, full_url: str | None = None, headers: Any = None
+    ) -> TYPE_RESPONSE:
         self.setup_class(request, full_url, headers)
         return self.call_action()
 
-    def uri_to_regexp(self, uri):
-        """converts uri w/ placeholder to regexp
-          '/cars/{carName}/drivers/{DriverName}'
-        -> '^/cars/.*/drivers/[^/]*$'
+    def _get_action_from_request(self, request: Request) -> str:
+        try:
+            service_router = get_service_router(self.boto3_service_name)
+            operation, uri_params = service_router.match(request)
+            self.uri_match = uri_params
+            return operation.name
+        except (NotFound, NotImplementedError):
+            pass
+        return None  # type: ignore[return-value]
 
-          '/cars/{carName}/drivers/{DriverName}/drive'
-        -> '^/cars/.*/drivers/.*/drive$'
+    def _get_action(self) -> str:
+        return self._get_action_from_request(self.normalized_request)
 
-        """
-
-        def _convert(elem, is_last):
-            if not re.match("^{.*}$", elem):
-                return elem
-            name = (
-                elem.replace("{", "")
-                .replace("}", "")
-                .replace("+", "")
-                .replace("-", "_")
-            )
-            if is_last:
-                return "(?P<%s>[^/]+)" % name
-            return "(?P<%s>.*)" % name
-
-        elems = uri.split("/")
-        num_elems = len(elems)
-        regexp = "^{}$".format(
-            "/".join(
-                [_convert(elem, (i == num_elems - 1)) for i, elem in enumerate(elems)]
-            )
+    def parse_parameters(self, request: Request) -> None:
+        service_model = get_service_model(self.boto3_service_name)
+        operation_model = service_model.operation_model(self._get_action())
+        protocol = determine_request_protocol(service_model, request)
+        parser_cls = PROTOCOL_PARSERS[protocol]
+        parser = parser_cls(operation_model, map_type=self.PROTOCOL_PARSER_MAP_TYPE)
+        parsed = parser.parse(
+            {
+                "method": request.method,
+                "values": request.values,
+                "headers": request.headers,
+                "body": request.data,
+                "url_path": request.path,
+                "url_params": self.uri_match,
+            }
         )
-        return regexp
+        self.params = cast(Any, parsed)
 
-    def _get_action_from_method_and_request_uri(self, method, request_uri):
-        """basically used for `rest-json` APIs
-        You can refer to example from link below
-        https://github.com/boto/botocore/blob/develop/botocore/data/iot/2015-05-28/service-2.json
-        """
+    def determine_response_protocol(self, service_model: ServiceModel) -> str:
+        protocol = determine_request_protocol(service_model, self.normalized_request)
+        if protocol == "query" and self.request_json:
+            protocol = "query-json"
+        return protocol
 
-        # service response class should have 'SERVICE_NAME' class member,
-        # if you want to get action from method and url
-        if not hasattr(self, "SERVICE_NAME"):
-            return None
-        service = self.SERVICE_NAME
-        conn = boto3.client(service, region_name=self.region)
+    def serialized(self, action_result: ActionResult) -> TYPE_RESPONSE:
+        service_model = get_service_model(self.boto3_service_name)
+        try:
+            operation_model = service_model.operation_model(self._get_action())
+        except OperationNotFoundError:
+            assert isinstance(action_result.result, Exception)
+            operation_model = OperationModel({}, service_model)
+        protocol = self.determine_response_protocol(service_model)
+        serializer_cls = get_serializer_class(service_model.service_name, protocol)
+        context = ActionContext(service_model, operation_model, serializer_cls, self)
+        status_code, headers, body = action_result.execute_result(context)
+        headers.update(self.response_headers)
+        return status_code, headers, body
 
-        # make cache if it does not exist yet
-        if not hasattr(self, "method_urls"):
-            self.method_urls = defaultdict(lambda: defaultdict(str))
-            op_names = conn._service_model.operation_names
-            for op_name in op_names:
-                op_model = conn._service_model.operation_model(op_name)
-                _method = op_model.http["method"]
-                uri_regexp = self.uri_to_regexp(op_model.http["requestUri"])
-                self.method_urls[_method][uri_regexp] = op_model.name
-        regexp_and_names = self.method_urls[method]
-        for regexp, name in regexp_and_names.items():
-            match = re.match(regexp, request_uri)
-            self.uri_match = match
-            if match:
-                return name
-        return None
-
-    def _get_action(self):
-        action = self.querystring.get("Action", [""])[0]
-        if not action:  # Some services use a header for the action
-            # Headers are case-insensitive. Probably a better way to do this.
-            match = self.headers.get("x-amz-target") or self.headers.get("X-Amz-Target")
-            if match:
-                action = match.split(".")[-1]
-        # get action from method and uri
-        if not action:
-            return self._get_action_from_method_and_request_uri(self.method, self.path)
-        return action
-
-    def call_action(self):
+    def call_action(self) -> TYPE_RESPONSE:
         headers = self.response_headers
+        if hasattr(self, "_determine_resource"):
+            resource = self._determine_resource()
+        else:
+            resource = "*"
 
         try:
-            self._authenticate_and_authorize_normal_action()
+            self._authenticate_and_authorize_normal_action(resource)
         except HTTPException as http_error:
-            response = http_error.description, dict(status=http_error.code)
-            return self._send_response(headers, response)
+            response = http_error.description, {"status": http_error.code}
+            status, headers, body = self._transform_response(headers, response)
+            headers, body = self._enrich_response(headers, body)
+
+            return status, headers, body
 
         action = camelcase_to_underscores(self._get_action())
         method_names = method_names_from_class(self.__class__)
+
         if action in method_names:
             method = getattr(self, action)
             try:
                 response = method()
+            except ServiceException as e:
+                se_status, se_headers, se_body = self.serialized(ActionResult(e))
+                se_headers["status"] = se_status
+                response = se_body, se_headers  # type: ignore[assignment]
             except HTTPException as http_error:
-                response_headers = dict(http_error.get_headers() or [])
-                response_headers["status"] = http_error.code
-                response = http_error.description, response_headers
+                response_headers: dict[str, str | int] = dict(
+                    http_error.get_headers() or []
+                )
+                response_headers["status"] = http_error.code  # type: ignore[assignment]
+                response = http_error.description, response_headers  # type: ignore[assignment]
 
-            if isinstance(response, str):
-                return 200, headers, response
+            if isinstance(response, ActionResult):
+                status, headers, body = self.serialized(response)
+            elif isinstance(response, str):
+                status = 200
+                body = response
             else:
-                return self._send_response(headers, response)
+                status, headers, body = self._transform_response(headers, response)
+
+            headers, body = self._enrich_response(headers, body)
+
+            return status, headers, body
 
         if not action:
             return 404, headers, ""
 
-        raise NotImplementedError(
-            "The {0} action has not been implemented".format(action)
-        )
+        raise NotImplementedError(f"The {action} action has not been implemented")
 
     @staticmethod
-    def _send_response(headers, response):
+    def _transform_response(headers: dict[str, str], response: Any) -> TYPE_RESPONSE:  # type: ignore[misc]
         if response is None:
             response = "", {}
         if len(response) == 2:
             body, new_headers = response
         else:
             status, new_headers, body = response
-        status = new_headers.get("status", 200)
+        status = int(new_headers.get("status", 200))
         headers.update(new_headers)
+        return status, headers, body
+
+    @staticmethod
+    def _enrich_response(  # type: ignore[misc]
+        headers: dict[str, str], body: Any
+    ) -> tuple[dict[str, str], Any]:
         # Cast status to string
         if "status" in headers:
             headers["status"] = str(headers["status"])
-        return status, headers, body
+        # add request id
+        request_id = gen_amzn_requestid_long(headers)
 
-    def _get_param(self, param_name, if_none=None):
+        # Update request ID in XML
+        try:
+            body = re.sub(r"(?<=<RequestId>).*(?=<\/RequestId>)", request_id, body)
+        except Exception:  # Will just ignore if it cant work
+            pass
+        return headers, body
+
+    def _get_param(self, param_name: str, if_none: Any = None) -> Any:
+        if self.automated_parameter_parsing:
+            params = ChainMap(self.params, self.uri_match)
+            return get_value(params, param_name, default=if_none)
+
         val = self.querystring.get(param_name)
         if val is not None:
             return val[0]
@@ -442,26 +484,43 @@ class BaseResponse(_TemplateEnvironmentMixin, ActionAuthenticatorMixin):
         if self.body is not None:
             try:
                 return json.loads(self.body)[param_name]
-            except ValueError:
-                pass
-            except KeyError:
+            except (ValueError, KeyError, TypeError):
                 pass
         # try to get path parameter
         if self.uri_match:
             try:
-                return self.uri_match.group(param_name)
-            except IndexError:
+                val = self.uri_match[param_name]
+                return val
+            except KeyError:
                 # do nothing if param is not found
                 pass
         return if_none
 
-    def _get_int_param(self, param_name, if_none=None):
+    def _get_int_param(
+        self,
+        param_name: str,
+        if_none: TYPE_IF_NONE = None,  # type: ignore[assignment]
+    ) -> int | TYPE_IF_NONE:
         val = self._get_param(param_name)
         if val is not None:
             return int(val)
         return if_none
 
-    def _get_bool_param(self, param_name, if_none=None):
+    def _get_float_param(
+        self,
+        param_name: str,
+        if_none: TYPE_IF_NONE = None,  # type: ignore[assignment]
+    ) -> float | TYPE_IF_NONE:
+        val = self._get_param(param_name)
+        if val is not None:
+            return float(val)
+        return if_none
+
+    def _get_bool_param(
+        self,
+        param_name: str,
+        if_none: TYPE_IF_NONE = None,  # type: ignore[assignment]
+    ) -> bool | TYPE_IF_NONE:
         val = self._get_param(param_name)
         if val is not None:
             val = str(val)
@@ -471,667 +530,15 @@ class BaseResponse(_TemplateEnvironmentMixin, ActionAuthenticatorMixin):
                 return False
         return if_none
 
-    def _get_multi_param_dict(self, param_prefix):
-        return self._get_multi_param_helper(param_prefix, skip_result_conversion=True)
-
-    def _get_multi_param_helper(
-        self, param_prefix, skip_result_conversion=False, tracked_prefixes=None
-    ):
-        value_dict = dict()
-        tracked_prefixes = (
-            tracked_prefixes or set()
-        )  # prefixes which have already been processed
-
-        def is_tracked(name_param):
-            for prefix_loop in tracked_prefixes:
-                if name_param.startswith(prefix_loop):
-                    return True
-            return False
-
-        for name, value in self.querystring.items():
-            if is_tracked(name) or not name.startswith(param_prefix):
-                continue
-
-            if len(name) > len(param_prefix) and not name[
-                len(param_prefix) :
-            ].startswith("."):
-                continue
-
-            match = (
-                self.param_list_regex.search(name[len(param_prefix) :])
-                if len(name) > len(param_prefix)
-                else None
-            )
-            if match:
-                prefix = param_prefix + match.group(1)
-                value = self._get_multi_param(prefix)
-                tracked_prefixes.add(prefix)
-                name = prefix
-                value_dict[name] = value
-            else:
-                match = self.param_regex.search(name[len(param_prefix) :])
-                if match:
-                    # enable access to params that are lists of dicts, e.g., "TagSpecification.1.ResourceType=.."
-                    sub_attr = "%s%s.%s" % (
-                        name[: len(param_prefix)],
-                        match.group(1),
-                        match.group(2),
-                    )
-                    if match.group(3):
-                        value = self._get_multi_param_helper(
-                            sub_attr,
-                            tracked_prefixes=tracked_prefixes,
-                            skip_result_conversion=skip_result_conversion,
-                        )
-                    else:
-                        value = self._get_param(sub_attr)
-                    tracked_prefixes.add(sub_attr)
-                    value_dict[name] = value
-                else:
-                    value_dict[name] = value[0]
-
-        if not value_dict:
-            return None
-
-        if skip_result_conversion or len(value_dict) > 1:
-            # strip off period prefix
-            value_dict = {
-                name[len(param_prefix) + 1 :]: value
-                for name, value in value_dict.items()
-            }
-            for k in list(value_dict.keys()):
-                parts = k.split(".")
-                if len(parts) != 2 or parts[1] != "member":
-                    value_dict[parts[0]] = value_dict.pop(k)
-        else:
-            value_dict = list(value_dict.values())[0]
-
-        return value_dict
-
-    def _get_multi_param(self, param_prefix, skip_result_conversion=False):
-        """
-        Given a querystring of ?LaunchConfigurationNames.member.1=my-test-1&LaunchConfigurationNames.member.2=my-test-2
-        this will return ['my-test-1', 'my-test-2']
-        """
-        if param_prefix.endswith("."):
-            prefix = param_prefix
-        else:
-            prefix = param_prefix + "."
-        values = []
-        index = 1
-        while True:
-            value_dict = self._get_multi_param_helper(
-                prefix + str(index), skip_result_conversion=skip_result_conversion
-            )
-            if not value_dict and value_dict != "":
-                break
-
-            values.append(value_dict)
-            index += 1
-
-        return values
-
-    def _get_dict_param(self, param_prefix):
-        """
-        Given a parameter dict of
-        {
-            'Instances.SlaveInstanceType': ['m1.small'],
-            'Instances.InstanceCount': ['1']
-        }
-
-        returns
-        {
-            "slave_instance_type": "m1.small",
-            "instance_count": "1",
-        }
-        """
-        params = {}
-        for key, value in self.querystring.items():
-            if key.startswith(param_prefix):
-                params[camelcase_to_underscores(key.replace(param_prefix, ""))] = value[
-                    0
-                ]
-        return params
-
-    def _get_params(self):
-        """
-        Given a querystring of
-        {
-            'Action': ['CreatRule'],
-            'Conditions.member.1.Field': ['http-header'],
-            'Conditions.member.1.HttpHeaderConfig.HttpHeaderName': ['User-Agent'],
-            'Conditions.member.1.HttpHeaderConfig.Values.member.1': ['curl'],
-            'Actions.member.1.FixedResponseConfig.StatusCode': ['200'],
-            'Actions.member.1.FixedResponseConfig.ContentType': ['text/plain'],
-            'Actions.member.1.Type': ['fixed-response']
-        }
-
-        returns
-        {
-            'Action': 'CreatRule',
-            'Conditions': [
-                {
-                    'Field': 'http-header',
-                    'HttpHeaderConfig': {
-                        'HttpHeaderName': 'User-Agent',
-                        'Values': ['curl']
-                    }
-                }
-            ],
-            'Actions': [
-                {
-                    'Type': 'fixed-response',
-                    'FixedResponseConfig': {
-                        'StatusCode': '200',
-                        'ContentType': 'text/plain'
-                    }
-                }
-            ]
-        }
-        """
-        params = {}
-        for k, v in sorted(self.querystring.items()):
-            self._parse_param(k, v[0], params)
-        return params
-
-    def _parse_param(self, key, value, params):
-        keylist = key.split(".")
-        obj = params
-        for i, key in enumerate(keylist[:-1]):
-            if key in obj:
-                # step into
-                parent = obj
-                obj = obj[key]
-            else:
-                if key == "member":
-                    if not isinstance(obj, list):
-                        # initialize list
-                        # reset parent
-                        obj = []
-                        parent[keylist[i - 1]] = obj
-                elif key.isdigit():
-                    index = int(key) - 1
-                    if len(obj) <= index:
-                        # initialize list element
-                        obj.insert(index, {})
-                    # step into
-                    parent = obj
-                    obj = obj[index]
-                else:
-                    # initialize dict
-                    obj[key] = {}
-                    # step into
-                    parent = obj
-                    obj = obj[key]
-        if isinstance(obj, list):
-            obj.append(value)
-        else:
-            obj[keylist[-1]] = value
-
-    def _get_list_prefix(self, param_prefix):
-        """
-        Given a query dict like
-        {
-            'Steps.member.1.Name': ['example1'],
-            'Steps.member.1.ActionOnFailure': ['TERMINATE_JOB_FLOW'],
-            'Steps.member.1.HadoopJarStep.Jar': ['streaming1.jar'],
-            'Steps.member.2.Name': ['example2'],
-            'Steps.member.2.ActionOnFailure': ['TERMINATE_JOB_FLOW'],
-            'Steps.member.2.HadoopJarStep.Jar': ['streaming2.jar'],
-        }
-
-        returns
-        [{
-            'name': u'example1',
-            'action_on_failure': u'TERMINATE_JOB_FLOW',
-            'hadoop_jar_step._jar': u'streaming1.jar',
-        }, {
-            'name': u'example2',
-            'action_on_failure': u'TERMINATE_JOB_FLOW',
-            'hadoop_jar_step._jar': u'streaming2.jar',
-        }]
-        """
-        results = []
-        param_index = 1
-        while True:
-            index_prefix = "{0}.{1}.".format(param_prefix, param_index)
-            new_items = {}
-            for key, value in self.querystring.items():
-                if key.startswith(index_prefix):
-                    new_items[
-                        camelcase_to_underscores(key.replace(index_prefix, ""))
-                    ] = value[0]
-            if not new_items:
-                break
-            results.append(new_items)
-            param_index += 1
-        return results
-
-    def _get_map_prefix(self, param_prefix, key_end=".key", value_end=".value"):
-        results = {}
-        param_index = 1
-        while 1:
-            index_prefix = "{0}.{1}.".format(param_prefix, param_index)
-
-            k, v = None, None
-            for key, value in self.querystring.items():
-                if key.startswith(index_prefix):
-                    if key.endswith(key_end):
-                        k = value[0]
-                    elif key.endswith(value_end):
-                        v = value[0]
-
-            if not (k and v is not None):
-                break
-
-            results[k] = v
-            param_index += 1
-
-        return results
-
-    def _parse_tag_specification(self, param_prefix):
-        tags = self._get_list_prefix(param_prefix)
-
-        results = defaultdict(dict)
-        for tag in tags:
-            resource_type = tag.pop("resource_type")
-
-            param_index = 1
-            while True:
-                key_name = "tag.{0}._key".format(param_index)
-                value_name = "tag.{0}._value".format(param_index)
-
-                try:
-                    results[resource_type][tag[key_name]] = tag[value_name]
-                except KeyError:
-                    break
-                param_index += 1
-
-        return results
-
-    def _get_object_map(self, prefix, name="Name", value="Value"):
-        """
-        Given a query dict like
-        {
-            Prefix.1.Name: [u'event'],
-            Prefix.1.Value.StringValue: [u'order_cancelled'],
-            Prefix.1.Value.DataType: [u'String'],
-            Prefix.2.Name: [u'store'],
-            Prefix.2.Value.StringValue: [u'example_corp'],
-            Prefix.2.Value.DataType [u'String'],
-        }
-
-        returns
-        {
-            'event': {
-                'DataType': 'String',
-                'StringValue': 'example_corp'
-            },
-            'store': {
-                'DataType': 'String',
-                'StringValue': 'order_cancelled'
-            }
-        }
-        """
-        object_map = {}
-        index = 1
-        while True:
-            # Loop through looking for keys representing object name
-            name_key = "{0}.{1}.{2}".format(prefix, index, name)
-            obj_name = self.querystring.get(name_key)
-            if not obj_name:
-                # Found all keys
-                break
-
-            obj = {}
-            value_key_prefix = "{0}.{1}.{2}.".format(prefix, index, value)
-            for k, v in self.querystring.items():
-                if k.startswith(value_key_prefix):
-                    _, value_key = k.split(value_key_prefix, 1)
-                    obj[value_key] = v[0]
-
-            object_map[obj_name[0]] = obj
-
-            index += 1
-
-        return object_map
+    def _get_params(self) -> dict[str, Any]:
+        return self.params
 
     @property
-    def request_json(self):
+    def request_json(self) -> bool:
         return "JSON" in self.querystring.get("ContentType", [])
 
-    def error_on_dryrun(self):
-        self.is_not_dryrun()
+    def _include_in_response(self, response_key_path: str) -> None:
+        self.RESPONSE_KEY_PATH_TO_TRANSFORMER[response_key_path] = lambda x: x
 
-    def is_not_dryrun(self, action=None):
-        action = action or self._get_param("Action")
-        if "true" in self.querystring.get("DryRun", ["false"]):
-            message = (
-                "An error occurred (DryRunOperation) when calling the %s operation: Request would have succeeded, but DryRun flag is set"
-                % action
-            )
-            raise DryRunClientError(error_type="DryRunOperation", message=message)
-        return True
-
-
-class MotoAPIResponse(BaseResponse):
-    def reset_response(self, request, full_url, headers):
-        if request.method == "POST":
-            from .models import moto_api_backend
-
-            moto_api_backend.reset()
-            return 200, {}, json.dumps({"status": "ok"})
-        return 400, {}, json.dumps({"Error": "Need to POST to reset Moto"})
-
-    def reset_auth_response(self, request, full_url, headers):
-        if request.method == "POST":
-            previous_initial_no_auth_action_count = (
-                settings.INITIAL_NO_AUTH_ACTION_COUNT
-            )
-            settings.INITIAL_NO_AUTH_ACTION_COUNT = float(request.data.decode())
-            ActionAuthenticatorMixin.request_count = 0
-            return (
-                200,
-                {},
-                json.dumps(
-                    {
-                        "status": "ok",
-                        "PREVIOUS_INITIAL_NO_AUTH_ACTION_COUNT": str(
-                            previous_initial_no_auth_action_count
-                        ),
-                    }
-                ),
-            )
-        return 400, {}, json.dumps({"Error": "Need to POST to reset Moto Auth"})
-
-    def model_data(self, request, full_url, headers):
-        from moto.core.models import model_data
-
-        results = {}
-        for service in sorted(model_data):
-            models = model_data[service]
-            results[service] = {}
-            for name in sorted(models):
-                model = models[name]
-                results[service][name] = []
-                for instance in model.instances:
-                    inst_result = {}
-                    for attr in dir(instance):
-                        if not attr.startswith("_"):
-                            try:
-                                json.dumps(getattr(instance, attr))
-                            except TypeError:
-                                pass
-                            else:
-                                inst_result[attr] = getattr(instance, attr)
-                    results[service][name].append(inst_result)
-        return 200, {"Content-Type": "application/javascript"}, json.dumps(results)
-
-    def dashboard(self, request, full_url, headers):
-        from flask import render_template
-
-        return render_template("dashboard.html")
-
-
-class _RecursiveDictRef(object):
-    """Store a recursive reference to dict."""
-
-    def __init__(self):
-        self.key = None
-        self.dic = {}
-
-    def __repr__(self):
-        return "{!r}".format(self.dic)
-
-    def __getattr__(self, key):
-        return self.dic.__getattr__(key)
-
-    def __getitem__(self, key):
-        return self.dic.__getitem__(key)
-
-    def set_reference(self, key, dic):
-        """Set the RecursiveDictRef object to keep reference to dict object
-        (dic) at the key.
-
-        """
-        self.key = key
-        self.dic = dic
-
-
-class AWSServiceSpec(object):
-    """Parse data model from botocore. This is used to recover type info
-    for fields in AWS API XML response.
-
-    """
-
-    def __init__(self, path):
-        spec = load_resource("botocore", path)
-
-        self.metadata = spec["metadata"]
-        self.operations = spec["operations"]
-        self.shapes = spec["shapes"]
-
-    def input_spec(self, operation):
-        try:
-            op = self.operations[operation]
-        except KeyError:
-            raise ValueError("Invalid operation: {}".format(operation))
-        if "input" not in op:
-            return {}
-        shape = self.shapes[op["input"]["shape"]]
-        return self._expand(shape)
-
-    def output_spec(self, operation):
-        """Produce a JSON with a valid API response syntax for operation, but
-        with type information. Each node represented by a key has the
-        value containing field type, e.g.,
-
-          output_spec["SomeBooleanNode"] => {"type": "boolean"}
-
-        """
-        try:
-            op = self.operations[operation]
-        except KeyError:
-            raise ValueError("Invalid operation: {}".format(operation))
-        if "output" not in op:
-            return {}
-        shape = self.shapes[op["output"]["shape"]]
-        return self._expand(shape)
-
-    def _expand(self, shape):
-        def expand(dic, seen=None):
-            seen = seen or {}
-            if dic["type"] == "structure":
-                nodes = {}
-                for k, v in dic["members"].items():
-                    seen_till_here = dict(seen)
-                    if k in seen_till_here:
-                        nodes[k] = seen_till_here[k]
-                        continue
-                    seen_till_here[k] = _RecursiveDictRef()
-                    nodes[k] = expand(self.shapes[v["shape"]], seen_till_here)
-                    seen_till_here[k].set_reference(k, nodes[k])
-                nodes["type"] = "structure"
-                return nodes
-
-            elif dic["type"] == "list":
-                seen_till_here = dict(seen)
-                shape = dic["member"]["shape"]
-                if shape in seen_till_here:
-                    return seen_till_here[shape]
-                seen_till_here[shape] = _RecursiveDictRef()
-                expanded = expand(self.shapes[shape], seen_till_here)
-                seen_till_here[shape].set_reference(shape, expanded)
-                return {"type": "list", "member": expanded}
-
-            elif dic["type"] == "map":
-                seen_till_here = dict(seen)
-                node = {"type": "map"}
-
-                if "shape" in dic["key"]:
-                    shape = dic["key"]["shape"]
-                    seen_till_here[shape] = _RecursiveDictRef()
-                    node["key"] = expand(self.shapes[shape], seen_till_here)
-                    seen_till_here[shape].set_reference(shape, node["key"])
-                else:
-                    node["key"] = dic["key"]["type"]
-
-                if "shape" in dic["value"]:
-                    shape = dic["value"]["shape"]
-                    seen_till_here[shape] = _RecursiveDictRef()
-                    node["value"] = expand(self.shapes[shape], seen_till_here)
-                    seen_till_here[shape].set_reference(shape, node["value"])
-                else:
-                    node["value"] = dic["value"]["type"]
-
-                return node
-
-            else:
-                return {"type": dic["type"]}
-
-        return expand(shape)
-
-
-def to_str(value, spec):
-    vtype = spec["type"]
-    if vtype == "boolean":
-        return "true" if value else "false"
-    elif vtype == "integer":
-        return str(value)
-    elif vtype == "float":
-        return str(value)
-    elif vtype == "double":
-        return str(value)
-    elif vtype == "timestamp":
-        return (
-            datetime.datetime.utcfromtimestamp(value)
-            .replace(tzinfo=pytz.utc)
-            .isoformat()
-        )
-    elif vtype == "string":
-        return str(value)
-    elif value is None:
-        return "null"
-    else:
-        raise TypeError("Unknown type {}".format(vtype))
-
-
-def from_str(value, spec):
-    vtype = spec["type"]
-    if vtype == "boolean":
-        return True if value == "true" else False
-    elif vtype == "integer":
-        return int(value)
-    elif vtype == "float":
-        return float(value)
-    elif vtype == "double":
-        return float(value)
-    elif vtype == "timestamp":
-        return value
-    elif vtype == "string":
-        return value
-    raise TypeError("Unknown type {}".format(vtype))
-
-
-def flatten_json_request_body(prefix, dict_body, spec):
-    """Convert a JSON request body into query params."""
-    if len(spec) == 1 and "type" in spec:
-        return {prefix: to_str(dict_body, spec)}
-
-    flat = {}
-    for key, value in dict_body.items():
-        node_type = spec[key]["type"]
-        if node_type == "list":
-            for idx, v in enumerate(value, 1):
-                pref = key + ".member." + str(idx)
-                flat.update(flatten_json_request_body(pref, v, spec[key]["member"]))
-        elif node_type == "map":
-            for idx, (k, v) in enumerate(value.items(), 1):
-                pref = key + ".entry." + str(idx)
-                flat.update(
-                    flatten_json_request_body(pref + ".key", k, spec[key]["key"])
-                )
-                flat.update(
-                    flatten_json_request_body(pref + ".value", v, spec[key]["value"])
-                )
-        else:
-            flat.update(flatten_json_request_body(key, value, spec[key]))
-
-    if prefix:
-        prefix = prefix + "."
-    return dict((prefix + k, v) for k, v in flat.items())
-
-
-def xml_to_json_response(service_spec, operation, xml, result_node=None):
-    """Convert rendered XML response to JSON for use with boto3."""
-
-    def transform(value, spec):
-        """Apply transformations to make the output JSON comply with the
-        expected form. This function applies:
-
-          (1) Type cast to nodes with "type" property (e.g., 'true' to
-              True). XML field values are all in text so this step is
-              necessary to convert it to valid JSON objects.
-
-          (2) Squashes "member" nodes to lists.
-
-        """
-        if len(spec) == 1:
-            return from_str(value, spec)
-
-        od = OrderedDict()
-        for k, v in value.items():
-            if k.startswith("@"):
-                continue
-
-            if k not in spec:
-                # this can happen when with an older version of
-                # botocore for which the node in XML template is not
-                # defined in service spec.
-                log.warning("Field %s is not defined by the botocore version in use", k)
-                continue
-
-            if spec[k]["type"] == "list":
-                if v is None:
-                    od[k] = []
-                elif len(spec[k]["member"]) == 1:
-                    if isinstance(v["member"], list):
-                        od[k] = transform(v["member"], spec[k]["member"])
-                    else:
-                        od[k] = [transform(v["member"], spec[k]["member"])]
-                elif isinstance(v["member"], list):
-                    od[k] = [transform(o, spec[k]["member"]) for o in v["member"]]
-                elif isinstance(v["member"], OrderedDict):
-                    od[k] = [transform(v["member"], spec[k]["member"])]
-                else:
-                    raise ValueError("Malformatted input")
-            elif spec[k]["type"] == "map":
-                if v is None:
-                    od[k] = {}
-                else:
-                    items = (
-                        [v["entry"]] if not isinstance(v["entry"], list) else v["entry"]
-                    )
-                    for item in items:
-                        key = from_str(item["key"], spec[k]["key"])
-                        val = from_str(item["value"], spec[k]["value"])
-                        if k not in od:
-                            od[k] = {}
-                        od[k][key] = val
-            else:
-                if v is None:
-                    od[k] = None
-                else:
-                    od[k] = transform(v, spec[k])
-        return od
-
-    dic = xmltodict.parse(xml)
-    output_spec = service_spec.output_spec(operation)
-    try:
-        for k in result_node or (operation + "Response", operation + "Result"):
-            dic = dic[k]
-    except KeyError:
-        return None
-    else:
-        return transform(dic, output_spec)
-    return None
+    def _exclude_from_response(self, response_key_path: str) -> None:
+        self.RESPONSE_KEY_PATH_TO_TRANSFORMER[response_key_path] = never_return

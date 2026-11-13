@@ -1,33 +1,43 @@
 SHELL := /bin/bash
 
+SERVICE_NAME = "default"
+TEST_NAMES = "*"
+
 ifeq ($(TEST_SERVER_MODE), true)
-	# exclude test_kinesisvideoarchivedmedia
-	# because testing with moto_server is difficult with data-endpoint
-	TEST_EXCLUDE := -k 'not (test_kinesisvideoarchivedmedia or test_awslambda or test_batch or test_ec2 or test_sqs)'
+	# Exclude parallel tests
+	TEST_EXCLUDE := --ignore tests/test_acm --ignore tests/test_amp --ignore tests/test_awslambda --ignore tests/test_batch --ignore tests/test_dynamodb --ignore tests/test_ec2 --ignore tests/test_s3/ --ignore tests/test_sqs
 	# Parallel tests will be run separate
-	PARALLEL_TESTS := ./tests/test_awslambda ./tests/test_batch ./tests/test_ec2 ./tests/test_sqs
+	PARALLEL_TESTS := ./tests/test_acm/ ./tests/test_acmpca/ ./tests/test_amp/ ./tests/test_awslambda ./tests/test_batch ./tests/test_dynamodb ./tests/test_ec2 ./tests/test_s3/ ./tests/test_sqs
 else
-	TEST_EXCLUDE :=
-	PARALLEL_TESTS := ./tests/test_core
+	TEST_EXCLUDE := --ignore tests/test_batch --ignore tests/test_dynamodb --ignore tests/test_ec2 --ignore tests/test_s3/ --ignore tests/test_sqs
+	PARALLEL_TESTS := ./tests/test_batch ./tests/test_dynamodb ./tests/test_ec2 tests/test_s3/ ./tests/test_sqs
 endif
 
 init:
-	@python setup.py develop
+	@pip install -e .
 	@pip install -r requirements-dev.txt
 
 lint:
-	flake8 moto
-	black --check moto/ tests/
-	pylint -j 0 tests
+	@echo "Running ruff..."
+	ruff check moto tests
+	ruff format --check moto tests
+	@echo "Running MyPy..."
+	mypy --install-types --non-interactive
 
 format:
-	black moto/ tests/
+	ruff format moto/ tests/
+	ruff check --fix moto/ tests/
 
 test-only:
 	rm -f .coverage
 	rm -rf cover
-	pytest -sv --cov=moto --cov-report xml ./tests/ $(TEST_EXCLUDE)
-	MOTO_CALL_RESET_API=false pytest -n 4 $(PARALLEL_TESTS)
+	pytest -sv -rs --cov=moto --cov-report xml ./tests/ $(TEST_EXCLUDE)
+	# https://github.com/aws/aws-xray-sdk-python/issues/196 - Run these tests separately without Coverage enabled
+	pytest -sv -rs ./tests/test_xray
+	# Run tests that require a clean slate
+	pytest -sv --cov=moto --cov-report xml --cov-append ./tests/ -m requires_clean_slate
+	# Run parallel tests - except those that require a clean slate
+	MOTO_CALL_RESET_API=false pytest -sv --cov=moto --cov-report xml --cov-append -n 4 $(PARALLEL_TESTS) --dist loadscope -m "not requires_clean_slate"
 
 test: lint test-only
 
@@ -40,6 +50,12 @@ aws_managed_policies:
 implementation_coverage:
 	./scripts/implementation_coverage.py
 	git commit IMPLEMENTATION_COVERAGE.md -m "Updating implementation coverage" || true
+
+cloudformation_coverage:
+	./scripts/cloudformation_coverage.py
+	git commit CLOUDFORMATION_COVERAGE.md -m "Updating CloudFormation coverage" || true
+
+coverage: implementation_coverage cloudformation_coverage
 
 scaffold:
 	@pip install -r requirements-dev.txt > /dev/null

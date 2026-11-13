@@ -1,16 +1,15 @@
-from . import _get_clients, _setup
-
-from botocore.exceptions import ClientError
-import pytest
-import sure  # noqa # pylint: disable=unused-import
-from moto import mock_batch, mock_iam, mock_ec2, mock_ecs
 from uuid import uuid4
 
+import boto3
+import pytest
+from botocore.exceptions import ClientError
 
-@mock_ec2
-@mock_ecs
-@mock_iam
-@mock_batch
+from moto import mock_aws
+
+from . import _get_clients, _setup
+
+
+@mock_aws
 def test_create_job_queue():
     ec2_client, iam_client, _, _, batch_client = _get_clients()
     _, _, _, iam_arn = _setup(ec2_client, iam_client)
@@ -30,32 +29,28 @@ def test_create_job_queue():
         state="ENABLED",
         priority=123,
         computeEnvironmentOrder=[{"order": 123, "computeEnvironment": arn}],
+        schedulingPolicyArn="policy_arn",
     )
-    resp.should.contain("jobQueueArn")
-    resp.should.contain("jobQueueName")
+    assert "jobQueueArn" in resp
+    assert "jobQueueName" in resp
     queue_arn = resp["jobQueueArn"]
 
     all_queues = batch_client.describe_job_queues()["jobQueues"]
     our_queues = [q for q in all_queues if q["jobQueueName"] == jq_name]
-    our_queues.should.have.length_of(1)
-    our_queues[0]["jobQueueArn"].should.equal(queue_arn)
+    assert len(our_queues) == 1
+    assert our_queues[0]["jobQueueArn"] == queue_arn
+    assert our_queues[0]["schedulingPolicyArn"] == "policy_arn"
 
 
-@mock_ec2
-@mock_ecs
-@mock_iam
-@mock_batch
+@mock_aws
 def test_describe_job_queue_unknown_value():
-    _, _, _, _, batch_client = _get_clients()
+    batch_client = boto3.client("batch", "us-east-1")
 
     resp = batch_client.describe_job_queues(jobQueues=["test_invalid_queue"])
-    resp.should.have.key("jobQueues").being.length_of(0)
+    assert len(resp["jobQueues"]) == 0
 
 
-@mock_ec2
-@mock_ecs
-@mock_iam
-@mock_batch
+@mock_aws
 def test_create_job_queue_twice():
     ec2_client, iam_client, _, _, batch_client = _get_clients()
     _, _, _, iam_arn = _setup(ec2_client, iam_client)
@@ -87,14 +82,11 @@ def test_create_job_queue_twice():
         )
 
     err = ex.value.response["Error"]
-    err["Code"].should.equal("ClientException")
-    err["Message"].should.equal(f"Job queue {jq_name} already exists")
+    assert err["Code"] == "ClientException"
+    assert err["Message"] == f"Job queue {jq_name} already exists"
 
 
-@mock_ec2
-@mock_ecs
-@mock_iam
-@mock_batch
+@mock_aws
 def test_create_job_queue_incorrect_state():
     _, _, _, _, batch_client = _get_clients()
 
@@ -106,14 +98,11 @@ def test_create_job_queue_incorrect_state():
             computeEnvironmentOrder=[],
         )
     err = ex.value.response["Error"]
-    err["Code"].should.equal("ClientException")
-    err["Message"].should.equal("state JUNK must be one of ENABLED | DISABLED")
+    assert err["Code"] == "ClientException"
+    assert err["Message"] == "state JUNK must be one of ENABLED | DISABLED"
 
 
-@mock_ec2
-@mock_ecs
-@mock_iam
-@mock_batch
+@mock_aws
 def test_create_job_queue_without_compute_environment():
     _, _, _, _, batch_client = _get_clients()
 
@@ -125,14 +114,11 @@ def test_create_job_queue_without_compute_environment():
             computeEnvironmentOrder=[],
         )
     err = ex.value.response["Error"]
-    err["Code"].should.equal("ClientException")
-    err["Message"].should.equal("At least 1 compute environment must be provided")
+    assert err["Code"] == "ClientException"
+    assert err["Message"] == "At least 1 compute environment must be provided"
 
 
-@mock_ec2
-@mock_ecs
-@mock_iam
-@mock_batch
+@mock_aws
 def test_job_queue_bad_arn():
     ec2_client, iam_client, _, _, batch_client = _get_clients()
     _, _, _, iam_arn = _setup(ec2_client, iam_client)
@@ -156,14 +142,11 @@ def test_job_queue_bad_arn():
             ],
         )
     err = ex.value.response["Error"]
-    err["Code"].should.equal("ClientException")
-    err["Message"].should.equal("computeEnvironmentOrder is malformed")
+    assert err["Code"] == "ClientException"
+    assert err["Message"] == "computeEnvironmentOrder is malformed"
 
 
-@mock_ec2
-@mock_ecs
-@mock_iam
-@mock_batch
+@mock_aws
 def test_update_job_queue():
     ec2_client, iam_client, _, _, batch_client = _get_clients()
     _, _, _, iam_arn = _setup(ec2_client, iam_client)
@@ -190,20 +173,17 @@ def test_update_job_queue():
 
     all_queues = batch_client.describe_job_queues()["jobQueues"]
     our_queues = [q for q in all_queues if q["jobQueueName"] == jq_name]
-    our_queues[0]["priority"].should.equal(5)
+    assert our_queues[0]["priority"] == 5
 
     batch_client.update_job_queue(jobQueue=jq_name, priority=15)
 
     all_queues = batch_client.describe_job_queues()["jobQueues"]
     our_queues = [q for q in all_queues if q["jobQueueName"] == jq_name]
-    our_queues.should.have.length_of(1)
-    our_queues[0]["priority"].should.equal(15)
+    assert len(our_queues) == 1
+    assert our_queues[0]["priority"] == 15
 
 
-@mock_ec2
-@mock_ecs
-@mock_iam
-@mock_batch
+@mock_aws
 def test_delete_job_queue():
     ec2_client, iam_client, _, _, batch_client = _get_clients()
     _, _, _, iam_arn = _setup(ec2_client, iam_client)
@@ -229,4 +209,4 @@ def test_delete_job_queue():
     batch_client.delete_job_queue(jobQueue=queue_arn)
 
     all_queues = batch_client.describe_job_queues()["jobQueues"]
-    [q["jobQueueName"] for q in all_queues].shouldnt.contain(jq_name)
+    assert jq_name not in [q["jobQueueName"] for q in all_queues]

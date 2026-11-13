@@ -1,27 +1,11 @@
+import os
+from unittest import mock
+
+import boto3
 import pytest
 from botocore.exceptions import ClientError
 
-import boto3
-import boto
-from boto.exception import EC2ResponseError
-import sure  # noqa # pylint: disable=unused-import
-
-from moto import mock_ec2, mock_ec2_deprecated
-from tests.helpers import requires_boto_gte
-
-
-# Has boto3 equivalent
-@requires_boto_gte("2.32.0")
-@mock_ec2_deprecated
-def test_vpc_peering_connections():
-    conn = boto.connect_vpc("the_key", "the_secret")
-    vpc = conn.create_vpc("10.0.0.0/16")
-    peer_vpc = conn.create_vpc("11.0.0.0/16")
-
-    vpc_pcx = conn.create_vpc_peering_connection(vpc.id, peer_vpc.id)
-    vpc_pcx._status.code.should.equal("initiating-request")
-
-    return vpc_pcx
+from moto import mock_aws, settings
 
 
 def create_vpx_pcx(ec2, client):
@@ -32,72 +16,37 @@ def create_vpx_pcx(ec2, client):
     return vpc_pcx
 
 
-@mock_ec2
-def test_vpc_peering_connections_boto3():
+@mock_aws
+def test_vpc_peering_connections():
     ec2 = boto3.resource("ec2", region_name="us-east-1")
     client = boto3.client("ec2", region_name="us-east-1")
 
     vpc_pcx = create_vpx_pcx(ec2, client)
 
-    vpc_pcx.should.have.key("VpcPeeringConnectionId")
-    vpc_pcx["Status"]["Code"].should.equal("initiating-request")
+    assert "VpcPeeringConnectionId" in vpc_pcx
+    assert vpc_pcx["Status"]["Code"] == "initiating-request"
 
 
-# Has boto3 equivalent
-@requires_boto_gte("2.32.0")
-@mock_ec2_deprecated
+@mock_aws
 def test_vpc_peering_connections_get_all():
-    conn = boto.connect_vpc("the_key", "the_secret")
-    vpc_pcx = test_vpc_peering_connections()
-    vpc_pcx._status.code.should.equal("initiating-request")
-
-    all_vpc_pcxs = conn.get_all_vpc_peering_connections()
-    all_vpc_pcxs.should.have.length_of(1)
-    all_vpc_pcxs[0]._status.code.should.equal("pending-acceptance")
-
-
-@mock_ec2
-def test_vpc_peering_connections_get_all_boto3():
     ec2 = boto3.resource("ec2", region_name="us-east-1")
     client = boto3.client("ec2", region_name="us-east-1")
     vpc_pcx = create_vpx_pcx(ec2, client)
     vpc_pcx_id = vpc_pcx["VpcPeeringConnectionId"]
 
     all_vpc_pcxs = retrieve_all(client)
-    [vpc_pcx["VpcPeeringConnectionId"] for vpc_pcx in all_vpc_pcxs].should.contain(
-        vpc_pcx_id
-    )
+    assert vpc_pcx_id in [vpc_pcx["VpcPeeringConnectionId"] for vpc_pcx in all_vpc_pcxs]
     my_vpc_pcx = [
         vpc_pcx
         for vpc_pcx in all_vpc_pcxs
         if vpc_pcx["VpcPeeringConnectionId"] == vpc_pcx_id
     ][0]
-    my_vpc_pcx["Status"]["Code"].should.equal("pending-acceptance")
+    assert my_vpc_pcx["Status"]["Code"] == "pending-acceptance"
+    assert my_vpc_pcx["Status"]["Message"] == "Pending Acceptance by 123456789012"
 
 
-# Has boto3 equivalent
-@requires_boto_gte("2.32.0")
-@mock_ec2_deprecated
+@mock_aws
 def test_vpc_peering_connections_accept():
-    conn = boto.connect_vpc("the_key", "the_secret")
-    vpc_pcx = test_vpc_peering_connections()
-
-    vpc_pcx = conn.accept_vpc_peering_connection(vpc_pcx.id)
-    vpc_pcx._status.code.should.equal("active")
-
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.reject_vpc_peering_connection(vpc_pcx.id)
-    cm.value.code.should.equal("InvalidStateTransition")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-    all_vpc_pcxs = conn.get_all_vpc_peering_connections()
-    all_vpc_pcxs.should.have.length_of(1)
-    all_vpc_pcxs[0]._status.code.should.equal("active")
-
-
-@mock_ec2
-def test_vpc_peering_connections_accept_boto3():
     ec2 = boto3.resource("ec2", region_name="us-east-1")
     client = boto3.client("ec2", region_name="us-east-1")
     vpc_pcx = create_vpx_pcx(ec2, client)
@@ -105,44 +54,23 @@ def test_vpc_peering_connections_accept_boto3():
 
     vpc_pcx = client.accept_vpc_peering_connection(VpcPeeringConnectionId=vpc_pcx_id)
     vpc_pcx = vpc_pcx["VpcPeeringConnection"]
-    vpc_pcx["Status"]["Code"].should.equal("active")
+    assert vpc_pcx["Status"]["Code"] == "active"
 
     with pytest.raises(ClientError) as ex:
         client.reject_vpc_peering_connection(VpcPeeringConnectionId=vpc_pcx_id)
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidStateTransition")
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidStateTransition"
 
     my_vpc_pcxs = client.describe_vpc_peering_connections(
         VpcPeeringConnectionIds=[vpc_pcx_id]
     )["VpcPeeringConnections"]
-    my_vpc_pcxs.should.have.length_of(1)
-    my_vpc_pcxs[0]["Status"]["Code"].should.equal("active")
+    assert len(my_vpc_pcxs) == 1
+    assert my_vpc_pcxs[0]["Status"]["Code"] == "active"
 
 
-# Has boto3 equivalent
-@requires_boto_gte("2.32.0")
-@mock_ec2_deprecated
+@mock_aws
 def test_vpc_peering_connections_reject():
-    conn = boto.connect_vpc("the_key", "the_secret")
-    vpc_pcx = test_vpc_peering_connections()
-
-    verdict = conn.reject_vpc_peering_connection(vpc_pcx.id)
-    verdict.should.equal(True)
-
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.accept_vpc_peering_connection(vpc_pcx.id)
-    cm.value.code.should.equal("InvalidStateTransition")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-    all_vpc_pcxs = conn.get_all_vpc_peering_connections()
-    all_vpc_pcxs.should.have.length_of(1)
-    all_vpc_pcxs[0]._status.code.should.equal("rejected")
-
-
-@mock_ec2
-def test_vpc_peering_connections_reject_boto3():
     ec2 = boto3.resource("ec2", region_name="us-east-1")
     client = boto3.client("ec2", region_name="us-east-1")
     vpc_pcx = create_vpx_pcx(ec2, client)
@@ -152,40 +80,19 @@ def test_vpc_peering_connections_reject_boto3():
 
     with pytest.raises(ClientError) as ex:
         client.accept_vpc_peering_connection(VpcPeeringConnectionId=vpc_pcx_id)
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidStateTransition")
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidStateTransition"
 
     my_pcxs = client.describe_vpc_peering_connections(
         VpcPeeringConnectionIds=[vpc_pcx_id]
     )["VpcPeeringConnections"]
-    my_pcxs.should.have.length_of(1)
-    my_pcxs[0]["Status"]["Code"].should.equal("rejected")
+    assert len(my_pcxs) == 1
+    assert my_pcxs[0]["Status"]["Code"] == "rejected"
 
 
-# Has boto3 equivalent
-@requires_boto_gte("2.32.1")
-@mock_ec2_deprecated
+@mock_aws
 def test_vpc_peering_connections_delete():
-    conn = boto.connect_vpc("the_key", "the_secret")
-    vpc_pcx = test_vpc_peering_connections()
-
-    verdict = vpc_pcx.delete()
-    verdict.should.equal(True)
-
-    all_vpc_pcxs = conn.get_all_vpc_peering_connections()
-    all_vpc_pcxs.should.have.length_of(1)
-    all_vpc_pcxs[0]._status.code.should.equal("deleted")
-
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.delete_vpc_peering_connection("pcx-1234abcd")
-    cm.value.code.should.equal("InvalidVpcPeeringConnectionId.NotFound")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-
-@mock_ec2
-def test_vpc_peering_connections_delete_boto3():
     ec2 = boto3.resource("ec2", region_name="us-east-1")
     client = boto3.client("ec2", region_name="us-east-1")
     vpc_pcx = create_vpx_pcx(ec2, client)
@@ -194,334 +101,646 @@ def test_vpc_peering_connections_delete_boto3():
     client.delete_vpc_peering_connection(VpcPeeringConnectionId=vpc_pcx_id)
 
     all_vpc_pcxs = retrieve_all(client)
-    [vpcx["VpcPeeringConnectionId"] for vpcx in all_vpc_pcxs].should.contain(vpc_pcx_id)
+    assert vpc_pcx_id in [vpcx["VpcPeeringConnectionId"] for vpcx in all_vpc_pcxs]
 
     my_vpcx = [
         vpcx for vpcx in all_vpc_pcxs if vpcx["VpcPeeringConnectionId"] == vpc_pcx_id
     ][0]
-    my_vpcx["Status"]["Code"].should.equal("deleted")
+    assert my_vpcx["Status"]["Code"] == "deleted"
 
     with pytest.raises(ClientError) as ex:
         client.delete_vpc_peering_connection(VpcPeeringConnectionId="pcx-1234abcd")
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal(
-        "InvalidVpcPeeringConnectionId.NotFound"
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert (
+        ex.value.response["Error"]["Code"] == "InvalidVpcPeeringConnectionId.NotFound"
     )
 
 
-@mock_ec2
-def test_vpc_peering_connections_cross_region():
+@mock_aws
+@pytest.mark.parametrize(
+    "account1,account2",
+    [
+        pytest.param("111111111111", "111111111111", id="within account"),
+        pytest.param("111111111111", "222222222222", id="across accounts"),
+    ],
+)
+@pytest.mark.skipif(
+    settings.TEST_SERVER_MODE, reason="Cannot set account ID in server mode"
+)
+def test_vpc_peering_connections_cross_region(account1, account2):
     # create vpc in us-west-1 and ap-northeast-1
-    ec2_usw1 = boto3.resource("ec2", region_name="us-west-1")
-    vpc_usw1 = ec2_usw1.create_vpc(CidrBlock="10.90.0.0/16")
-    ec2_apn1 = boto3.resource("ec2", region_name="ap-northeast-1")
-    vpc_apn1 = ec2_apn1.create_vpc(CidrBlock="10.20.0.0/16")
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+        ec2_usw1 = boto3.resource("ec2", region_name="us-west-1")
+        vpc_usw1 = ec2_usw1.create_vpc(CidrBlock="10.90.0.0/16")
+
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account2}):
+        ec2_apn1 = boto3.resource("ec2", region_name="ap-northeast-1")
+        vpc_apn1 = ec2_apn1.create_vpc(CidrBlock="10.20.0.0/16")
+
     # create peering
-    vpc_pcx_usw1 = ec2_usw1.create_vpc_peering_connection(
-        VpcId=vpc_usw1.id, PeerVpcId=vpc_apn1.id, PeerRegion="ap-northeast-1"
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+        ec2_usw1 = boto3.client("ec2", region_name="us-west-1")
+        vpc_pcx_usw1 = ec2_usw1.create_vpc_peering_connection(
+            VpcId=vpc_usw1.id,
+            PeerVpcId=vpc_apn1.id,
+            PeerRegion="ap-northeast-1",
+            PeerOwnerId=account2,
+        )
+
+    assert (
+        vpc_pcx_usw1["VpcPeeringConnection"]["Status"]["Code"] == "initiating-request"
     )
-    vpc_pcx_usw1.status["Code"].should.equal("initiating-request")
-    vpc_pcx_usw1.requester_vpc.id.should.equal(vpc_usw1.id)
-    vpc_pcx_usw1.accepter_vpc.id.should.equal(vpc_apn1.id)
+    assert (
+        vpc_pcx_usw1["VpcPeeringConnection"]["Status"]["Message"]
+        == f"Initiating Request to {account2}"
+    )
+    assert (
+        vpc_pcx_usw1["VpcPeeringConnection"]["RequesterVpcInfo"]["VpcId"] == vpc_usw1.id
+    )
+    assert (
+        vpc_pcx_usw1["VpcPeeringConnection"]["RequesterVpcInfo"]["CidrBlock"]
+        == "10.90.0.0/16"
+    )
+    assert (
+        vpc_pcx_usw1["VpcPeeringConnection"]["RequesterVpcInfo"]["OwnerId"] == account1
+    )
+    assert (
+        vpc_pcx_usw1["VpcPeeringConnection"]["RequesterVpcInfo"]["Region"]
+        == "us-west-1"
+    )
+    assert (
+        vpc_pcx_usw1["VpcPeeringConnection"]["AccepterVpcInfo"]["VpcId"] == vpc_apn1.id
+    )
+    assert (
+        vpc_pcx_usw1["VpcPeeringConnection"]["AccepterVpcInfo"]["CidrBlock"]
+        == "10.20.0.0/16"
+    )
+    assert (
+        vpc_pcx_usw1["VpcPeeringConnection"]["AccepterVpcInfo"]["OwnerId"] == account2
+    )
+    assert (
+        vpc_pcx_usw1["VpcPeeringConnection"]["AccepterVpcInfo"]["Region"]
+        == "ap-northeast-1"
+    )
+
     # test cross region vpc peering connection exist
-    vpc_pcx_apn1 = ec2_apn1.VpcPeeringConnection(vpc_pcx_usw1.id)
-    vpc_pcx_apn1.id.should.equal(vpc_pcx_usw1.id)
-    vpc_pcx_apn1.requester_vpc.id.should.equal(vpc_usw1.id)
-    vpc_pcx_apn1.accepter_vpc.id.should.equal(vpc_apn1.id)
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account2}):
+        vpc_pcx_apn1 = ec2_apn1.VpcPeeringConnection(
+            vpc_pcx_usw1["VpcPeeringConnection"]["VpcPeeringConnectionId"]
+        )
+        assert (
+            vpc_pcx_apn1.id
+            == vpc_pcx_usw1["VpcPeeringConnection"]["VpcPeeringConnectionId"]
+        )
+        assert vpc_pcx_apn1.requester_vpc.id == vpc_usw1.id
+        assert vpc_pcx_apn1.accepter_vpc.id == vpc_apn1.id
+
     # Quick check to verify the options have a default value
     accepter_options = vpc_pcx_apn1.accepter_vpc_info["PeeringOptions"]
-    accepter_options["AllowDnsResolutionFromRemoteVpc"].should.equal(False)
-    accepter_options["AllowEgressFromLocalClassicLinkToRemoteVpc"].should.equal(False)
-    accepter_options["AllowEgressFromLocalVpcToRemoteClassicLink"].should.equal(False)
+    assert accepter_options["AllowDnsResolutionFromRemoteVpc"] is False
+    assert accepter_options["AllowEgressFromLocalClassicLinkToRemoteVpc"] is False
+    assert accepter_options["AllowEgressFromLocalVpcToRemoteClassicLink"] is False
     requester_options = vpc_pcx_apn1.requester_vpc_info["PeeringOptions"]
-    requester_options["AllowDnsResolutionFromRemoteVpc"].should.equal(False)
-    requester_options["AllowEgressFromLocalClassicLinkToRemoteVpc"].should.equal(False)
-    requester_options["AllowEgressFromLocalVpcToRemoteClassicLink"].should.equal(False)
+    assert requester_options["AllowDnsResolutionFromRemoteVpc"] is False
+    assert requester_options["AllowEgressFromLocalClassicLinkToRemoteVpc"] is False
+    assert requester_options["AllowEgressFromLocalVpcToRemoteClassicLink"] is False
 
 
-@mock_ec2
-def test_modify_vpc_peering_connections_accepter_only():
+@mock_aws
+@pytest.mark.parametrize(
+    "account1,account2",
+    [
+        pytest.param("111111111111", "111111111111", id="within account"),
+        pytest.param("111111111111", "222222222222", id="across accounts"),
+    ],
+)
+@pytest.mark.skipif(
+    settings.TEST_SERVER_MODE, reason="Cannot set account ID in server mode"
+)
+def test_modify_vpc_peering_connections_accepter_only(account1, account2):
     # create vpc in us-west-1 and ap-northeast-1
-    ec2_usw1 = boto3.resource("ec2", region_name="us-west-1")
-    client = boto3.client("ec2", region_name="us-west-1")
-    vpc_usw1 = ec2_usw1.create_vpc(CidrBlock="10.90.0.0/16")
-    ec2_apn1 = boto3.resource("ec2", region_name="ap-northeast-1")
-    vpc_apn1 = ec2_apn1.create_vpc(CidrBlock="10.20.0.0/16")
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+        ec2_usw1 = boto3.resource("ec2", region_name="us-west-1")
+        client = boto3.client("ec2", region_name="us-west-1")
+        vpc_usw1 = ec2_usw1.create_vpc(CidrBlock="10.90.0.0/16")
+
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account2}):
+        ec2_apn1 = boto3.resource("ec2", region_name="ap-northeast-1")
+        vpc_apn1 = ec2_apn1.create_vpc(CidrBlock="10.20.0.0/16")
+
     # create peering
-    vpc_pcx_usw1 = ec2_usw1.create_vpc_peering_connection(
-        VpcId=vpc_usw1.id, PeerVpcId=vpc_apn1.id, PeerRegion="ap-northeast-1"
-    )
-    #
-    client.modify_vpc_peering_connection_options(
-        VpcPeeringConnectionId=vpc_pcx_usw1.id,
-        AccepterPeeringConnectionOptions={"AllowDnsResolutionFromRemoteVpc": True,},
-    )
-    # Accepter options are different
-    vpc_pcx_usw1.reload()
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+        vpc_pcx_usw1 = ec2_usw1.create_vpc_peering_connection(
+            VpcId=vpc_usw1.id,
+            PeerVpcId=vpc_apn1.id,
+            PeerRegion="ap-northeast-1",
+            PeerOwnerId=account2,
+        )
+
+        # modify peering connection options
+        client.modify_vpc_peering_connection_options(
+            VpcPeeringConnectionId=vpc_pcx_usw1.id,
+            AccepterPeeringConnectionOptions={"AllowDnsResolutionFromRemoteVpc": True},
+        )
+
+        # Accepter options are different
+        vpc_pcx_usw1.reload()
+
     accepter_options = vpc_pcx_usw1.accepter_vpc_info["PeeringOptions"]
-    accepter_options["AllowDnsResolutionFromRemoteVpc"].should.equal(True)
-    accepter_options["AllowEgressFromLocalClassicLinkToRemoteVpc"].should.equal(False)
-    accepter_options["AllowEgressFromLocalVpcToRemoteClassicLink"].should.equal(False)
+    assert accepter_options["AllowDnsResolutionFromRemoteVpc"] is True
+    assert accepter_options["AllowEgressFromLocalClassicLinkToRemoteVpc"] is False
+    assert accepter_options["AllowEgressFromLocalVpcToRemoteClassicLink"] is False
+
     # Requester options are untouched
     requester_options = vpc_pcx_usw1.requester_vpc_info["PeeringOptions"]
-    requester_options["AllowDnsResolutionFromRemoteVpc"].should.equal(False)
-    requester_options["AllowEgressFromLocalClassicLinkToRemoteVpc"].should.equal(False)
-    requester_options["AllowEgressFromLocalVpcToRemoteClassicLink"].should.equal(False)
+    assert requester_options["AllowDnsResolutionFromRemoteVpc"] is False
+    assert requester_options["AllowEgressFromLocalClassicLinkToRemoteVpc"] is False
+    assert requester_options["AllowEgressFromLocalVpcToRemoteClassicLink"] is False
 
 
-@mock_ec2
-def test_modify_vpc_peering_connections_requester_only():
+@mock_aws
+@pytest.mark.parametrize(
+    "account1,account2",
+    [
+        pytest.param("111111111111", "111111111111", id="within account"),
+        pytest.param("111111111111", "222222222222", id="across accounts"),
+    ],
+)
+@pytest.mark.skipif(
+    settings.TEST_SERVER_MODE, reason="Cannot set account ID in server mode"
+)
+def test_modify_vpc_peering_connections_requester_only(account1, account2):
     # create vpc in us-west-1 and ap-northeast-1
-    ec2_usw1 = boto3.resource("ec2", region_name="us-west-1")
-    client = boto3.client("ec2", region_name="us-west-1")
-    vpc_usw1 = ec2_usw1.create_vpc(CidrBlock="10.90.0.0/16")
-    ec2_apn1 = boto3.resource("ec2", region_name="ap-northeast-1")
-    vpc_apn1 = ec2_apn1.create_vpc(CidrBlock="10.20.0.0/16")
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+        ec2_usw1 = boto3.resource("ec2", region_name="us-west-1")
+        client = boto3.client("ec2", region_name="us-west-1")
+        vpc_usw1 = ec2_usw1.create_vpc(CidrBlock="10.90.0.0/16")
+
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account2}):
+        ec2_apn1 = boto3.resource("ec2", region_name="ap-northeast-1")
+        vpc_apn1 = ec2_apn1.create_vpc(CidrBlock="10.20.0.0/16")
+
     # create peering
-    vpc_pcx_usw1 = ec2_usw1.create_vpc_peering_connection(
-        VpcId=vpc_usw1.id, PeerVpcId=vpc_apn1.id, PeerRegion="ap-northeast-1"
-    )
-    #
-    client.modify_vpc_peering_connection_options(
-        VpcPeeringConnectionId=vpc_pcx_usw1.id,
-        RequesterPeeringConnectionOptions={
-            "AllowEgressFromLocalVpcToRemoteClassicLink": True,
-        },
-    )
-    # Requester options are different
-    vpc_pcx_usw1.reload()
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+        vpc_pcx_usw1 = ec2_usw1.create_vpc_peering_connection(
+            VpcId=vpc_usw1.id,
+            PeerVpcId=vpc_apn1.id,
+            PeerRegion="ap-northeast-1",
+            PeerOwnerId=account2,
+        )
+        #
+        client.modify_vpc_peering_connection_options(
+            VpcPeeringConnectionId=vpc_pcx_usw1.id,
+            RequesterPeeringConnectionOptions={
+                "AllowEgressFromLocalVpcToRemoteClassicLink": True,
+            },
+        )
+        # Requester options are different
+        vpc_pcx_usw1.reload()
+
     requester_options = vpc_pcx_usw1.requester_vpc_info["PeeringOptions"]
-    requester_options["AllowDnsResolutionFromRemoteVpc"].should.equal(False)
-    requester_options["AllowEgressFromLocalClassicLinkToRemoteVpc"].should.equal(False)
-    requester_options["AllowEgressFromLocalVpcToRemoteClassicLink"].should.equal(True)
+    assert requester_options["AllowDnsResolutionFromRemoteVpc"] is False
+    assert requester_options["AllowEgressFromLocalClassicLinkToRemoteVpc"] is False
+    assert requester_options["AllowEgressFromLocalVpcToRemoteClassicLink"] is True
+
     # Accepter options are untouched
     accepter_options = vpc_pcx_usw1.accepter_vpc_info["PeeringOptions"]
-    accepter_options["AllowDnsResolutionFromRemoteVpc"].should.equal(False)
-    accepter_options["AllowEgressFromLocalClassicLinkToRemoteVpc"].should.equal(False)
-    accepter_options["AllowEgressFromLocalVpcToRemoteClassicLink"].should.equal(False)
+    assert accepter_options["AllowDnsResolutionFromRemoteVpc"] is False
+    assert accepter_options["AllowEgressFromLocalClassicLinkToRemoteVpc"] is False
+    assert accepter_options["AllowEgressFromLocalVpcToRemoteClassicLink"] is False
 
 
-@mock_ec2
-def test_modify_vpc_peering_connections_unknown_vpc():
+@mock_aws
+@pytest.mark.parametrize(
+    "account1,account2",
+    [
+        pytest.param("111111111111", "111111111111", id="within account"),
+        pytest.param("111111111111", "222222222222", id="across accounts"),
+    ],
+)
+@pytest.mark.skipif(
+    settings.TEST_SERVER_MODE, reason="Cannot set account ID in server mode"
+)
+def test_modify_vpc_peering_connections_unknown_vpc(account1, account2):
     # create vpc in us-west-1 and ap-northeast-1
-    ec2_usw1 = boto3.resource("ec2", region_name="us-west-1")
-    client = boto3.client("ec2", region_name="us-west-1")
-    vpc_usw1 = ec2_usw1.create_vpc(CidrBlock="10.90.0.0/16")
-    ec2_apn1 = boto3.resource("ec2", region_name="ap-northeast-1")
-    vpc_apn1 = ec2_apn1.create_vpc(CidrBlock="10.20.0.0/16")
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+        ec2_usw1 = boto3.resource("ec2", region_name="us-west-1")
+        client = boto3.client("ec2", region_name="us-west-1")
+        vpc_usw1 = ec2_usw1.create_vpc(CidrBlock="10.90.0.0/16")
+
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account2}):
+        ec2_apn1 = boto3.resource("ec2", region_name="ap-northeast-1")
+        vpc_apn1 = ec2_apn1.create_vpc(CidrBlock="10.20.0.0/16")
+
     # create peering
-    ec2_usw1.create_vpc_peering_connection(
-        VpcId=vpc_usw1.id, PeerVpcId=vpc_apn1.id, PeerRegion="ap-northeast-1"
-    )
-    #
-    with pytest.raises(ClientError) as ex:
-        client.modify_vpc_peering_connection_options(
-            VpcPeeringConnectionId="vpx-unknown", RequesterPeeringConnectionOptions={}
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+        ec2_usw1.create_vpc_peering_connection(
+            VpcId=vpc_usw1.id,
+            PeerVpcId=vpc_apn1.id,
+            PeerRegion="ap-northeast-1",
+            PeerOwnerId=account2,
         )
+
+        with pytest.raises(ClientError) as ex:
+            client.modify_vpc_peering_connection_options(
+                VpcPeeringConnectionId="vpx-unknown",
+                RequesterPeeringConnectionOptions={},
+            )
     err = ex.value.response["Error"]
-    err["Code"].should.equal("InvalidVpcPeeringConnectionId.NotFound")
-    err["Message"].should.equal("VpcPeeringConnectionID vpx-unknown does not exist.")
+    assert err["Code"] == "InvalidVpcPeeringConnectionId.NotFound"
+    assert err["Message"] == "VpcPeeringConnectionID vpx-unknown does not exist."
 
 
-@mock_ec2
-def test_vpc_peering_connections_cross_region_fail():
+@mock_aws
+@pytest.mark.parametrize(
+    "account1,account2",
+    [
+        pytest.param("111111111111", "111111111111", id="within account"),
+        pytest.param("111111111111", "222222222222", id="across accounts"),
+    ],
+)
+@pytest.mark.skipif(
+    settings.TEST_SERVER_MODE, reason="Cannot set account ID in server mode"
+)
+def test_vpc_peering_connections_cross_region_fail(account1, account2):
     # create vpc in us-west-1 and ap-northeast-1
-    ec2_usw1 = boto3.resource("ec2", region_name="us-west-1")
-    vpc_usw1 = ec2_usw1.create_vpc(CidrBlock="10.90.0.0/16")
-    ec2_apn1 = boto3.resource("ec2", region_name="ap-northeast-1")
-    vpc_apn1 = ec2_apn1.create_vpc(CidrBlock="10.20.0.0/16")
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+        ec2_usw1 = boto3.resource("ec2", region_name="us-west-1")
+        vpc_usw1 = ec2_usw1.create_vpc(CidrBlock="10.90.0.0/16")
+
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account2}):
+        ec2_apn1 = boto3.resource("ec2", region_name="ap-northeast-1")
+        vpc_apn1 = ec2_apn1.create_vpc(CidrBlock="10.20.0.0/16")
+
     # create peering wrong region with no vpc
     with pytest.raises(ClientError) as cm:
-        ec2_usw1.create_vpc_peering_connection(
-            VpcId=vpc_usw1.id, PeerVpcId=vpc_apn1.id, PeerRegion="ap-northeast-2"
+        with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+            ec2_usw1.create_vpc_peering_connection(
+                VpcId=vpc_usw1.id,
+                PeerVpcId=vpc_apn1.id,
+                PeerRegion="ap-northeast-2",
+                PeerOwnerId=account2,
+            )
+    assert cm.value.response["Error"]["Code"] == "InvalidVpcID.NotFound"
+
+
+@mock_aws
+@pytest.mark.parametrize(
+    "account1,account2",
+    [
+        pytest.param("111111111111", "111111111111", id="within account"),
+        pytest.param("111111111111", "222222222222", id="across accounts"),
+    ],
+)
+@pytest.mark.skipif(
+    settings.TEST_SERVER_MODE, reason="Cannot set account ID in server mode"
+)
+def test_describe_vpc_peering_connections_only_returns_requested_id(account1, account2):
+    # create vpc in us-west-1 and ap-northeast-1
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+        ec2_usw1 = boto3.resource("ec2", region_name="us-west-1")
+        vpc_usw1 = ec2_usw1.create_vpc(CidrBlock="10.90.0.0/16")
+
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account2}):
+        ec2_apn1 = boto3.resource("ec2", region_name="ap-northeast-1")
+        vpc_apn1 = ec2_apn1.create_vpc(CidrBlock="10.20.0.0/16")
+
+    # create peering
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+        vpc_pcx_usw1 = ec2_usw1.create_vpc_peering_connection(
+            VpcId=vpc_usw1.id,
+            PeerVpcId=vpc_apn1.id,
+            PeerRegion="ap-northeast-1",
+            PeerOwnerId=account2,
         )
-    cm.value.response["Error"]["Code"].should.equal("InvalidVpcID.NotFound")
+        vpc_pcx_usw2 = ec2_usw1.create_vpc_peering_connection(
+            VpcId=vpc_usw1.id,
+            PeerVpcId=vpc_apn1.id,
+            PeerRegion="ap-northeast-1",
+            PeerOwnerId=account2,
+        )
+
+        # describe peering
+        ec2_usw1 = boto3.client("ec2", region_name="us-west-1")
+        our_vpcx = [vpcx["VpcPeeringConnectionId"] for vpcx in retrieve_all(ec2_usw1)]
+
+        assert vpc_pcx_usw1.id in our_vpcx
+        assert vpc_pcx_usw2.id in our_vpcx
+        assert vpc_apn1.id not in our_vpcx
+
+        both_pcx = ec2_usw1.describe_vpc_peering_connections(
+            VpcPeeringConnectionIds=[vpc_pcx_usw1.id, vpc_pcx_usw2.id]
+        )["VpcPeeringConnections"]
+        assert len(both_pcx) == 2
+
+        one_pcx = ec2_usw1.describe_vpc_peering_connections(
+            VpcPeeringConnectionIds=[vpc_pcx_usw1.id]
+        )["VpcPeeringConnections"]
+        assert len(one_pcx) == 1
 
 
-@mock_ec2
-def test_describe_vpc_peering_connections_only_returns_requested_id():
+@mock_aws
+@pytest.mark.parametrize(
+    "account1,account2",
+    [
+        pytest.param("111111111111", "111111111111", id="within account"),
+        pytest.param("111111111111", "222222222222", id="across accounts"),
+    ],
+)
+@pytest.mark.skipif(
+    settings.TEST_SERVER_MODE, reason="Cannot set account ID in server mode"
+)
+def test_vpc_peering_connections_cross_region_accept(account1, account2):
     # create vpc in us-west-1 and ap-northeast-1
-    ec2_usw1 = boto3.resource("ec2", region_name="us-west-1")
-    vpc_usw1 = ec2_usw1.create_vpc(CidrBlock="10.90.0.0/16")
-    ec2_apn1 = boto3.resource("ec2", region_name="ap-northeast-1")
-    vpc_apn1 = ec2_apn1.create_vpc(CidrBlock="10.20.0.0/16")
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+        ec2_usw1 = boto3.resource("ec2", region_name="us-west-1")
+        vpc_usw1 = ec2_usw1.create_vpc(CidrBlock="10.90.0.0/16")
+
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account2}):
+        ec2_apn1 = boto3.resource("ec2", region_name="ap-northeast-1")
+        vpc_apn1 = ec2_apn1.create_vpc(CidrBlock="10.20.0.0/16")
+
     # create peering
-    vpc_pcx_usw1 = ec2_usw1.create_vpc_peering_connection(
-        VpcId=vpc_usw1.id, PeerVpcId=vpc_apn1.id, PeerRegion="ap-northeast-1"
-    )
-    vpc_pcx_usw2 = ec2_usw1.create_vpc_peering_connection(
-        VpcId=vpc_usw1.id, PeerVpcId=vpc_apn1.id, PeerRegion="ap-northeast-1"
-    )
-    # describe peering
-    ec2_usw1 = boto3.client("ec2", region_name="us-west-1")
-    our_vpcx = [vpcx["VpcPeeringConnectionId"] for vpcx in retrieve_all(ec2_usw1)]
-    our_vpcx.should.contain(vpc_pcx_usw1.id)
-    our_vpcx.should.contain(vpc_pcx_usw2.id)
-    our_vpcx.shouldnt.contain(vpc_apn1.id)
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+        vpc_pcx_usw1 = ec2_usw1.create_vpc_peering_connection(
+            VpcId=vpc_usw1.id,
+            PeerVpcId=vpc_apn1.id,
+            PeerRegion="ap-northeast-1",
+            PeerOwnerId=account2,
+        )
 
-    both_pcx = ec2_usw1.describe_vpc_peering_connections(
-        VpcPeeringConnectionIds=[vpc_pcx_usw1.id, vpc_pcx_usw2.id]
-    )["VpcPeeringConnections"]
-    both_pcx.should.have.length_of(2)
-
-    one_pcx = ec2_usw1.describe_vpc_peering_connections(
-        VpcPeeringConnectionIds=[vpc_pcx_usw1.id]
-    )["VpcPeeringConnections"]
-    one_pcx.should.have.length_of(1)
-
-
-@mock_ec2
-def test_vpc_peering_connections_cross_region_accept():
-    # create vpc in us-west-1 and ap-northeast-1
-    ec2_usw1 = boto3.resource("ec2", region_name="us-west-1")
-    vpc_usw1 = ec2_usw1.create_vpc(CidrBlock="10.90.0.0/16")
-    ec2_apn1 = boto3.resource("ec2", region_name="ap-northeast-1")
-    vpc_apn1 = ec2_apn1.create_vpc(CidrBlock="10.20.0.0/16")
-    # create peering
-    vpc_pcx_usw1 = ec2_usw1.create_vpc_peering_connection(
-        VpcId=vpc_usw1.id, PeerVpcId=vpc_apn1.id, PeerRegion="ap-northeast-1"
-    )
     # accept peering from ap-northeast-1
-    ec2_apn1 = boto3.client("ec2", region_name="ap-northeast-1")
-    ec2_usw1 = boto3.client("ec2", region_name="us-west-1")
-    acp_pcx_apn1 = ec2_apn1.accept_vpc_peering_connection(
-        VpcPeeringConnectionId=vpc_pcx_usw1.id
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account2}):
+        ec2_apn1 = boto3.client("ec2", region_name="ap-northeast-1")
+        acp_pcx_apn1 = ec2_apn1.accept_vpc_peering_connection(
+            VpcPeeringConnectionId=vpc_pcx_usw1.id
+        )
+
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+        ec2_usw1 = boto3.client("ec2", region_name="us-west-1")
+        des_pcx_apn1 = ec2_usw1.describe_vpc_peering_connections(
+            VpcPeeringConnectionIds=[vpc_pcx_usw1.id]
+        )
+        des_pcx_usw1 = ec2_usw1.describe_vpc_peering_connections(
+            VpcPeeringConnectionIds=[vpc_pcx_usw1.id]
+        )
+
+    assert acp_pcx_apn1["VpcPeeringConnection"]["Status"]["Code"] == "active"
+    assert (
+        acp_pcx_apn1["VpcPeeringConnection"]["AccepterVpcInfo"]["Region"]
+        == "ap-northeast-1"
     )
-    des_pcx_apn1 = ec2_usw1.describe_vpc_peering_connections(
-        VpcPeeringConnectionIds=[vpc_pcx_usw1.id]
+    assert (
+        acp_pcx_apn1["VpcPeeringConnection"]["RequesterVpcInfo"]["Region"]
+        == "us-west-1"
     )
-    des_pcx_usw1 = ec2_usw1.describe_vpc_peering_connections(
-        VpcPeeringConnectionIds=[vpc_pcx_usw1.id]
+    assert des_pcx_apn1["VpcPeeringConnections"][0]["Status"]["Code"] == "active"
+    assert (
+        des_pcx_apn1["VpcPeeringConnections"][0]["AccepterVpcInfo"]["Region"]
+        == "ap-northeast-1"
     )
-    acp_pcx_apn1["VpcPeeringConnection"]["Status"]["Code"].should.equal("active")
-    acp_pcx_apn1["VpcPeeringConnection"]["AccepterVpcInfo"]["Region"].should.equal(
-        "ap-northeast-1"
+    assert (
+        des_pcx_apn1["VpcPeeringConnections"][0]["RequesterVpcInfo"]["Region"]
+        == "us-west-1"
     )
-    acp_pcx_apn1["VpcPeeringConnection"]["RequesterVpcInfo"]["Region"].should.equal(
-        "us-west-1"
+    assert des_pcx_usw1["VpcPeeringConnections"][0]["Status"]["Code"] == "active"
+    assert (
+        des_pcx_usw1["VpcPeeringConnections"][0]["AccepterVpcInfo"]["Region"]
+        == "ap-northeast-1"
     )
-    des_pcx_apn1["VpcPeeringConnections"][0]["Status"]["Code"].should.equal("active")
-    des_pcx_apn1["VpcPeeringConnections"][0]["AccepterVpcInfo"]["Region"].should.equal(
-        "ap-northeast-1"
-    )
-    des_pcx_apn1["VpcPeeringConnections"][0]["RequesterVpcInfo"]["Region"].should.equal(
-        "us-west-1"
-    )
-    des_pcx_usw1["VpcPeeringConnections"][0]["Status"]["Code"].should.equal("active")
-    des_pcx_usw1["VpcPeeringConnections"][0]["AccepterVpcInfo"]["Region"].should.equal(
-        "ap-northeast-1"
-    )
-    des_pcx_usw1["VpcPeeringConnections"][0]["RequesterVpcInfo"]["Region"].should.equal(
-        "us-west-1"
+    assert (
+        des_pcx_usw1["VpcPeeringConnections"][0]["RequesterVpcInfo"]["Region"]
+        == "us-west-1"
     )
 
 
-@mock_ec2
-def test_vpc_peering_connections_cross_region_reject():
+@mock_aws
+@pytest.mark.parametrize(
+    "account1,account2",
+    [
+        pytest.param("111111111111", "111111111111", id="within account"),
+        pytest.param("111111111111", "222222222222", id="across accounts"),
+    ],
+)
+@pytest.mark.skipif(
+    settings.TEST_SERVER_MODE, reason="Cannot set account ID in server mode"
+)
+def test_vpc_peering_connections_cross_region_reject(account1, account2):
     # create vpc in us-west-1 and ap-northeast-1
-    ec2_usw1 = boto3.resource("ec2", region_name="us-west-1")
-    vpc_usw1 = ec2_usw1.create_vpc(CidrBlock="10.90.0.0/16")
-    ec2_apn1 = boto3.resource("ec2", region_name="ap-northeast-1")
-    vpc_apn1 = ec2_apn1.create_vpc(CidrBlock="10.20.0.0/16")
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+        ec2_usw1 = boto3.resource("ec2", region_name="us-west-1")
+        vpc_usw1 = ec2_usw1.create_vpc(CidrBlock="10.90.0.0/16")
+
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account2}):
+        ec2_apn1 = boto3.resource("ec2", region_name="ap-northeast-1")
+        vpc_apn1 = ec2_apn1.create_vpc(CidrBlock="10.20.0.0/16")
+
     # create peering
-    vpc_pcx_usw1 = ec2_usw1.create_vpc_peering_connection(
-        VpcId=vpc_usw1.id, PeerVpcId=vpc_apn1.id, PeerRegion="ap-northeast-1"
-    )
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+        vpc_pcx_usw1 = ec2_usw1.create_vpc_peering_connection(
+            VpcId=vpc_usw1.id,
+            PeerVpcId=vpc_apn1.id,
+            PeerRegion="ap-northeast-1",
+            PeerOwnerId=account2,
+        )
+
     # reject peering from ap-northeast-1
-    ec2_apn1 = boto3.client("ec2", region_name="ap-northeast-1")
-    ec2_usw1 = boto3.client("ec2", region_name="us-west-1")
-    rej_pcx_apn1 = ec2_apn1.reject_vpc_peering_connection(
-        VpcPeeringConnectionId=vpc_pcx_usw1.id
-    )
-    des_pcx_apn1 = ec2_usw1.describe_vpc_peering_connections(
-        VpcPeeringConnectionIds=[vpc_pcx_usw1.id]
-    )
-    des_pcx_usw1 = ec2_usw1.describe_vpc_peering_connections(
-        VpcPeeringConnectionIds=[vpc_pcx_usw1.id]
-    )
-    rej_pcx_apn1["Return"].should.equal(True)
-    des_pcx_apn1["VpcPeeringConnections"][0]["Status"]["Code"].should.equal("rejected")
-    des_pcx_usw1["VpcPeeringConnections"][0]["Status"]["Code"].should.equal("rejected")
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account2}):
+        ec2_apn1 = boto3.client("ec2", region_name="ap-northeast-1")
+        rej_pcx_apn1 = ec2_apn1.reject_vpc_peering_connection(
+            VpcPeeringConnectionId=vpc_pcx_usw1.id
+        )
+
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+        ec2_usw1 = boto3.client("ec2", region_name="us-west-1")
+        des_pcx_apn1 = ec2_usw1.describe_vpc_peering_connections(
+            VpcPeeringConnectionIds=[vpc_pcx_usw1.id]
+        )
+        des_pcx_usw1 = ec2_usw1.describe_vpc_peering_connections(
+            VpcPeeringConnectionIds=[vpc_pcx_usw1.id]
+        )
+    assert rej_pcx_apn1["Return"] is True
+    assert des_pcx_apn1["VpcPeeringConnections"][0]["Status"]["Code"] == "rejected"
+    assert des_pcx_usw1["VpcPeeringConnections"][0]["Status"]["Code"] == "rejected"
 
 
-@mock_ec2
-def test_vpc_peering_connections_cross_region_delete():
+@mock_aws
+@pytest.mark.parametrize(
+    "account1,account2",
+    [
+        pytest.param("111111111111", "111111111111", id="within account"),
+        pytest.param("111111111111", "222222222222", id="across accounts"),
+    ],
+)
+@pytest.mark.skipif(
+    settings.TEST_SERVER_MODE, reason="Cannot set account ID in server mode"
+)
+def test_vpc_peering_connections_cross_region_delete(account1, account2):
     # create vpc in us-west-1 and ap-northeast-1
-    ec2_usw1 = boto3.resource("ec2", region_name="us-west-1")
-    vpc_usw1 = ec2_usw1.create_vpc(CidrBlock="10.90.0.0/16")
-    ec2_apn1 = boto3.resource("ec2", region_name="ap-northeast-1")
-    vpc_apn1 = ec2_apn1.create_vpc(CidrBlock="10.20.0.0/16")
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+        ec2_usw1 = boto3.resource("ec2", region_name="us-west-1")
+        vpc_usw1 = ec2_usw1.create_vpc(CidrBlock="10.90.0.0/16")
+
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account2}):
+        ec2_apn1 = boto3.resource("ec2", region_name="ap-northeast-1")
+        vpc_apn1 = ec2_apn1.create_vpc(CidrBlock="10.20.0.0/16")
+
     # create peering
-    vpc_pcx_usw1 = ec2_usw1.create_vpc_peering_connection(
-        VpcId=vpc_usw1.id, PeerVpcId=vpc_apn1.id, PeerRegion="ap-northeast-1"
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+        vpc_pcx_usw1 = ec2_usw1.create_vpc_peering_connection(
+            VpcId=vpc_usw1.id,
+            PeerVpcId=vpc_apn1.id,
+            PeerRegion="ap-northeast-1",
+            PeerOwnerId=account2,
+        )
+
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account2}):
+        # reject peering from ap-northeast-1
+        ec2_apn1 = boto3.client("ec2", region_name="ap-northeast-1")
+        del_pcx_apn1 = ec2_apn1.delete_vpc_peering_connection(
+            VpcPeeringConnectionId=vpc_pcx_usw1.id
+        )
+
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+        ec2_usw1 = boto3.client("ec2", region_name="us-west-1")
+        des_pcx_apn1 = ec2_usw1.describe_vpc_peering_connections(
+            VpcPeeringConnectionIds=[vpc_pcx_usw1.id]
+        )
+        des_pcx_usw1 = ec2_usw1.describe_vpc_peering_connections(
+            VpcPeeringConnectionIds=[vpc_pcx_usw1.id]
+        )
+
+    assert del_pcx_apn1["Return"] is True
+    assert des_pcx_apn1["VpcPeeringConnections"][0]["Status"]["Code"] == "deleted"
+    assert (
+        des_pcx_apn1["VpcPeeringConnections"][0]["Status"]["Message"]
+        == f"Deleted by {account2}"
     )
-    # reject peering from ap-northeast-1
-    ec2_apn1 = boto3.client("ec2", region_name="ap-northeast-1")
-    ec2_usw1 = boto3.client("ec2", region_name="us-west-1")
-    del_pcx_apn1 = ec2_apn1.delete_vpc_peering_connection(
-        VpcPeeringConnectionId=vpc_pcx_usw1.id
+
+    assert des_pcx_usw1["VpcPeeringConnections"][0]["Status"]["Code"] == "deleted"
+    assert (
+        des_pcx_usw1["VpcPeeringConnections"][0]["Status"]["Message"]
+        == f"Deleted by {account2}"
     )
-    des_pcx_apn1 = ec2_usw1.describe_vpc_peering_connections(
-        VpcPeeringConnectionIds=[vpc_pcx_usw1.id]
-    )
-    des_pcx_usw1 = ec2_usw1.describe_vpc_peering_connections(
-        VpcPeeringConnectionIds=[vpc_pcx_usw1.id]
-    )
-    del_pcx_apn1["Return"].should.equal(True)
-    des_pcx_apn1["VpcPeeringConnections"][0]["Status"]["Code"].should.equal("deleted")
-    des_pcx_usw1["VpcPeeringConnections"][0]["Status"]["Code"].should.equal("deleted")
 
 
-@mock_ec2
-def test_vpc_peering_connections_cross_region_accept_wrong_region():
+@mock_aws
+@pytest.mark.parametrize(
+    "account1,account2",
+    [
+        pytest.param("111111111111", "111111111111", id="within account"),
+        pytest.param("111111111111", "222222222222", id="across accounts"),
+    ],
+)
+@pytest.mark.skipif(
+    settings.TEST_SERVER_MODE, reason="Cannot set account ID in server mode"
+)
+def test_vpc_peering_connections_cross_region_accept_wrong_region(account1, account2):
     # create vpc in us-west-1 and ap-northeast-1
-    ec2_usw1 = boto3.resource("ec2", region_name="us-west-1")
-    vpc_usw1 = ec2_usw1.create_vpc(CidrBlock="10.90.0.0/16")
-    ec2_apn1 = boto3.resource("ec2", region_name="ap-northeast-1")
-    vpc_apn1 = ec2_apn1.create_vpc(CidrBlock="10.20.0.0/16")
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+        ec2_usw1 = boto3.resource("ec2", region_name="us-west-1")
+        vpc_usw1 = ec2_usw1.create_vpc(CidrBlock="10.90.0.0/16")
+
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account2}):
+        ec2_apn1 = boto3.resource("ec2", region_name="ap-northeast-1")
+        vpc_apn1 = ec2_apn1.create_vpc(CidrBlock="10.20.0.0/16")
+
     # create peering
-    vpc_pcx_usw1 = ec2_usw1.create_vpc_peering_connection(
-        VpcId=vpc_usw1.id, PeerVpcId=vpc_apn1.id, PeerRegion="ap-northeast-1"
-    )
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+        vpc_pcx_usw1 = ec2_usw1.create_vpc_peering_connection(
+            VpcId=vpc_usw1.id,
+            PeerVpcId=vpc_apn1.id,
+            PeerRegion="ap-northeast-1",
+            PeerOwnerId=account2,
+        )
 
     # accept wrong peering from us-west-1 which will raise error
-    ec2_apn1 = boto3.client("ec2", region_name="ap-northeast-1")
-    ec2_usw1 = boto3.client("ec2", region_name="us-west-1")
-    with pytest.raises(ClientError) as cm:
-        ec2_usw1.accept_vpc_peering_connection(VpcPeeringConnectionId=vpc_pcx_usw1.id)
-    cm.value.response["Error"]["Code"].should.equal("OperationNotPermitted")
-    exp_msg = (
-        "Incorrect region ({0}) specified for this request.VPC "
-        "peering connection {1} must be "
-        "accepted in region {2}".format("us-west-1", vpc_pcx_usw1.id, "ap-northeast-1")
-    )
-    cm.value.response["Error"]["Message"].should.equal(exp_msg)
+    # only applicable for cross-region intra-account peering.
+    if account1 == account2:
+        with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+            ec2_usw1 = boto3.client("ec2", region_name="us-west-1")
+            with pytest.raises(ClientError) as cm:
+                ec2_usw1.accept_vpc_peering_connection(
+                    VpcPeeringConnectionId=vpc_pcx_usw1.id
+                )
+
+        assert cm.value.response["Error"]["Code"] == "OperationNotPermitted"
+        exp_msg = f"Incorrect region (us-west-1) specified for this request. VPC peering connection {vpc_pcx_usw1.id} must be accepted in region ap-northeast-1"
+        assert cm.value.response["Error"]["Message"] == exp_msg
+
+    # Ensure accepting peering from requester account raises
+    # only applicable for cross-region inter-account peering.
+    if account1 != account2:
+        with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+            ec2_usw1 = boto3.client("ec2", region_name="us-west-1")
+            with pytest.raises(ClientError) as cm:
+                ec2_usw1.accept_vpc_peering_connection(
+                    VpcPeeringConnectionId=vpc_pcx_usw1.id
+                )
+
+        assert cm.value.response["Error"]["Code"] == "OperationNotPermitted"
+        exp_msg = f"User ({account1}) cannot accept peering {vpc_pcx_usw1.id}"
+        assert cm.value.response["Error"]["Message"] == exp_msg
 
 
-@mock_ec2
-def test_vpc_peering_connections_cross_region_reject_wrong_region():
+@mock_aws
+@pytest.mark.parametrize(
+    "account1,account2",
+    [
+        pytest.param("111111111111", "111111111111", id="within account"),
+        pytest.param("111111111111", "222222222222", id="across accounts"),
+    ],
+)
+@pytest.mark.skipif(
+    settings.TEST_SERVER_MODE, reason="Cannot set account ID in server mode"
+)
+def test_vpc_peering_connections_cross_region_reject_wrong_region(account1, account2):
     # create vpc in us-west-1 and ap-northeast-1
-    ec2_usw1 = boto3.resource("ec2", region_name="us-west-1")
-    vpc_usw1 = ec2_usw1.create_vpc(CidrBlock="10.90.0.0/16")
-    ec2_apn1 = boto3.resource("ec2", region_name="ap-northeast-1")
-    vpc_apn1 = ec2_apn1.create_vpc(CidrBlock="10.20.0.0/16")
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+        ec2_usw1 = boto3.resource("ec2", region_name="us-west-1")
+        vpc_usw1 = ec2_usw1.create_vpc(CidrBlock="10.90.0.0/16")
+
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account2}):
+        ec2_apn1 = boto3.resource("ec2", region_name="ap-northeast-1")
+        vpc_apn1 = ec2_apn1.create_vpc(CidrBlock="10.20.0.0/16")
+
     # create peering
-    vpc_pcx_usw1 = ec2_usw1.create_vpc_peering_connection(
-        VpcId=vpc_usw1.id, PeerVpcId=vpc_apn1.id, PeerRegion="ap-northeast-1"
-    )
-    # reject wrong peering from us-west-1 which will raise error
-    ec2_apn1 = boto3.client("ec2", region_name="ap-northeast-1")
-    ec2_usw1 = boto3.client("ec2", region_name="us-west-1")
-    with pytest.raises(ClientError) as cm:
-        ec2_usw1.reject_vpc_peering_connection(VpcPeeringConnectionId=vpc_pcx_usw1.id)
-    cm.value.response["Error"]["Code"].should.equal("OperationNotPermitted")
-    exp_msg = (
-        "Incorrect region ({0}) specified for this request.VPC "
-        "peering connection {1} must be accepted or "
-        "rejected in region {2}".format("us-west-1", vpc_pcx_usw1.id, "ap-northeast-1")
-    )
-    cm.value.response["Error"]["Message"].should.equal(exp_msg)
+    with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+        vpc_pcx_usw1 = ec2_usw1.create_vpc_peering_connection(
+            VpcId=vpc_usw1.id,
+            PeerVpcId=vpc_apn1.id,
+            PeerRegion="ap-northeast-1",
+            PeerOwnerId=account2,
+        )
+
+    # reject wrong peering from us-west-1 which will raise error.
+    # only applicable for cross-region intra-account peering.
+    if account1 == account2:
+        with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+            ec2_usw1 = boto3.client("ec2", region_name="us-west-1")
+            with pytest.raises(ClientError) as cm:
+                ec2_usw1.reject_vpc_peering_connection(
+                    VpcPeeringConnectionId=vpc_pcx_usw1.id
+                )
+
+        assert cm.value.response["Error"]["Code"] == "OperationNotPermitted"
+        exp_msg = f"Incorrect region (us-west-1) specified for this request. VPC peering connection {vpc_pcx_usw1.id} must be accepted or rejected in region ap-northeast-1"
+        assert cm.value.response["Error"]["Message"] == exp_msg
+
+    # Ensure rejecting peering from requester account raises
+    # only applicable for cross-region inter-account peering.
+    if account1 != account2:
+        with mock.patch.dict(os.environ, {"MOTO_ACCOUNT_ID": account1}):
+            ec2_usw1 = boto3.client("ec2", region_name="us-west-1")
+            with pytest.raises(ClientError) as cm:
+                ec2_usw1.reject_vpc_peering_connection(
+                    VpcPeeringConnectionId=vpc_pcx_usw1.id
+                )
+
+        assert cm.value.response["Error"]["Code"] == "OperationNotPermitted"
+        exp_msg = f"User ({account1}) cannot reject peering {vpc_pcx_usw1.id}"
+        assert cm.value.response["Error"]["Message"] == exp_msg
 
 
 def retrieve_all(client):

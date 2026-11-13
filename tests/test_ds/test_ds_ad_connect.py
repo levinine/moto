@@ -3,17 +3,17 @@
 The logic to check the details of VPCs and Subnets is shared between the
 "create directory" APIs, so it will not be repeated here.
 """
+
 from datetime import datetime, timezone
 
 import boto3
-from botocore.exceptions import ClientError
 import pytest
+from botocore.exceptions import ClientError
 
-from moto import mock_ds
-from moto.core.utils import get_random_hex
-from moto.ec2 import mock_ec2
+from moto import mock_aws
+from moto.moto_api._internal import mock_random
 
-from .test_ds_simple_ad_directory import TEST_REGION, create_vpc, create_subnets
+from .test_ds_simple_ad_directory import TEST_REGION, create_subnets, create_vpc
 
 
 def create_test_ad_connector(
@@ -23,7 +23,7 @@ def create_test_ad_connector(
     customer_dns_ips=None,
     customer_user_name="Admin",
     tags=None,
-):  # pylint: disable=too-many-arguments
+):
     """Return ID of a newly created valid directory."""
     if not vpc_settings:
         good_vpc_id = create_vpc(ec2_client)
@@ -37,7 +37,7 @@ def create_test_ad_connector(
         tags = []
 
     result = ds_client.connect_directory(
-        Name=f"test-{get_random_hex(6)}.test",
+        Name=f"test-{mock_random.get_random_hex(6)}.test",
         Password="4ADConnectPassword",
         Size="Small",
         ConnectSettings={
@@ -51,7 +51,7 @@ def create_test_ad_connector(
     return result["DirectoryId"]
 
 
-@mock_ds
+@mock_aws
 def test_ds_connect_directory_validations():
     """Test validation errs that aren't caught by botocore.
 
@@ -59,7 +59,7 @@ def test_ds_connect_directory_validations():
     this verifies that it is invoked from connect_directory().
     """
     client = boto3.client("ds", region_name=TEST_REGION)
-    random_num = get_random_hex(6)
+    random_num = mock_random.get_random_hex(6)
 
     # Verify ValidationException error messages are accumulated properly.
     bad_name = f"bad_name_{random_num}"
@@ -94,9 +94,9 @@ def test_ds_connect_directory_validations():
         f"Member must satisfy enum value set: [Small, Large]" in err["Message"]
     )
     assert (
-        fr"Value '{bad_name}' at 'name' failed to satisfy constraint: "
-        fr"Member must satisfy regular expression pattern: "
-        fr"^([a-zA-Z0-9]+[\.-])+([a-zA-Z0-9])+$" in err["Message"]
+        rf"Value '{bad_name}' at 'name' failed to satisfy constraint: "
+        rf"Member must satisfy regular expression pattern: "
+        rf"^([a-zA-Z0-9]+[\.-])+([a-zA-Z0-9])+$" in err["Message"]
     )
 
     too_long = (
@@ -144,15 +144,14 @@ def test_ds_connect_directory_validations():
     assert err["Code"] == "ValidationException"
     assert "1 validation error detected" in err["Message"]
     assert (
-        fr"Value '['{bad_connect_settings['SubnetIds'][0]}']' at "
-        fr"'connectSettings.vpcSettings.subnetIds' failed to satisfy "
-        fr"constraint: Member must satisfy regular expression pattern: "
-        fr"^(subnet-[0-9a-f]{{8}}|subnet-[0-9a-f]{{17}})$" in err["Message"]
+        rf"Value '['{bad_connect_settings['SubnetIds'][0]}']' at "
+        rf"'connectSettings.vpcSettings.subnetIds' failed to satisfy "
+        rf"constraint: Member must satisfy regular expression pattern: "
+        rf"^(subnet-[0-9a-f]{{8}}|subnet-[0-9a-f]{{17}})$" in err["Message"]
     )
 
 
-@mock_ec2
-@mock_ds
+@mock_aws
 def test_ds_connect_directory_good_args():
     """Test creation of AD connect directory using good arguments."""
     client = boto3.client("ds", region_name=TEST_REGION)
@@ -177,8 +176,7 @@ def test_ds_connect_directory_good_args():
     )
 
 
-@mock_ec2
-@mock_ds
+@mock_aws
 def test_ds_connect_directory_bad_args():
     """Test validation of non-vpc related ConnectionSettings values."""
     client = boto3.client("ds", region_name=TEST_REGION)
@@ -192,9 +190,9 @@ def test_ds_connect_directory_bad_args():
     assert err["Code"] == "ValidationException"
     assert "1 validation error detected" in err["Message"]
     assert (
-        fr"Value '{bad_username}' at 'connectSettings.customerUserName' "
-        fr"failed to satisfy constraint: Member must satisfy regular "
-        fr"expression pattern: ^[a-zA-Z0-9._-]+$" in err["Message"]
+        rf"Value '{bad_username}' at 'connectSettings.customerUserName' "
+        rf"failed to satisfy constraint: Member must satisfy regular "
+        rf"expression pattern: ^[a-zA-Z0-9._-]+$" in err["Message"]
     )
 
     # Bad CustomerDnsIps.
@@ -205,15 +203,14 @@ def test_ds_connect_directory_bad_args():
     assert err["Code"] == "ValidationException"
     assert "1 validation error detected" in err["Message"]
     assert (
-        fr"Value '{bad_dns_ip}' at 'connectSettings.customerDnsIps' "
-        fr"failed to satisfy constraint: Member must satisfy regular "
-        fr"expression pattern: ^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.)"
-        fr"{{3}}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$" in err["Message"]
+        rf"Value '{bad_dns_ip}' at 'connectSettings.customerDnsIps' "
+        rf"failed to satisfy constraint: Member must satisfy regular "
+        rf"expression pattern: ^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.)"
+        rf"{{3}}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$" in err["Message"]
     )
 
 
-@mock_ec2
-@mock_ds
+@mock_aws
 def test_ds_connect_directory_delete():
     """Test deletion of AD Connector directory."""
     client = boto3.client("ds", region_name=TEST_REGION)
@@ -225,8 +222,7 @@ def test_ds_connect_directory_delete():
     assert result["DirectoryId"] == directory_id
 
 
-@mock_ec2
-@mock_ds
+@mock_aws
 def test_ds_connect_directory_describe():
     """Test describe_directory() for AD Connector directory."""
     client = boto3.client("ds", region_name=TEST_REGION)
@@ -253,12 +249,11 @@ def test_ds_connect_directory_describe():
     assert directory["ConnectSettings"]["CustomerUserName"] == "Admin"
     assert len(directory["ConnectSettings"]["ConnectIps"]) == 2
     assert directory["Size"] == "Small"
-    assert set(directory["DnsIpAddrs"]) == set(["1.2.3.4", "5.6.7.8"])
+    assert set(directory["DnsIpAddrs"]) == {"1.2.3.4", "5.6.7.8"}
     assert "NextToken" not in result
 
 
-@mock_ec2
-@mock_ds
+@mock_aws
 def test_ds_connect_directory_tags():
     """Test that directory tags can be added and retrieved."""
     client = boto3.client("ds", region_name=TEST_REGION)
@@ -272,8 +267,7 @@ def test_ds_connect_directory_tags():
     assert result["Tags"] == added_tags
 
 
-@mock_ec2
-@mock_ds
+@mock_aws
 def test_ds_get_connect_directory_limits():
     """Test return value for ad connector directory limits."""
     client = boto3.client("ds", region_name=TEST_REGION)
@@ -293,3 +287,91 @@ def test_ds_get_connect_directory_limits():
     assert limits["ConnectedDirectoriesLimitReached"]
     assert not limits["CloudOnlyDirectoriesCurrentCount"]
     assert not limits["CloudOnlyMicrosoftADCurrentCount"]
+
+
+@mock_aws
+def test_enable_describe_disable_ldaps():
+    """Test good and bad invocations of describe_directories()."""
+    client = boto3.client("ds", region_name=TEST_REGION)
+    ec2_client = boto3.client("ec2", region_name=TEST_REGION)
+
+    directory_id = create_test_ad_connector(client, ec2_client)
+
+    # Describe LDAPS settings for AD Connector without LDAPS enabled
+    ldaps = client.describe_ldaps_settings(DirectoryId=directory_id)[
+        "LDAPSSettingsInfo"
+    ]
+    assert ldaps == []
+
+    # Enable LDAPS for AD Connector and verify it is enabled
+    client.enable_ldaps(DirectoryId=directory_id, Type="Client")
+    ldaps = client.describe_ldaps_settings(DirectoryId=directory_id)[
+        "LDAPSSettingsInfo"
+    ]
+    assert len(ldaps) == 1
+    assert ldaps[0]["LDAPSStatus"] == "Enabled"
+
+    # Disable LDAPS for AD Connector and verify it is disabled
+    client.disable_ldaps(DirectoryId=directory_id, Type="Client")
+    ldaps = client.describe_ldaps_settings(DirectoryId=directory_id)[
+        "LDAPSSettingsInfo"
+    ]
+    assert len(ldaps) == 1
+    assert ldaps[0]["LDAPSStatus"] == "Disabled"
+
+
+@mock_aws
+def test_enable_radius():
+    """Test enable_radius and disable_radius for AD Connector."""
+    client = boto3.client("ds", region_name=TEST_REGION)
+    ec2_client = boto3.client("ec2", region_name=TEST_REGION)
+
+    directory_id = create_test_ad_connector(client, ec2_client)
+
+    radius_settings = {
+        "RadiusServers": ["1.2.3.4"],
+        "RadiusPort": 1812,
+        "RadiusTimeout": 30,
+        "RadiusRetries": 3,
+        "SharedSecret": "supersecret",
+        "AuthenticationProtocol": "PAP",
+        "DisplayLabel": "MFA",
+        "UseSameUsername": False,
+    }
+    client.enable_radius(DirectoryId=directory_id, RadiusSettings=radius_settings)
+
+    directory = client.describe_directories(DirectoryIds=[directory_id])[
+        "DirectoryDescriptions"
+    ][0]
+    assert directory["RadiusStatus"] == "Completed"
+    assert directory["RadiusSettings"]["RadiusServers"] == ["1.2.3.4"]
+    assert directory["RadiusSettings"]["RadiusPort"] == 1812
+    assert directory["RadiusSettings"]["AuthenticationProtocol"] == "PAP"
+
+
+@mock_aws
+def test_disable_radius():
+    """Test disabling RADIUS after enabling it for AD Connector."""
+    client = boto3.client("ds", region_name=TEST_REGION)
+    ec2_client = boto3.client("ec2", region_name=TEST_REGION)
+
+    directory_id = create_test_ad_connector(client, ec2_client)
+
+    radius_settings = {
+        "RadiusServers": ["1.2.3.4"],
+        "RadiusPort": 1812,
+        "RadiusTimeout": 30,
+        "RadiusRetries": 3,
+        "SharedSecret": "supersecret",
+        "AuthenticationProtocol": "PAP",
+        "DisplayLabel": "MFA",
+        "UseSameUsername": False,
+    }
+    client.enable_radius(DirectoryId=directory_id, RadiusSettings=radius_settings)
+    client.disable_radius(DirectoryId=directory_id)
+
+    directory = client.describe_directories(DirectoryIds=[directory_id])[
+        "DirectoryDescriptions"
+    ][0]
+    assert "RadiusStatus" not in directory
+    assert directory["RadiusSettings"] == {}

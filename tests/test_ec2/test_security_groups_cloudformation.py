@@ -1,11 +1,13 @@
-import boto3
-import sure  # noqa # pylint: disable=unused-import
 import json
-from moto import mock_cloudformation, mock_ec2
-from tests import EXAMPLE_AMI_ID
 from string import Template
 from uuid import uuid4
 
+import boto3
+import pytest
+from botocore.exceptions import ClientError
+
+from moto import mock_aws
+from tests import EXAMPLE_AMI_ID
 
 SEC_GROUP_INGRESS = Template(
     """{
@@ -132,8 +134,7 @@ SEC_GROUP_SOURCE = {
 }
 
 
-@mock_cloudformation
-@mock_ec2
+@mock_aws
 def test_security_group_ingress():
     cf_client = boto3.client("cloudformation", region_name="us-east-1")
     ec2 = boto3.resource("ec2", region_name="us-west-1")
@@ -151,19 +152,51 @@ def test_security_group_ingress():
 
     groups = ec2_client.describe_security_groups()["SecurityGroups"]
     group = [g for g in groups if g["GroupName"] == group_name][0]
-    group["Description"].should.equal("Test VPC security group")
-    len(group["IpPermissions"]).should.be(1)
+    assert group["Description"] == "Test VPC security group"
+    assert len(group["IpPermissions"]) == 1
     ingress = group["IpPermissions"][0]
-    ingress["FromPort"].should.equal(22)
-    ingress["ToPort"].should.equal(22)
-    ingress["IpProtocol"].should.equal("tcp")
-    ingress["IpRanges"].should.equal(
-        [{"CidrIp": "10.0.0.0/8", "Description": "Allow SSH traffic from 10.0.0.0/8"}]
+    assert ingress["FromPort"] == 22
+    assert ingress["ToPort"] == 22
+    assert ingress["IpProtocol"] == "tcp"
+    assert ingress["IpRanges"] == [
+        {"CidrIp": "10.0.0.0/8", "Description": "Allow SSH traffic from 10.0.0.0/8"}
+    ]
+
+
+@mock_aws
+def test_delete_security_group_ingress():
+    cf_client = boto3.client("cloudformation", region_name="us-east-1")
+    ec2 = boto3.resource("ec2", region_name="us-west-1")
+    ec2_client = boto3.client("ec2", region_name="us-east-1")
+
+    stack_name = str(uuid4())
+    group_name = str(uuid4())
+    vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
+    cf_client.create_stack(
+        StackName=stack_name,
+        TemplateBody=SEC_GROUP_INGRESS.substitute(group_name=group_name),
+        Parameters=[{"ParameterKey": "VPCId", "ParameterValue": vpc.id}],
+        Capabilities=["CAPABILITY_NAMED_IAM"],
+        OnFailure="DELETE",
     )
 
+    sg_id = cf_client.list_stack_resources(StackName=stack_name)[
+        "StackResourceSummaries"
+    ][0]["PhysicalResourceId"]
 
-@mock_cloudformation
-@mock_ec2
+    assert (
+        len(ec2_client.describe_security_groups(GroupIds=[sg_id])["SecurityGroups"])
+        == 1
+    )
+
+    cf_client.delete_stack(StackName=stack_name)
+
+    with pytest.raises(ClientError) as exc:
+        ec2_client.describe_security_groups(GroupIds=[sg_id])
+    assert exc.value.response["Error"]["Code"] == "InvalidGroup.NotFound"
+
+
+@mock_aws
 def test_security_group_ingress_without_description():
     cf_client = boto3.client("cloudformation", region_name="us-east-1")
     ec2 = boto3.resource("ec2", region_name="us-west-1")
@@ -181,22 +214,20 @@ def test_security_group_ingress_without_description():
 
     groups = ec2_client.describe_security_groups()["SecurityGroups"]
     group = [g for g in groups if g["GroupName"] == group_name][0]
-    group["Description"].should.equal("Test VPC security group")
-    len(group["IpPermissions"]).should.be(1)
+    assert group["Description"] == "Test VPC security group"
+    assert len(group["IpPermissions"]) == 1
     ingress = group["IpPermissions"][0]
-    ingress["IpRanges"].should.equal([{"CidrIp": "10.0.0.0/8"}])
+    assert ingress["IpRanges"] == [{"CidrIp": "10.0.0.0/8"}]
 
 
-@mock_ec2
-@mock_cloudformation
+@mock_aws
 def test_stack_security_groups():
-
     first_desc = str(uuid4())
     second_desc = str(uuid4())
     our_template = SEC_GROUP_SOURCE.copy()
-    our_template["Resources"]["my-security-group"]["Properties"][
-        "GroupDescription"
-    ] = second_desc
+    our_template["Resources"]["my-security-group"]["Properties"]["GroupDescription"] = (
+        second_desc
+    )
     our_template["Resources"]["InstanceSecurityGroup"]["Properties"][
         "GroupDescription"
     ] = first_desc
@@ -215,10 +246,10 @@ def test_stack_security_groups():
     instance_group = ec2.describe_security_groups(
         Filters=[{"Name": "description", "Values": [first_desc]}]
     )["SecurityGroups"][0]
-    instance_group.should.have.key("Description").equal(first_desc)
-    instance_group.should.have.key("Tags")
-    instance_group["Tags"].should.contain({"Key": "bar", "Value": "baz"})
-    instance_group["Tags"].should.contain({"Key": "foo", "Value": "bar"})
+    assert instance_group["Description"] == first_desc
+    assert "Tags" in instance_group
+    assert {"Key": "bar", "Value": "baz"} in instance_group["Tags"]
+    assert {"Key": "foo", "Value": "bar"} in instance_group["Tags"]
     other_group = ec2.describe_security_groups(
         Filters=[{"Name": "description", "Values": [second_desc]}]
     )["SecurityGroups"][0]
@@ -232,17 +263,18 @@ def test_stack_security_groups():
         "Instances"
     ][0]
 
-    ec2_instance["NetworkInterfaces"][0]["Groups"][0]["GroupId"].should.equal(
-        instance_group["GroupId"]
+    assert (
+        ec2_instance["NetworkInterfaces"][0]["Groups"][0]["GroupId"]
+        == instance_group["GroupId"]
     )
 
     rule1, rule2 = instance_group["IpPermissions"]
-    int(rule1["ToPort"]).should.equal(22)
-    int(rule1["FromPort"]).should.equal(22)
-    rule1["IpRanges"][0]["CidrIp"].should.equal("123.123.123.123/32")
-    rule1["IpProtocol"].should.equal("tcp")
+    assert int(rule1["ToPort"]) == 22
+    assert int(rule1["FromPort"]) == 22
+    assert rule1["IpRanges"][0]["CidrIp"] == "123.123.123.123/32"
+    assert rule1["IpProtocol"] == "tcp"
 
-    int(rule2["ToPort"]).should.equal(8000)
-    int(rule2["FromPort"]).should.equal(80)
-    rule2["IpProtocol"].should.equal("tcp")
-    rule2["UserIdGroupPairs"][0]["GroupId"].should.equal(other_group["GroupId"])
+    assert int(rule2["ToPort"]) == 8000
+    assert int(rule2["FromPort"]) == 80
+    assert rule2["IpProtocol"] == "tcp"
+    assert rule2["UserIdGroupPairs"][0]["GroupId"] == other_group["GroupId"]

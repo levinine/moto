@@ -1,15 +1,14 @@
-import boto3
-import pytest
-import sure  # noqa # pylint: disable=unused-import
-
-from botocore.exceptions import ClientError
 from datetime import datetime
 
-from moto import mock_iam
-from moto.core import ACCOUNT_ID
+import boto3
+import pytest
+from botocore.exceptions import ClientError
+
+from moto import mock_aws
+from moto.core import DEFAULT_ACCOUNT_ID as ACCOUNT_ID
 
 
-@mock_iam
+@mock_aws
 def test_get_all_server_certs():
     conn = boto3.client("iam", region_name="us-east-1")
 
@@ -19,28 +18,27 @@ def test_get_all_server_certs():
         PrivateKey="privatekey",
     )
     certs = conn.list_server_certificates()["ServerCertificateMetadataList"]
-    certs.should.have.length_of(1)
+    assert len(certs) == 1
     cert1 = certs[0]
-    cert1["ServerCertificateName"].should.equal("certname")
-    cert1["Arn"].should.equal(
-        "arn:aws:iam::{}:server-certificate/certname".format(ACCOUNT_ID)
-    )
+    assert cert1["ServerCertificateName"] == "certname"
+    assert cert1["Arn"] == f"arn:aws:iam::{ACCOUNT_ID}:server-certificate/certname"
 
 
-@mock_iam
+@mock_aws
 def test_get_server_cert_doesnt_exist():
     conn = boto3.client("iam", region_name="us-east-1")
 
     with pytest.raises(ClientError) as ex:
         conn.get_server_certificate(ServerCertificateName="NonExistant")
     err = ex.value.response["Error"]
-    err["Code"].should.equal("NoSuchEntity")
-    err["Message"].should.equal(
-        "The Server Certificate with name NonExistant cannot be found."
+    assert err["Code"] == "NoSuchEntity"
+    assert (
+        err["Message"]
+        == "The Server Certificate with name NonExistant cannot be found."
     )
 
 
-@mock_iam
+@mock_aws
 def test_get_server_cert():
     conn = boto3.client("iam", region_name="us-east-1")
 
@@ -52,21 +50,19 @@ def test_get_server_cert():
     cert = conn.get_server_certificate(ServerCertificateName="certname")[
         "ServerCertificate"
     ]
-    cert["CertificateBody"].should.equal("certbody")
-    cert.shouldnt.have.key("CertificateChain")
-    cert.shouldnt.have.key("Tags")
+    assert cert["CertificateBody"] == "certbody"
+    assert "CertificateChain" not in cert
+    assert "Tags" not in cert
     metadata = cert["ServerCertificateMetadata"]
-    metadata["Path"].should.equal("/")
-    metadata["ServerCertificateName"].should.equal("certname")
-    metadata["Arn"].should.equal(
-        "arn:aws:iam::{}:server-certificate/certname".format(ACCOUNT_ID)
-    )
-    metadata.should.have.key("ServerCertificateId")
-    metadata["UploadDate"].should.be.a(datetime)
-    metadata["Expiration"].should.be.a(datetime)
+    assert metadata["Path"] == "/"
+    assert metadata["ServerCertificateName"] == "certname"
+    assert metadata["Arn"] == f"arn:aws:iam::{ACCOUNT_ID}:server-certificate/certname"
+    assert "ServerCertificateId" in metadata
+    assert isinstance(metadata["UploadDate"], datetime)
+    assert isinstance(metadata["Expiration"], datetime)
 
 
-@mock_iam
+@mock_aws
 def test_delete_server_cert():
     conn = boto3.client("iam", region_name="us-east-1")
 
@@ -81,20 +77,45 @@ def test_delete_server_cert():
     with pytest.raises(ClientError) as ex:
         conn.get_server_certificate(ServerCertificateName="certname")
     err = ex.value.response["Error"]
-    err["Code"].should.equal("NoSuchEntity")
-    err["Message"].should.equal(
-        "The Server Certificate with name certname cannot be found."
+    assert err["Code"] == "NoSuchEntity"
+    assert (
+        err["Message"] == "The Server Certificate with name certname cannot be found."
     )
 
 
-@mock_iam
+@mock_aws
 def test_delete_unknown_server_cert():
     conn = boto3.client("iam", region_name="us-east-1")
 
     with pytest.raises(ClientError) as ex:
         conn.delete_server_certificate(ServerCertificateName="certname")
     err = ex.value.response["Error"]
-    err["Code"].should.equal("NoSuchEntity")
-    err["Message"].should.equal(
-        "The Server Certificate with name certname cannot be found."
+    assert err["Code"] == "NoSuchEntity"
+    assert (
+        err["Message"] == "The Server Certificate with name certname cannot be found."
     )
+
+
+@mock_aws
+def test_get_server_cert_with_certificate_chain():
+    conn = boto3.client("iam", region_name="us-east-1")
+
+    conn.upload_server_certificate(
+        ServerCertificateName="certname",
+        CertificateBody="certbody",
+        PrivateKey="privatekey",
+        CertificateChain="certchain",
+    )
+    cert = conn.get_server_certificate(ServerCertificateName="certname")[
+        "ServerCertificate"
+    ]
+    assert cert["CertificateBody"] == "certbody"
+    assert cert["CertificateChain"] == "certchain"
+    assert "Tags" not in cert
+    metadata = cert["ServerCertificateMetadata"]
+    assert metadata["Path"] == "/"
+    assert metadata["ServerCertificateName"] == "certname"
+    assert metadata["Arn"] == f"arn:aws:iam::{ACCOUNT_ID}:server-certificate/certname"
+    assert "ServerCertificateId" in metadata
+    assert isinstance(metadata["UploadDate"], datetime)
+    assert isinstance(metadata["Expiration"], datetime)

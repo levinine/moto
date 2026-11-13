@@ -1,25 +1,31 @@
-import uuid
+from collections.abc import Iterable
+from threading import Lock
+from threading import Timer as ThreadingTimer
+from typing import Any
 
-from moto.core import BaseModel
+from moto.core.common_models import BaseModel
 from moto.core.utils import camelcase_to_underscores, unix_time
+from moto.moto_api._internal import mock_random
 
 from ..constants import DECISIONS_FIELDS
 from ..exceptions import (
+    SWFDecisionValidationException,
     SWFDefaultUndefinedFault,
     SWFValidationException,
-    SWFDecisionValidationException,
 )
 from ..utils import decapitalize
 from .activity_task import ActivityTask
 from .activity_type import ActivityType
 from .decision_task import DecisionTask
+from .domain import Domain
 from .history_event import HistoryEvent
 from .timeout import Timeout
+from .timer import Timer
+from .workflow_type import WorkflowType
 
 
 # TODO: extract decision related logic into a Decision class
 class WorkflowExecution(BaseModel):
-
     # NB: the list is ordered exactly as in SWF validation exceptions so we can
     # mimic error messages closely ; don't reorder it without checking SWF.
     KNOWN_DECISION_TYPES = [
@@ -38,37 +44,49 @@ class WorkflowExecution(BaseModel):
         "CancelWorkflowExecution",
     ]
 
-    def __init__(self, domain, workflow_type, workflow_id, **kwargs):
+    def __init__(
+        self,
+        domain: Domain,
+        workflow_type: "WorkflowType",
+        workflow_id: str,
+        **kwargs: Any,
+    ):
         self.domain = domain
         self.workflow_id = workflow_id
-        self.run_id = uuid.uuid4().hex
+        self.run_id = mock_random.uuid4().hex
         # WorkflowExecutionInfo
         self.cancel_requested = False
         # TODO: check valid values among:
         # COMPLETED | FAILED | CANCELED | TERMINATED | CONTINUED_AS_NEW | TIMED_OUT
         # TODO: implement them all
-        self.close_cause = None
-        self.close_status = None
-        self.close_timestamp = None
+        self.close_cause: str | None = None
+        self.close_status: str | None = None
+        self.close_timestamp: float | None = None
         self.execution_status = "OPEN"
-        self.latest_activity_task_timestamp = None
-        self.latest_execution_context = None
+        self.latest_activity_task_timestamp: float | None = None
+        self.latest_execution_context: str | None = None
         self.parent = None
-        self.start_timestamp = None
+        self.start_timestamp: float | None = None
         self.tag_list = kwargs.get("tag_list", None) or []
-        self.timeout_type = None
+        self.timeout_type: str | None = None
         self.workflow_type = workflow_type
         # args processing
         # NB: the order follows boto/SWF order of exceptions appearance (if no
         # param is set, # SWF will raise DefaultUndefinedFault errors in the
         # same order as the few lines that follow)
-        self._set_from_kwargs_or_workflow_type(
+        self.execution_start_to_close_timeout = self._get_from_kwargs_or_workflow_type(
             kwargs, "execution_start_to_close_timeout"
         )
-        self._set_from_kwargs_or_workflow_type(kwargs, "task_list", "task_list")
-        self._set_from_kwargs_or_workflow_type(kwargs, "task_start_to_close_timeout")
-        self._set_from_kwargs_or_workflow_type(kwargs, "child_policy")
-        self.input = kwargs.get("input")
+        self.task_list = self._get_from_kwargs_or_workflow_type(
+            kwargs, "task_list", "task_list"
+        )
+        self.task_start_to_close_timeout = self._get_from_kwargs_or_workflow_type(
+            kwargs, "task_start_to_close_timeout"
+        )
+        self.child_policy = self._get_from_kwargs_or_workflow_type(
+            kwargs, "child_policy"
+        )
+        self.input = kwargs.get("workflow_input")
         # counters
         self.open_counts = {
             "openTimers": 0,
@@ -78,17 +96,23 @@ class WorkflowExecution(BaseModel):
             "openLambdaFunctions": 0,
         }
         # events
-        self._events = []
+        self._events: list[HistoryEvent] = []
         # child workflows
-        self.child_workflow_executions = []
-        self._previous_started_event_id = None
+        self.child_workflow_executions: list[WorkflowExecution] = []
+        self._previous_started_event_id: int | None = None
+        # timers/thread utils
+        self.threading_lock = Lock()
+        self._timers: dict[str, Timer] = {}
 
-    def __repr__(self):
-        return "WorkflowExecution(run_id: {0})".format(self.run_id)
+    def __repr__(self) -> str:
+        return f"WorkflowExecution(run_id: {self.run_id})"
 
-    def _set_from_kwargs_or_workflow_type(
-        self, kwargs, local_key, workflow_type_key=None
-    ):
+    def _get_from_kwargs_or_workflow_type(
+        self,
+        kwargs: dict[str, Any],
+        local_key: str,
+        workflow_type_key: str | None = None,
+    ) -> Any:
         if workflow_type_key is None:
             workflow_type_key = "default_" + local_key
         value = kwargs.get(local_key)
@@ -96,10 +120,10 @@ class WorkflowExecution(BaseModel):
             value = getattr(self.workflow_type, workflow_type_key)
         if not value:
             raise SWFDefaultUndefinedFault(local_key)
-        setattr(self, local_key, value)
+        return value
 
     @property
-    def _configuration_keys(self):
+    def _configuration_keys(self) -> list[str]:
         return [
             "executionStartToCloseTimeout",
             "childPolicy",
@@ -107,11 +131,11 @@ class WorkflowExecution(BaseModel):
             "taskStartToCloseTimeout",
         ]
 
-    def to_short_dict(self):
+    def to_short_dict(self) -> dict[str, str]:
         return {"workflowId": self.workflow_id, "runId": self.run_id}
 
-    def to_medium_dict(self):
-        hsh = {
+    def to_medium_dict(self) -> dict[str, Any]:
+        hsh: dict[str, Any] = {
             "execution": self.to_short_dict(),
             "workflowType": self.workflow_type.to_short_dict(),
             "startTimestamp": 1420066800.123,
@@ -122,8 +146,8 @@ class WorkflowExecution(BaseModel):
             hsh["tagList"] = self.tag_list
         return hsh
 
-    def to_full_dict(self):
-        hsh = {
+    def to_full_dict(self) -> dict[str, Any]:
+        hsh: dict[str, Any] = {
             "executionInfo": self.to_medium_dict(),
             "executionConfiguration": {"taskList": {"name": self.task_list}},
         }
@@ -148,8 +172,8 @@ class WorkflowExecution(BaseModel):
             hsh["latestActivityTaskTimestamp"] = self.latest_activity_task_timestamp
         return hsh
 
-    def to_list_dict(self):
-        hsh = {
+    def to_list_dict(self) -> dict[str, Any]:
+        hsh: dict[str, Any] = {
             "execution": {"workflowId": self.workflow_id, "runId": self.run_id},
             "workflowType": self.workflow_type.to_short_dict(),
             "startTimestamp": self.start_timestamp,
@@ -166,7 +190,7 @@ class WorkflowExecution(BaseModel):
             hsh["closeTimestamp"] = self.close_timestamp
         return hsh
 
-    def _process_timeouts(self):
+    def _process_timeouts(self) -> None:
         """
         SWF timeouts can happen on different objects (workflow executions,
         activity tasks, decision tasks) and should be processed in order.
@@ -182,21 +206,19 @@ class WorkflowExecution(BaseModel):
         triggered, process it, then make the workflow state progress and repeat
         the whole process.
         """
-        timeout_candidates = []
-
         # workflow execution timeout
-        timeout_candidates.append(self.first_timeout())
+        timeout_candidates_or_none = [self.first_timeout()]
 
         # decision tasks timeouts
-        for task in self.decision_tasks:
-            timeout_candidates.append(task.first_timeout())
+        for d_task in self.decision_tasks:
+            timeout_candidates_or_none.append(d_task.first_timeout())
 
         # activity tasks timeouts
-        for task in self.activity_tasks:
-            timeout_candidates.append(task.first_timeout())
+        for a_task in self.activity_tasks:
+            timeout_candidates_or_none.append(a_task.first_timeout())
 
         # remove blank values (foo.first_timeout() is a Timeout or None)
-        timeout_candidates = list(filter(None, timeout_candidates))
+        timeout_candidates = list(filter(None, timeout_candidates_or_none))
 
         # now find the first timeout to process
         first_timeout = None
@@ -224,22 +246,25 @@ class WorkflowExecution(BaseModel):
             # timeout should be processed
             self._process_timeouts()
 
-    def events(self, reverse_order=False):
+    def events(self, reverse_order: bool = False) -> Iterable[HistoryEvent]:
         if reverse_order:
             return reversed(self._events)
         else:
             return self._events
 
-    def next_event_id(self):
+    def next_event_id(self) -> int:
         event_ids = [evt.event_id for evt in self._events]
         return max(event_ids or [0]) + 1
 
-    def _add_event(self, *args, **kwargs):
-        evt = HistoryEvent(self.next_event_id(), *args, **kwargs)
-        self._events.append(evt)
-        return evt
+    def _add_event(self, *args: Any, **kwargs: Any) -> HistoryEvent:
+        # lock here because the fire_timer function is called
+        # async, and want to ensure uniqueness in event ids
+        with self.threading_lock:
+            evt = HistoryEvent(self.next_event_id(), *args, **kwargs)
+            self._events.append(evt)
+            return evt
 
-    def start(self):
+    def start(self) -> None:
         self.start_timestamp = unix_time()
         self._add_event(
             "WorkflowExecutionStarted",
@@ -254,7 +279,19 @@ class WorkflowExecution(BaseModel):
         )
         self.schedule_decision_task()
 
-    def _schedule_decision_task(self):
+    def _schedule_decision_task(self) -> None:
+        has_scheduled_task = False
+        has_started_task = False
+        for task in self.decision_tasks:
+            if task.state == "STARTED":
+                has_started_task = True
+            elif task.state == "SCHEDULED":
+                has_scheduled_task = True
+        # If a decision task is already running, we cannot schedule more than one additional task
+        # See https://docs.aws.amazon.com/amazonswf/latest/developerguide/swf-dg-dev-deciders.html#swf-dg-deciders-launch
+        if has_started_task and has_scheduled_task:
+            return
+
         evt = self._add_event(
             "DecisionTaskScheduled",
             start_to_close_timeout=self.task_start_to_close_timeout,
@@ -265,30 +302,30 @@ class WorkflowExecution(BaseModel):
         )
         self.open_counts["openDecisionTasks"] += 1
 
-    def schedule_decision_task(self):
+    def schedule_decision_task(self) -> None:
         self._schedule_decision_task()
 
     # Shortcut for tests: helps having auto-starting decision tasks when needed
-    def schedule_and_start_decision_task(self, identity=None):
+    def schedule_and_start_decision_task(self, identity: str | None = None) -> None:
         self._schedule_decision_task()
         decision_task = self.decision_tasks[-1]
         self.start_decision_task(decision_task.task_token, identity=identity)
 
     @property
-    def decision_tasks(self):
+    def decision_tasks(self) -> list[DecisionTask]:
         return [t for t in self.domain.decision_tasks if t.workflow_execution == self]
 
     @property
-    def activity_tasks(self):
+    def activity_tasks(self) -> list[ActivityTask]:
         return [t for t in self.domain.activity_tasks if t.workflow_execution == self]
 
-    def _find_decision_task(self, task_token):
+    def _find_decision_task(self, task_token: str) -> DecisionTask:
         for dt in self.decision_tasks:
             if dt.task_token == task_token:
                 return dt
-        raise ValueError("No decision task with token: {0}".format(task_token))
+        raise ValueError(f"No decision task with token: {task_token}")
 
-    def start_decision_task(self, task_token, identity=None):
+    def start_decision_task(self, task_token: str, identity: str | None = None) -> None:
         dt = self._find_decision_task(task_token)
         evt = self._add_event(
             "DecisionTaskStarted",
@@ -299,8 +336,11 @@ class WorkflowExecution(BaseModel):
         self._previous_started_event_id = evt.event_id
 
     def complete_decision_task(
-        self, task_token, decisions=None, execution_context=None
-    ):
+        self,
+        task_token: str,
+        decisions: list[dict[str, Any]] | None = None,
+        execution_context: str | None = None,
+    ) -> None:
         # 'decisions' can be None per boto.swf defaults, so replace it with something iterable
         if not decisions:
             decisions = []
@@ -321,7 +361,9 @@ class WorkflowExecution(BaseModel):
             self.schedule_decision_task()
         self.latest_execution_context = execution_context
 
-    def _check_decision_attributes(self, kind, value, decision_id):
+    def _check_decision_attributes(
+        self, kind: str, value: dict[str, Any], decision_id: int
+    ) -> list[dict[str, str]]:
         problems = []
         constraints = DECISIONS_FIELDS.get(kind, {})
         for key, constraint in constraints.items():
@@ -329,14 +371,12 @@ class WorkflowExecution(BaseModel):
                 problems.append(
                     {
                         "type": "null_value",
-                        "where": "decisions.{0}.member.{1}.{2}".format(
-                            decision_id, kind, key
-                        ),
+                        "where": f"decisions.{decision_id}.member.{kind}.{key}",
                     }
                 )
         return problems
 
-    def validate_decisions(self, decisions):
+    def validate_decisions(self, decisions: list[dict[str, Any]]) -> None:
         """
         Performs some basic validations on decisions. The real SWF service
         seems to break early and *not* process any decision if there's a
@@ -365,9 +405,7 @@ class WorkflowExecution(BaseModel):
             attrs_to_check = [d for d in dcs.keys() if d.endswith("DecisionAttributes")]
             if dcs["decisionType"] in self.KNOWN_DECISION_TYPES:
                 decision_type = dcs["decisionType"]
-                decision_attr = "{0}DecisionAttributes".format(
-                    decapitalize(decision_type)
-                )
+                decision_attr = f"{decapitalize(decision_type)}DecisionAttributes"
                 attrs_to_check.append(decision_attr)
             for attr in attrs_to_check:
                 problems += self._check_decision_attributes(
@@ -379,9 +417,7 @@ class WorkflowExecution(BaseModel):
                     {
                         "type": "bad_decision_type",
                         "value": dcs["decisionType"],
-                        "where": "decisions.{0}.member.decisionType".format(
-                            decision_number
-                        ),
+                        "where": f"decisions.{decision_number}.member.decisionType",
                         "possible_values": ", ".join(self.KNOWN_DECISION_TYPES),
                     }
                 )
@@ -390,7 +426,7 @@ class WorkflowExecution(BaseModel):
         if any(problems):
             raise SWFDecisionValidationException(problems)
 
-    def handle_decisions(self, event_id, decisions):
+    def handle_decisions(self, event_id: int, decisions: list[dict[str, Any]]) -> None:
         """
         Handles a Decision according to SWF docs.
         See: http://docs.aws.amazon.com/amazonswf/latest/apireference/API_Decision.html
@@ -398,7 +434,7 @@ class WorkflowExecution(BaseModel):
         # handle each decision separately, in order
         for decision in decisions:
             decision_type = decision["decisionType"]
-            attributes_key = "{0}DecisionAttributes".format(decapitalize(decision_type))
+            attributes_key = f"{decapitalize(decision_type)}DecisionAttributes"
             attributes = decision.get(attributes_key, {})
             if decision_type == "CompleteWorkflowExecution":
                 self.complete(event_id, attributes.get("result"))
@@ -406,25 +442,27 @@ class WorkflowExecution(BaseModel):
                 self.fail(event_id, attributes.get("details"), attributes.get("reason"))
             elif decision_type == "ScheduleActivityTask":
                 self.schedule_activity_task(event_id, attributes)
+            elif decision_type == "RecordMarker":
+                self.record_marker(event_id, attributes)
+            elif decision_type == "StartTimer":
+                self.start_timer(event_id, attributes)
+            elif decision_type == "CancelTimer":
+                self.cancel_timer(event_id, attributes["timerId"])
+            elif decision_type == "CancelWorkflowExecution":
+                self.cancel(event_id, attributes.get("details"))
             else:
-                # TODO: implement Decision type: CancelTimer
-                # TODO: implement Decision type: CancelWorkflowExecution
                 # TODO: implement Decision type: ContinueAsNewWorkflowExecution
-                # TODO: implement Decision type: RecordMarker
                 # TODO: implement Decision type: RequestCancelActivityTask
                 # TODO: implement Decision type: RequestCancelExternalWorkflowExecution
                 # TODO: implement Decision type: ScheduleLambdaFunction
                 # TODO: implement Decision type: SignalExternalWorkflowExecution
                 # TODO: implement Decision type: StartChildWorkflowExecution
-                # TODO: implement Decision type: StartTimer
-                raise NotImplementedError(
-                    "Cannot handle decision: {0}".format(decision_type)
-                )
+                raise NotImplementedError(f"Cannot handle decision: {decision_type}")
 
         # finally decrement counter if and only if everything went well
         self.open_counts["openDecisionTasks"] -= 1
 
-    def complete(self, event_id, result=None):
+    def complete(self, event_id: int, result: Any = None) -> None:
         self.execution_status = "CLOSED"
         self.close_status = "COMPLETED"
         self.close_timestamp = unix_time()
@@ -434,7 +472,9 @@ class WorkflowExecution(BaseModel):
             result=result,
         )
 
-    def fail(self, event_id, details=None, reason=None):
+    def fail(
+        self, event_id: int, details: Any = None, reason: str | None = None
+    ) -> None:
         # TODO: implement length constraints on details/reason
         self.execution_status = "CLOSED"
         self.close_status = "FAILED"
@@ -446,9 +486,30 @@ class WorkflowExecution(BaseModel):
             reason=reason,
         )
 
-    def schedule_activity_task(self, event_id, attributes):
+    def cancel(self, event_id: int, details: Any = None) -> None:
+        # TODO: implement length constraints on details
+        self.cancel_requested = True
+        # Can only cancel if there are no other pending desicion tasks
+        if self.open_counts["openDecisionTasks"] != 1:
+            # TODO OPERATION_NOT_PERMITTED is a valid failure state
+            self._add_event(
+                "CancelWorkflowExecutionFailed",
+                decision_task_completed_event_id=event_id,
+                cause="UNHANDLED_DECISION",
+            )
+            return
+        self.execution_status = "CLOSED"
+        self.close_status = "CANCELED"
+        self.close_timestamp = unix_time()
+        self._add_event(
+            "WorkflowExecutionCanceled",
+            decision_task_completed_event_id=event_id,
+            details=details,
+        )
+
+    def schedule_activity_task(self, event_id: int, attributes: dict[str, Any]) -> None:
         # Helper function to avoid repeating ourselves in the next sections
-        def fail_schedule_activity_task(_type, _cause):
+        def fail_schedule_activity_task(_type: "ActivityType", _cause: str) -> None:
             # TODO: implement other possible failure mode: OPEN_ACTIVITIES_LIMIT_EXCEEDED
             # NB: some failure modes are not implemented and probably won't be implemented in
             # the future, such as ACTIVITY_CREATION_RATE_EXCEEDED or
@@ -462,7 +523,7 @@ class WorkflowExecution(BaseModel):
             )
             self.should_schedule_decision_next = True
 
-        activity_type = self.domain.get_type(
+        activity_type: ActivityType = self.domain.get_type(  # type: ignore[assignment]
             "activity",
             attributes["activityType"]["name"],
             attributes["activityType"]["version"],
@@ -508,7 +569,7 @@ class WorkflowExecution(BaseModel):
             if not timeouts[_type]:
                 error_key = default_key.replace("default_task_", "default_")
                 fail_schedule_activity_task(
-                    activity_type, "{0}_UNDEFINED".format(error_key.upper())
+                    activity_type, f"{error_key.upper()}_UNDEFINED"
                 )
                 return
 
@@ -530,7 +591,7 @@ class WorkflowExecution(BaseModel):
         task = ActivityTask(
             activity_id=attributes["activityId"],
             activity_type=activity_type,
-            input=attributes.get("input"),
+            workflow_input=attributes.get("input"),
             scheduled_event_id=evt.event_id,
             workflow_execution=self,
             timeouts=timeouts,
@@ -539,13 +600,13 @@ class WorkflowExecution(BaseModel):
         self.open_counts["openActivityTasks"] += 1
         self.latest_activity_task_timestamp = unix_time()
 
-    def _find_activity_task(self, task_token):
+    def _find_activity_task(self, task_token: str) -> ActivityTask:
         for task in self.activity_tasks:
             if task.task_token == task_token:
                 return task
-        raise ValueError("No activity task with token: {0}".format(task_token))
+        raise ValueError(f"No activity task with token: {task_token}")
 
-    def start_activity_task(self, task_token, identity=None):
+    def start_activity_task(self, task_token: str, identity: Any = None) -> None:
         task = self._find_activity_task(task_token)
         evt = self._add_event(
             "ActivityTaskStarted",
@@ -554,7 +615,7 @@ class WorkflowExecution(BaseModel):
         )
         task.start(evt.event_id)
 
-    def complete_activity_task(self, task_token, result=None):
+    def complete_activity_task(self, task_token: str, result: Any = None) -> None:
         task = self._find_activity_task(task_token)
         self._add_event(
             "ActivityTaskCompleted",
@@ -567,7 +628,9 @@ class WorkflowExecution(BaseModel):
         # TODO: ensure we don't schedule multiple decisions at the same time!
         self.schedule_decision_task()
 
-    def fail_activity_task(self, task_token, reason=None, details=None):
+    def fail_activity_task(
+        self, task_token: str, reason: str | None = None, details: Any = None
+    ) -> None:
         task = self._find_activity_task(task_token)
         self._add_event(
             "ActivityTaskFailed",
@@ -581,7 +644,12 @@ class WorkflowExecution(BaseModel):
         # TODO: ensure we don't schedule multiple decisions at the same time!
         self.schedule_decision_task()
 
-    def terminate(self, child_policy=None, details=None, reason=None):
+    def terminate(
+        self,
+        child_policy: str | None = None,
+        details: dict[str, Any] | None = None,
+        reason: str | None = None,
+    ) -> None:
         # TODO: handle child policy for child workflows here
         # TODO: handle cause="CHILD_POLICY_APPLIED"
         # Until this, we set cause manually to "OPERATOR_INITIATED"
@@ -599,13 +667,13 @@ class WorkflowExecution(BaseModel):
         self.close_status = "TERMINATED"
         self.close_cause = "OPERATOR_INITIATED"
 
-    def signal(self, signal_name, input):
+    def signal(self, signal_name: str, workflow_input: dict[str, Any]) -> None:
         self._add_event(
-            "WorkflowExecutionSignaled", signal_name=signal_name, input=input
+            "WorkflowExecutionSignaled", signal_name=signal_name, input=workflow_input
         )
         self.schedule_decision_task()
 
-    def first_timeout(self):
+    def first_timeout(self) -> Timeout | None:
         if not self.open or not self.start_timestamp:
             return None
         start_to_close_at = self.start_timestamp + int(
@@ -614,8 +682,9 @@ class WorkflowExecution(BaseModel):
         _timeout = Timeout(self, start_to_close_at, "START_TO_CLOSE")
         if _timeout.reached:
             return _timeout
+        return None
 
-    def timeout(self, timeout):
+    def timeout(self, timeout: Timeout) -> None:
         # TODO: process child policy on child workflows here or in the
         # triggering function
         self.execution_status = "CLOSED"
@@ -628,7 +697,7 @@ class WorkflowExecution(BaseModel):
             timeout_type=self.timeout_type,
         )
 
-    def timeout_decision_task(self, _timeout):
+    def timeout_decision_task(self, _timeout: Timeout) -> None:
         task = _timeout.obj
         task.timeout(_timeout)
         self._add_event(
@@ -639,7 +708,7 @@ class WorkflowExecution(BaseModel):
             timeout_type=task.timeout_type,
         )
 
-    def timeout_activity_task(self, _timeout):
+    def timeout_activity_task(self, _timeout: Timeout) -> None:
         task = _timeout.obj
         task.timeout(_timeout)
         self._add_event(
@@ -651,6 +720,71 @@ class WorkflowExecution(BaseModel):
             timeout_type=task.timeout_type,
         )
 
+    def record_marker(self, event_id: int, attributes: dict[str, Any]) -> None:
+        self._add_event(
+            "MarkerRecorded",
+            decision_task_completed_event_id=event_id,
+            details=attributes.get("details"),
+            marker_name=attributes["markerName"],
+        )
+
+    def start_timer(self, event_id: int, attributes: dict[str, Any]) -> None:
+        timer_id = attributes["timerId"]
+        existing_timer = self._timers.get(timer_id)
+        if existing_timer and existing_timer.is_alive():
+            # TODO 4 fail states are possible
+            # TIMER_ID_ALREADY_IN_USE | OPEN_TIMERS_LIMIT_EXCEEDED | TIMER_CREATION_RATE_EXCEEDED | OPERATION_NOT_PERMITTED
+            self._add_event(
+                "StartTimerFailed",
+                cause="TIMER_ID_ALREADY_IN_USE",
+                decision_task_completed_event_id=event_id,
+                timer_id=timer_id,
+            )
+            return
+
+        time_to_wait = attributes["startToFireTimeout"]
+        started_event_id = self._add_event(
+            "TimerStarted",
+            control=attributes.get("control"),
+            decision_task_completed_event_id=event_id,
+            start_to_fire_timeout=time_to_wait,
+            timer_id=timer_id,
+        ).event_id
+        background_timer = ThreadingTimer(
+            float(time_to_wait), self._fire_timer, args=(started_event_id, timer_id)
+        )
+        workflow_timer = Timer(background_timer, started_event_id)
+        self._timers[timer_id] = workflow_timer
+        workflow_timer.start()
+
+    def _fire_timer(self, started_event_id: int, timer_id: str) -> None:
+        self._add_event(
+            "TimerFired", started_event_id=started_event_id, timer_id=timer_id
+        )
+        self._timers.pop(timer_id)
+        self._schedule_decision_task()
+
+    def cancel_timer(self, event_id: int, timer_id: str) -> None:
+        requested_timer = self._timers.get(timer_id)
+        if not requested_timer or not requested_timer.is_alive():
+            # TODO there are 2 failure states
+            # TIMER_ID_UNKNOWN | OPERATION_NOT_PERMITTED
+            self._add_event(
+                "CancelTimerFailed",
+                cause="TIMER_ID_UNKNOWN",
+                decision_task_completed_event_id=event_id,
+            )
+            return
+
+        requested_timer.cancel()
+        self._timers.pop(timer_id)
+        self._add_event(
+            "TimerCancelled",
+            decision_task_completed_event_id=event_id,
+            started_event_id=requested_timer.started_event_id,
+            timer_id=timer_id,
+        )
+
     @property
-    def open(self):
+    def open(self) -> bool:
         return self.execution_status == "OPEN"

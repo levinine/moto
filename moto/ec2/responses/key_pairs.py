@@ -1,67 +1,43 @@
-from moto.core.responses import BaseResponse
-from moto.ec2.utils import filters_from_querystring
+from moto.core.responses import ActionResult
+
+from ._base_response import EC2BaseResponse
 
 
-class KeyPairs(BaseResponse):
-    def create_key_pair(self):
-        name = self._get_param("KeyName")
-        if self.is_not_dryrun("CreateKeyPair"):
-            keypair = self.ec2_backend.create_key_pair(name)
-            template = self.response_template(CREATE_KEY_PAIR_RESPONSE)
-            return template.render(keypair=keypair)
+class KeyPairs(EC2BaseResponse):
+    def create_key_pair(self) -> ActionResult:
+        key_name = self._get_param("KeyName")
+        key_type = self._get_param("KeyType")
+        tags = self._parse_tag_specification("key-pair").get("key-pair", {})
+        self.error_on_dryrun()
+        key_pair = self.ec2_backend.create_key_pair(key_name, key_type, tags)
+        return ActionResult(key_pair)
 
-    def delete_key_pair(self):
-        name = self._get_param("KeyName")
-        if self.is_not_dryrun("DeleteKeyPair"):
-            success = str(self.ec2_backend.delete_key_pair(name)).lower()
-            return self.response_template(DELETE_KEY_PAIR_RESPONSE).render(
-                success=success
-            )
+    def delete_key_pair(self) -> ActionResult:
+        key_name = self._get_param("KeyName")
+        self.error_on_dryrun()
+        key_pair = self.ec2_backend.delete_key_pair(key_name)
+        result = {"Return": True, "KeyPairId": key_pair.id if key_pair else None}
+        return ActionResult(result)
 
-    def describe_key_pairs(self):
-        names = self._get_multi_param("KeyName")
-        filters = filters_from_querystring(self.querystring)
-        keypairs = self.ec2_backend.describe_key_pairs(names, filters)
-        template = self.response_template(DESCRIBE_KEY_PAIRS_RESPONSE)
-        return template.render(keypairs=keypairs)
+    def describe_key_pairs(self) -> ActionResult:
+        names = self._get_param("KeyNames", [])
+        filters = self._filters_from_querystring()
+        key_pairs = self.ec2_backend.describe_key_pairs(names, filters)
+        include_public_key = self._get_bool_param("IncludePublicKey", False)
+        public_key_attribute_path = (
+            "DescribeKeyPairsResult.KeyPairs.KeyPairInfo.PublicKey"
+        )
+        if include_public_key:
+            self._include_in_response(public_key_attribute_path)
+        else:
+            self._exclude_from_response(public_key_attribute_path)
+        result = {"KeyPairs": key_pairs}
+        return ActionResult(result)
 
-    def import_key_pair(self):
-        name = self._get_param("KeyName")
+    def import_key_pair(self) -> ActionResult:
+        key_name = self._get_param("KeyName")
         material = self._get_param("PublicKeyMaterial")
-        if self.is_not_dryrun("ImportKeyPair"):
-            keypair = self.ec2_backend.import_key_pair(name, material)
-            template = self.response_template(IMPORT_KEYPAIR_RESPONSE)
-            return template.render(keypair=keypair)
-
-
-DESCRIBE_KEY_PAIRS_RESPONSE = """<DescribeKeyPairsResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-    <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-    <keySet>
-    {% for keypair in keypairs %}
-      <item>
-           <keyName>{{ keypair.name }}</keyName>
-           <keyFingerprint>{{ keypair.fingerprint }}</keyFingerprint>
-      </item>
-    {% endfor %}
-    </keySet>
- </DescribeKeyPairsResponse>"""
-
-
-CREATE_KEY_PAIR_RESPONSE = """<CreateKeyPairResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-   <keyName>{{ keypair.name }}</keyName>
-   <keyFingerprint>{{ keypair.fingerprint }}</keyFingerprint>
-   <keyMaterial>{{ keypair.material }}</keyMaterial>
-</CreateKeyPairResponse>"""
-
-
-DELETE_KEY_PAIR_RESPONSE = """<DeleteKeyPairResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-  <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-  <return>{{ success }}</return>
-</DeleteKeyPairResponse>"""
-
-IMPORT_KEYPAIR_RESPONSE = """<?xml version="1.0" encoding="UTF-8"?>
-  <ImportKeyPairResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-    <requestId>471f9fdd-8fe2-4a84-86b0-bd3d3e350979</requestId>
-    <keyName>{{ keypair.name }}</keyName>
-    <keyFingerprint>{{ keypair.fingerprint }}</keyFingerprint>
-  </ImportKeyPairResponse>"""
+        tags = self._parse_tag_specification("key-pair").get("key-pair", {})
+        self.error_on_dryrun()
+        key_pair = self.ec2_backend.import_key_pair(key_name, material, tags)
+        return ActionResult(key_pair)

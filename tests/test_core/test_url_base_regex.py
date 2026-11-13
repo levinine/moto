@@ -1,36 +1,33 @@
 import boto3
-import moto
 import pytest
-from moto import mock_s3
 
-
-service_names = [
-    (d[5:], "")
-    for d in dir(moto)
-    if d.startswith("mock_")
-    and not d.endswith("_deprecated")
-    and not d == "mock_xray_client"
-    and not d == "mock_all"
-]
+from moto import mock_aws
+from moto.backends import list_of_moto_modules
 
 
 class TestMockBucketStartingWithServiceName:
     """
-    https://github.com/spulec/moto/issues/4099
+    https://github.com/getmoto/moto/issues/4099
     """
 
-    @pytest.mark.parametrize(
-        "service_name,decorator", service_names,
-    )
-    def test_bucketname_starting_with_service_name(self, service_name, decorator):
+    @pytest.mark.parametrize("service_name", list(list_of_moto_modules()))
+    def test_bucketname_starting_with_service_name(self, service_name: str) -> None:
+        with mock_aws():
+            s3_client = boto3.client("s3", "eu-west-1")
+            bucket_name = f"{service_name}-bucket"
+            s3_client.create_bucket(
+                ACL="private",
+                Bucket=bucket_name,
+                CreateBucketConfiguration={"LocationConstraint": "eu-west-1"},
+            )
 
-        decorator = getattr(moto, "mock_{}".format(service_name))
-        with decorator():
-            with mock_s3():
-                s3_client = boto3.client("s3", "eu-west-1")
-                bucket_name = "{}-bucket".format(service_name)
-                s3_client.create_bucket(
-                    ACL="private",
-                    Bucket=bucket_name,
-                    CreateBucketConfiguration={"LocationConstraint": "eu-west-1"},
-                )
+
+@mock_aws
+def test_dynamodb_account_based_endpoint() -> None:
+    dynamodb_account_based_endpoint_service_name = "ddb"
+    s3_client = boto3.client("s3", "us-east-1")
+    bucket_name = (
+        f"bucket-name-ends-with-{dynamodb_account_based_endpoint_service_name}"
+    )
+    resp = s3_client.create_bucket(Bucket=bucket_name)
+    assert resp["ResponseMetadata"]["HTTPStatusCode"] == 200

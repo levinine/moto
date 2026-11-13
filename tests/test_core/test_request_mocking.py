@@ -1,35 +1,37 @@
-import requests
-import pytest
-import sure  # noqa # pylint: disable=unused-import
+from unittest import SkipTest
 
 import boto3
-from moto import mock_s3, mock_sts, mock_sqs, settings
+import pytest
+import requests
+from responses import Response
+
+from moto import mock_aws, settings
+from moto.core.models import responses_mock
 
 
-@mock_sqs
+@mock_aws
 @pytest.mark.network
-def test_passthrough_requests():
+def test_passthrough_requests() -> None:
     conn = boto3.client("sqs", region_name="us-west-1")
     conn.create_queue(QueueName="queue1")
 
-    res = requests.get("https://httpbin.org/ip")
-    assert res.status_code == 200
+    res = requests.get("https://google.com/")
+    assert res.status_code < 400
 
 
 if not settings.TEST_SERVER_MODE:
 
-    @mock_sqs
-    def test_requests_to_amazon_subdomains_dont_work():
+    @mock_aws
+    def test_requests_to_amazon_subdomains_dont_work() -> None:
         res = requests.get("https://fakeservice.amazonaws.com/foo/bar")
         assert res.content == b"The method is not implemented"
         assert res.status_code == 400
 
 
-@mock_sts
-@mock_s3
-def test_decorator_ordering():
+@mock_aws
+def test_decorator_ordering() -> None:
     """
-    https://github.com/spulec/moto/issues/3790#issuecomment-803979809
+    https://github.com/getmoto/moto/issues/3790#issuecomment-803979809
     """
     bucket_name = "banana-slugs"
     key = "trash-file"
@@ -49,4 +51,21 @@ def test_decorator_ordering():
     )
 
     resp = requests.get(presigned_url)
-    resp.status_code.should.equal(200)
+    assert resp.status_code == 200
+
+
+@mock_aws()
+def test_replace_and_remove_mock() -> None:
+    if not settings.TEST_DECORATOR_MODE:
+        raise SkipTest("Only need to test responses mock in decorator mode")
+    rsp1 = Response(method="GET", url="http://example.com", body="test")
+    responses_mock.add(rsp1)
+
+    assert requests.get("http://example.com/").text == "test"
+
+    rsp2 = Response(method="GET", url="http://example.com", body="test2")
+    responses_mock.replace(rsp2)
+
+    assert requests.get("http://example.com/").text == "test2"
+
+    responses_mock.remove("GET", "https://example.com/")

@@ -1,29 +1,31 @@
 from collections import OrderedDict
 from datetime import date
+from typing import Any
 
-from boto3 import Session
+from moto.core.base_backend import BackendDict, BaseBackend
+from moto.core.common_models import BaseModel
+from moto.utilities.utils import get_partition
 
-from moto.core import BaseBackend, BaseModel
 from .exceptions import (
     ContainerNotFoundException,
-    ResourceNotFoundException,
     PolicyNotFoundException,
+    ResourceNotFoundException,
 )
 
 
 class Container(BaseModel):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, **kwargs: Any):
         self.arn = kwargs.get("arn")
         self.name = kwargs.get("name")
         self.endpoint = kwargs.get("endpoint")
         self.status = kwargs.get("status")
         self.creation_time = kwargs.get("creation_time")
-        self.lifecycle_policy = None
-        self.policy = None
-        self.metric_policy = None
+        self.lifecycle_policy: str | None = None
+        self.policy: str | None = None
+        self.metric_policy: str | None = None
         self.tags = kwargs.get("tags")
 
-    def to_dict(self, exclude=None):
+    def to_dict(self, exclude: list[str] | None = None) -> dict[str, Any]:
         data = {
             "ARN": self.arn,
             "Name": self.name,
@@ -39,22 +41,16 @@ class Container(BaseModel):
 
 
 class MediaStoreBackend(BaseBackend):
-    def __init__(self, region_name=None):
-        super(MediaStoreBackend, self).__init__()
-        self.region_name = region_name
-        self._containers = OrderedDict()
+    def __init__(self, region_name: str, account_id: str):
+        super().__init__(region_name, account_id)
+        self._containers: dict[str, Container] = OrderedDict()
 
-    def reset(self):
-        region_name = self.region_name
-        self.__dict__ = {}
-        self.__init__(region_name)
-
-    def create_container(self, name, tags):
-        arn = "arn:aws:mediastore:container:{}".format(name)
+    def create_container(self, name: str, tags: dict[str, str]) -> Container:
+        arn = f"arn:{get_partition(self.region_name)}:mediastore:container:{name}"
         container = Container(
             arn=arn,
             name=name,
-            endpoint="/{}".format(name),
+            endpoint=f"/{name}",
             status="CREATING",
             creation_time=date.today().strftime("%m/%d/%Y, %H:%M:%S"),
             tags=tags,
@@ -62,37 +58,36 @@ class MediaStoreBackend(BaseBackend):
         self._containers[name] = container
         return container
 
-    def delete_container(self, name):
+    def delete_container(self, name: str) -> None:
         if name not in self._containers:
             raise ContainerNotFoundException()
         del self._containers[name]
-        return {}
 
-    def describe_container(self, name):
+    def describe_container(self, name: str) -> Container:
         if name not in self._containers:
             raise ResourceNotFoundException()
         container = self._containers[name]
         container.status = "ACTIVE"
         return container
 
-    def list_containers(self, next_token, max_results):
-        containers = list(self._containers.values())
-        response_containers = [c.to_dict() for c in containers]
-        return response_containers, None
+    def list_containers(self) -> list[dict[str, Any]]:
+        """
+        Pagination is not yet implemented
+        """
+        return [c.to_dict() for c in self._containers.values()]
 
-    def list_tags_for_resource(self, name):
+    def list_tags_for_resource(self, name: str) -> dict[str, str] | None:
         if name not in self._containers:
             raise ContainerNotFoundException()
         tags = self._containers[name].tags
         return tags
 
-    def put_lifecycle_policy(self, container_name, lifecycle_policy):
+    def put_lifecycle_policy(self, container_name: str, lifecycle_policy: str) -> None:
         if container_name not in self._containers:
             raise ResourceNotFoundException()
         self._containers[container_name].lifecycle_policy = lifecycle_policy
-        return {}
 
-    def get_lifecycle_policy(self, container_name):
+    def get_lifecycle_policy(self, container_name: str) -> str:
         if container_name not in self._containers:
             raise ResourceNotFoundException()
         lifecycle_policy = self._containers[container_name].lifecycle_policy
@@ -100,13 +95,12 @@ class MediaStoreBackend(BaseBackend):
             raise PolicyNotFoundException()
         return lifecycle_policy
 
-    def put_container_policy(self, container_name, policy):
+    def put_container_policy(self, container_name: str, policy: str) -> None:
         if container_name not in self._containers:
             raise ResourceNotFoundException()
         self._containers[container_name].policy = policy
-        return {}
 
-    def get_container_policy(self, container_name):
+    def get_container_policy(self, container_name: str) -> str:
         if container_name not in self._containers:
             raise ResourceNotFoundException()
         policy = self._containers[container_name].policy
@@ -114,13 +108,12 @@ class MediaStoreBackend(BaseBackend):
             raise PolicyNotFoundException()
         return policy
 
-    def put_metric_policy(self, container_name, metric_policy):
+    def put_metric_policy(self, container_name: str, metric_policy: str) -> None:
         if container_name not in self._containers:
             raise ResourceNotFoundException()
         self._containers[container_name].metric_policy = metric_policy
-        return {}
 
-    def get_metric_policy(self, container_name):
+    def get_metric_policy(self, container_name: str) -> str:
         if container_name not in self._containers:
             raise ResourceNotFoundException()
         metric_policy = self._containers[container_name].metric_policy
@@ -129,12 +122,4 @@ class MediaStoreBackend(BaseBackend):
         return metric_policy
 
 
-mediastore_backends = {}
-for region in Session().get_available_regions("mediastore"):
-    mediastore_backends[region] = MediaStoreBackend(region)
-for region in Session().get_available_regions(
-    "mediastore", partition_name="aws-us-gov"
-):
-    mediastore_backends[region] = MediaStoreBackend(region)
-for region in Session().get_available_regions("mediastore", partition_name="aws-cn"):
-    mediastore_backends[region] = MediaStoreBackend(region)
+mediastore_backends = BackendDict(MediaStoreBackend, "mediastore")

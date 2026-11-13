@@ -12,101 +12,149 @@
 sagemaker
 =========
 
-|start-h3| Example usage |end-h3|
-
-.. sourcecode:: python
-
-            @mock_sagemaker
-            def test_sagemaker_behaviour:
-                boto3.client("sagemaker")
-                ...
-
-
-
 |start-h3| Implemented features for this service |end-h3|
 
 - [ ] add_association
-- [ ] add_tags
+- [X] add_tags
 - [X] associate_trial_component
+- [ ] attach_cluster_node_network_interface
+- [ ] attach_cluster_node_volume
+- [ ] batch_add_cluster_nodes
+- [ ] batch_delete_cluster_nodes
 - [ ] batch_describe_model_package
+- [ ] batch_reboot_cluster_nodes
+- [ ] batch_replace_cluster_nodes
 - [ ] create_action
+- [ ] create_ai_benchmark_job
+- [ ] create_ai_recommendation_job
+- [ ] create_ai_workload_config
 - [ ] create_algorithm
 - [ ] create_app
 - [ ] create_app_image_config
 - [ ] create_artifact
 - [ ] create_auto_ml_job
+- [X] create_auto_ml_job_v2
+- [X] create_cluster
+- [ ] create_cluster_scheduler_config
 - [ ] create_code_repository
-- [ ] create_compilation_job
+- [X] create_compilation_job
+- [ ] create_compute_quota
 - [ ] create_context
-- [ ] create_data_quality_job_definition
+- [X] create_data_quality_job_definition
 - [ ] create_device_fleet
-- [ ] create_domain
+- [X] create_domain
+- [ ] create_edge_deployment_plan
+- [ ] create_edge_deployment_stage
 - [ ] create_edge_packaging_job
 - [X] create_endpoint
 - [X] create_endpoint_config
 - [X] create_experiment
-- [ ] create_feature_group
+- [X] create_feature_group
 - [ ] create_flow_definition
+- [ ] create_hub
+- [ ] create_hub_content_presigned_urls
+- [ ] create_hub_content_reference
 - [ ] create_human_task_ui
-- [ ] create_hyper_parameter_tuning_job
+- [X] create_hyper_parameter_tuning_job
 - [ ] create_image
 - [ ] create_image_version
+- [ ] create_inference_component
+- [ ] create_inference_experiment
+- [ ] create_inference_recommendations_job
+- [ ] create_job
 - [ ] create_labeling_job
+- [ ] create_mlflow_app
+- [ ] create_mlflow_tracking_server
 - [X] create_model
-- [ ] create_model_bias_job_definition
-- [ ] create_model_explainability_job_definition
-- [ ] create_model_package
-- [ ] create_model_package_group
-- [ ] create_model_quality_job_definition
+- [X] create_model_bias_job_definition
+- [X] create_model_card
+- [ ] create_model_card_export_job
+- [X] create_model_explainability_job_definition
+- [X] create_model_package
+- [X] create_model_package_group
+- [X] create_model_quality_job_definition
 - [ ] create_monitoring_schedule
 - [X] create_notebook_instance
 - [X] create_notebook_instance_lifecycle_config
-- [ ] create_pipeline
+- [ ] create_optimization_job
+- [ ] create_partner_app
+- [ ] create_partner_app_presigned_url
+- [X] create_pipeline
 - [ ] create_presigned_domain_url
+- [ ] create_presigned_mlflow_app_url
+- [ ] create_presigned_mlflow_tracking_server_url
 - [ ] create_presigned_notebook_instance_url
 - [X] create_processing_job
 - [ ] create_project
+- [ ] create_space
 - [ ] create_studio_lifecycle_config
 - [X] create_training_job
-- [ ] create_transform_job
+- [ ] create_training_plan
+- [ ] create_training_session
+- [X] create_transform_job
 - [X] create_trial
 - [X] create_trial_component
 - [ ] create_user_profile
 - [ ] create_workforce
 - [ ] create_workteam
 - [ ] delete_action
+- [ ] delete_ai_benchmark_job
+- [ ] delete_ai_recommendation_job
+- [ ] delete_ai_workload_config
 - [ ] delete_algorithm
 - [ ] delete_app
 - [ ] delete_app_image_config
 - [ ] delete_artifact
 - [ ] delete_association
+- [X] delete_cluster
+- [ ] delete_cluster_scheduler_config
 - [ ] delete_code_repository
+- [X] delete_compilation_job
+- [ ] delete_compute_quota
 - [ ] delete_context
-- [ ] delete_data_quality_job_definition
+- [X] delete_data_quality_job_definition
 - [ ] delete_device_fleet
-- [ ] delete_domain
+- [X] delete_domain
+- [ ] delete_edge_deployment_plan
+- [ ] delete_edge_deployment_stage
 - [X] delete_endpoint
 - [X] delete_endpoint_config
 - [X] delete_experiment
 - [ ] delete_feature_group
 - [ ] delete_flow_definition
+- [ ] delete_hub
+- [ ] delete_hub_content
+- [ ] delete_hub_content_reference
 - [ ] delete_human_task_ui
+- [X] delete_hyper_parameter_tuning_job
 - [ ] delete_image
 - [ ] delete_image_version
+- [ ] delete_inference_component
+- [ ] delete_inference_experiment
+- [ ] delete_job
+- [ ] delete_mlflow_app
+- [ ] delete_mlflow_tracking_server
 - [X] delete_model
-- [ ] delete_model_bias_job_definition
-- [ ] delete_model_explainability_job_definition
+- [X] delete_model_bias_job_definition
+- [X] delete_model_card
+- [X] delete_model_explainability_job_definition
 - [ ] delete_model_package
 - [ ] delete_model_package_group
 - [ ] delete_model_package_group_policy
-- [ ] delete_model_quality_job_definition
+- [X] delete_model_quality_job_definition
 - [ ] delete_monitoring_schedule
 - [X] delete_notebook_instance
 - [X] delete_notebook_instance_lifecycle_config
-- [ ] delete_pipeline
+- [ ] delete_optimization_job
+- [ ] delete_partner_app
+- [X] delete_pipeline
+- [ ] delete_processing_job
 - [ ] delete_project
+- [ ] delete_space
 - [ ] delete_studio_lifecycle_config
-- [ ] delete_tags
+- [X] delete_tags
+- [ ] delete_training_job
+- [ ] delete_training_session
 - [X] delete_trial
 - [X] delete_trial_component
 - [ ] delete_user_profile
@@ -114,156 +162,273 @@ sagemaker
 - [ ] delete_workteam
 - [ ] deregister_devices
 - [ ] describe_action
+- [ ] describe_ai_benchmark_job
+- [ ] describe_ai_recommendation_job
+- [ ] describe_ai_workload_config
 - [ ] describe_algorithm
 - [ ] describe_app
 - [ ] describe_app_image_config
 - [ ] describe_artifact
 - [ ] describe_auto_ml_job
+- [X] describe_auto_ml_job_v2
+- [X] describe_cluster
+- [ ] describe_cluster_event
+- [X] describe_cluster_node
+- [ ] describe_cluster_scheduler_config
 - [ ] describe_code_repository
-- [ ] describe_compilation_job
+- [X] describe_compilation_job
+- [ ] describe_compute_quota
 - [ ] describe_context
-- [ ] describe_data_quality_job_definition
+- [X] describe_data_quality_job_definition
 - [ ] describe_device
 - [ ] describe_device_fleet
-- [ ] describe_domain
+- [X] describe_domain
+- [ ] describe_edge_deployment_plan
 - [ ] describe_edge_packaging_job
 - [X] describe_endpoint
 - [X] describe_endpoint_config
 - [X] describe_experiment
-- [ ] describe_feature_group
+- [X] describe_feature_group
+- [ ] describe_feature_metadata
 - [ ] describe_flow_definition
+- [ ] describe_hub
+- [ ] describe_hub_content
 - [ ] describe_human_task_ui
-- [ ] describe_hyper_parameter_tuning_job
+- [X] describe_hyper_parameter_tuning_job
 - [ ] describe_image
 - [ ] describe_image_version
+- [ ] describe_inference_component
+- [ ] describe_inference_experiment
+- [ ] describe_inference_recommendations_job
+- [ ] describe_job
+- [ ] describe_job_schema_version
 - [ ] describe_labeling_job
+- [ ] describe_lineage_group
+- [ ] describe_mlflow_app
+- [ ] describe_mlflow_tracking_server
 - [X] describe_model
-- [ ] describe_model_bias_job_definition
-- [ ] describe_model_explainability_job_definition
-- [ ] describe_model_package
-- [ ] describe_model_package_group
-- [ ] describe_model_quality_job_definition
+- [X] describe_model_bias_job_definition
+- [X] describe_model_card
+- [ ] describe_model_card_export_job
+- [X] describe_model_explainability_job_definition
+- [X] describe_model_package
+- [X] describe_model_package_group
+- [X] describe_model_quality_job_definition
 - [ ] describe_monitoring_schedule
 - [ ] describe_notebook_instance
 - [X] describe_notebook_instance_lifecycle_config
-- [ ] describe_pipeline
-- [ ] describe_pipeline_definition_for_execution
-- [ ] describe_pipeline_execution
+- [ ] describe_optimization_job
+- [ ] describe_partner_app
+- [X] describe_pipeline
+- [X] describe_pipeline_definition_for_execution
+- [X] describe_pipeline_execution
 - [X] describe_processing_job
 - [ ] describe_project
+- [ ] describe_reserved_capacity
+- [ ] describe_space
 - [ ] describe_studio_lifecycle_config
 - [ ] describe_subscribed_workteam
 - [X] describe_training_job
-- [ ] describe_transform_job
+- [ ] describe_training_plan
+- [ ] describe_training_plan_extension_history
+- [ ] describe_training_session
+- [X] describe_transform_job
 - [X] describe_trial
 - [X] describe_trial_component
 - [ ] describe_user_profile
 - [ ] describe_workforce
 - [ ] describe_workteam
+- [ ] detach_cluster_node_volume
 - [ ] disable_sagemaker_servicecatalog_portfolio
 - [X] disassociate_trial_component
 - [ ] enable_sagemaker_servicecatalog_portfolio
+- [ ] extend_training_plan
 - [ ] get_device_fleet_report
+- [ ] get_lineage_group_policy
 - [ ] get_model_package_group_policy
 - [ ] get_sagemaker_servicecatalog_portfolio_status
+- [ ] get_scaling_configuration_recommendation
 - [ ] get_search_suggestions
+- [ ] import_hub_content
 - [ ] list_actions
+- [ ] list_ai_benchmark_jobs
+- [ ] list_ai_recommendation_jobs
+- [ ] list_ai_workload_configs
 - [ ] list_algorithms
+- [ ] list_aliases
 - [ ] list_app_image_configs
 - [ ] list_apps
 - [ ] list_artifacts
 - [ ] list_associations
-- [ ] list_auto_ml_jobs
+- [X] list_auto_ml_jobs
 - [ ] list_candidates_for_auto_ml_job
+- [ ] list_cluster_events
+- [X] list_cluster_nodes
+- [ ] list_cluster_scheduler_configs
+- [X] list_clusters
 - [ ] list_code_repositories
-- [ ] list_compilation_jobs
+- [X] list_compilation_jobs
+- [ ] list_compute_quotas
 - [ ] list_contexts
-- [ ] list_data_quality_job_definitions
+- [X] list_data_quality_job_definitions
 - [ ] list_device_fleets
 - [ ] list_devices
-- [ ] list_domains
+- [X] list_domains
+- [ ] list_edge_deployment_plans
 - [ ] list_edge_packaging_jobs
-- [ ] list_endpoint_configs
-- [ ] list_endpoints
+- [X] list_endpoint_configs
+- [X] list_endpoints
 - [X] list_experiments
 - [ ] list_feature_groups
 - [ ] list_flow_definitions
+- [ ] list_hub_content_versions
+- [ ] list_hub_contents
+- [ ] list_hubs
 - [ ] list_human_task_uis
-- [ ] list_hyper_parameter_tuning_jobs
+- [X] list_hyper_parameter_tuning_jobs
 - [ ] list_image_versions
 - [ ] list_images
+- [ ] list_inference_components
+- [ ] list_inference_experiments
+- [ ] list_inference_recommendations_job_steps
+- [ ] list_inference_recommendations_jobs
+- [ ] list_job_schema_versions
+- [ ] list_jobs
 - [ ] list_labeling_jobs
 - [ ] list_labeling_jobs_for_workteam
-- [ ] list_model_bias_job_definitions
-- [ ] list_model_explainability_job_definitions
-- [ ] list_model_package_groups
-- [ ] list_model_packages
-- [ ] list_model_quality_job_definitions
+- [ ] list_lineage_groups
+- [ ] list_mlflow_apps
+- [ ] list_mlflow_tracking_servers
+- [X] list_model_bias_job_definitions
+- [ ] list_model_card_export_jobs
+- [X] list_model_card_versions
+- [X] list_model_cards
+- [X] list_model_explainability_job_definitions
+- [ ] list_model_metadata
+- [X] list_model_package_groups
+- [X] list_model_packages
+- [X] list_model_quality_job_definitions
 - [X] list_models
+- [ ] list_monitoring_alert_history
+- [ ] list_monitoring_alerts
 - [ ] list_monitoring_executions
 - [ ] list_monitoring_schedules
 - [ ] list_notebook_instance_lifecycle_configs
-- [ ] list_notebook_instances
+- [X] list_notebook_instances
+  
+The following parameters are not yet implemented:
+CreationTimeBefore, CreationTimeAfter, LastModifiedTimeBefore, LastModifiedTimeAfter, NotebookInstanceLifecycleConfigNameContains, DefaultCodeRepositoryContains, AdditionalCodeRepositoryEquals
+
+
+- [ ] list_optimization_jobs
+- [ ] list_partner_apps
 - [ ] list_pipeline_execution_steps
-- [ ] list_pipeline_executions
-- [ ] list_pipeline_parameters_for_execution
-- [ ] list_pipelines
+- [X] list_pipeline_executions
+- [X] list_pipeline_parameters_for_execution
+- [ ] list_pipeline_versions
+- [X] list_pipelines
 - [X] list_processing_jobs
 - [ ] list_projects
+- [ ] list_resource_catalogs
+- [ ] list_spaces
+- [ ] list_stage_devices
 - [ ] list_studio_lifecycle_configs
 - [ ] list_subscribed_workteams
-- [ ] list_tags
+- [X] list_tags
 - [X] list_training_jobs
 - [ ] list_training_jobs_for_hyper_parameter_tuning_job
-- [ ] list_transform_jobs
+- [ ] list_training_plans
+- [ ] list_training_sessions
+- [X] list_transform_jobs
 - [X] list_trial_components
 - [X] list_trials
+- [ ] list_ultra_servers_by_reserved_capacity
 - [ ] list_user_profiles
 - [ ] list_workforces
 - [ ] list_workteams
 - [ ] put_model_package_group_policy
+- [ ] query_lineage
 - [ ] register_devices
 - [ ] render_ui_template
 - [ ] retry_pipeline_execution
 - [X] search
+  
+Only a few SearchExpressions are implemented. Please open a bug report if you find any issues.
+
+
+- [ ] search_training_plan_offerings
 - [ ] send_pipeline_execution_step_failure
 - [ ] send_pipeline_execution_step_success
+- [ ] start_cluster_health_check
+- [ ] start_edge_deployment_stage
+- [ ] start_inference_experiment
+- [ ] start_mlflow_tracking_server
 - [ ] start_monitoring_schedule
 - [X] start_notebook_instance
-- [ ] start_pipeline_execution
-- [ ] stop_auto_ml_job
+- [X] start_pipeline_execution
+- [ ] start_session
+- [ ] stop_ai_benchmark_job
+- [ ] stop_ai_recommendation_job
+- [X] stop_auto_ml_job
 - [ ] stop_compilation_job
+- [ ] stop_edge_deployment_stage
 - [ ] stop_edge_packaging_job
 - [ ] stop_hyper_parameter_tuning_job
+- [ ] stop_inference_experiment
+- [ ] stop_inference_recommendations_job
+- [ ] stop_job
 - [ ] stop_labeling_job
+- [ ] stop_mlflow_tracking_server
 - [ ] stop_monitoring_schedule
 - [X] stop_notebook_instance
+- [ ] stop_optimization_job
 - [ ] stop_pipeline_execution
-- [ ] stop_processing_job
+- [X] stop_processing_job
 - [ ] stop_training_job
+- [ ] stop_training_session
 - [ ] stop_transform_job
 - [ ] update_action
 - [ ] update_app_image_config
 - [ ] update_artifact
+- [ ] update_cluster
+- [ ] update_cluster_scheduler_config
+- [ ] update_cluster_software
 - [ ] update_code_repository
+- [ ] update_compute_quota
 - [ ] update_context
 - [ ] update_device_fleet
 - [ ] update_devices
 - [ ] update_domain
 - [ ] update_endpoint
-- [ ] update_endpoint_weights_and_capacities
+- [X] update_endpoint_weights_and_capacities
 - [ ] update_experiment
+- [ ] update_feature_group
+- [ ] update_feature_metadata
+- [ ] update_hub
+- [ ] update_hub_content
+- [ ] update_hub_content_reference
 - [ ] update_image
-- [ ] update_model_package
+- [ ] update_image_version
+- [ ] update_inference_component
+- [ ] update_inference_component_runtime_config
+- [ ] update_inference_experiment
+- [ ] update_mlflow_app
+- [ ] update_mlflow_tracking_server
+- [X] update_model_card
+- [X] update_model_package
+- [ ] update_monitoring_alert
 - [ ] update_monitoring_schedule
 - [ ] update_notebook_instance
 - [ ] update_notebook_instance_lifecycle_config
-- [ ] update_pipeline
+- [ ] update_partner_app
+- [X] update_pipeline
 - [ ] update_pipeline_execution
+- [ ] update_pipeline_version
 - [ ] update_project
+- [ ] update_space
 - [ ] update_training_job
 - [ ] update_trial
-- [ ] update_trial_component
+- [X] update_trial_component
 - [ ] update_user_profile
 - [ ] update_workforce
 - [ ] update_workteam

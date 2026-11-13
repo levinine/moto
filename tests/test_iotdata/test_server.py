@@ -1,25 +1,24 @@
 from urllib.parse import quote
 
 import pytest
-import sure  # noqa # pylint: disable=unused-import
 
 import moto.server as server
-from moto import mock_iotdata
+from moto import mock_aws
 
 """
 Test the different server responses
 """
 
 
-@mock_iotdata
-def test_iotdata_list():
+@mock_aws
+def test_iotdata_list() -> None:
     backend = server.create_backend_app("iot-data")
     test_client = backend.test_client()
 
     # just making sure that server is up
     thing_name = "nothing"
-    res = test_client.get("/things/{}/shadow".format(thing_name))
-    res.status_code.should.equal(404)
+    res = test_client.get(f"/things/{thing_name}/shadow")
+    assert res.status_code == 404
 
 
 @pytest.mark.parametrize(
@@ -29,13 +28,13 @@ def test_iotdata_list():
         pytest.param(False, id="Topic in Path is *not* URL encoded"),
     ],
 )
-@mock_iotdata
-def test_publish(url_encode_topic):
+@mock_aws
+def test_publish(url_encode_topic: bool) -> None:
     backend = server.create_backend_app("iot-data")
     test_client = backend.test_client()
 
     topic = "test/topic"
     topic_for_path = quote(topic, safe="") if url_encode_topic else topic
 
-    result = test_client.post("/topics/{}".format(topic_for_path))
-    result.status_code.should.equal(200)
+    result = test_client.post(f"/topics/{topic_for_path}")
+    assert result.status_code == 200

@@ -1,362 +1,306 @@
-from moto.core.responses import BaseResponse
-from moto.ec2.utils import filters_from_querystring
+from moto.core.responses import ActionResult, EmptyResult
+
+from ._base_response import EC2BaseResponse
 
 
-class ElasticBlockStore(BaseResponse):
-    def attach_volume(self):
+class ElasticBlockStore(EC2BaseResponse):
+    def attach_volume(self) -> ActionResult:
         volume_id = self._get_param("VolumeId")
         instance_id = self._get_param("InstanceId")
         device_path = self._get_param("Device")
-        if self.is_not_dryrun("AttachVolume"):
-            attachment = self.ec2_backend.attach_volume(
-                volume_id, instance_id, device_path
-            )
-            template = self.response_template(ATTACHED_VOLUME_RESPONSE)
-            return template.render(attachment=attachment)
 
-    def copy_snapshot(self):
+        self.error_on_dryrun()
+
+        attachment = self.ec2_backend.attach_volume(volume_id, instance_id, device_path)
+        return ActionResult(
+            {
+                "VolumeId": attachment.volume.id,
+                "InstanceId": attachment.instance.id,
+                "Device": attachment.device,
+                "State": "attaching",
+                "AttachTime": attachment.attach_time,
+            }
+        )
+
+    def copy_snapshot(self) -> ActionResult:
         source_snapshot_id = self._get_param("SourceSnapshotId")
         source_region = self._get_param("SourceRegion")
         description = self._get_param("Description")
-        tags = self._parse_tag_specification("TagSpecification")
+        tags = self._parse_tag_specification()
         snapshot_tags = tags.get("snapshot", {})
-        if self.is_not_dryrun("CopySnapshot"):
-            snapshot = self.ec2_backend.copy_snapshot(
-                source_snapshot_id, source_region, description
-            )
-            snapshot.add_tags(snapshot_tags)
-            template = self.response_template(COPY_SNAPSHOT_RESPONSE)
-            return template.render(snapshot=snapshot)
+        kms_key_id = self._get_param("KmsKeyId")
 
-    def create_snapshot(self):
+        self.error_on_dryrun()
+
+        snapshot = self.ec2_backend.copy_snapshot(
+            source_snapshot_id=source_snapshot_id,
+            source_region=source_region,
+            description=description,
+            kms_key_id=kms_key_id,
+        )
+        snapshot.add_tags(snapshot_tags)
+        return ActionResult({"SnapshotId": snapshot.id, "Tags": snapshot.tag_set})
+
+    def create_snapshot(self) -> ActionResult:
         volume_id = self._get_param("VolumeId")
         description = self._get_param("Description")
-        tags = self._parse_tag_specification("TagSpecification")
+        tags = self._parse_tag_specification()
         snapshot_tags = tags.get("snapshot", {})
-        if self.is_not_dryrun("CreateSnapshot"):
-            snapshot = self.ec2_backend.create_snapshot(volume_id, description)
-            snapshot.add_tags(snapshot_tags)
-            template = self.response_template(CREATE_SNAPSHOT_RESPONSE)
-            return template.render(snapshot=snapshot)
 
-    def create_volume(self):
+        self.error_on_dryrun()
+
+        snapshot = self.ec2_backend.create_snapshot(volume_id, description)
+        snapshot.add_tags(snapshot_tags)
+        return ActionResult(snapshot)
+
+    def create_snapshots(self) -> ActionResult:
+        instance_spec = self._get_param("InstanceSpecification", {})
+        description = self._get_param("Description", "")
+        tags = self._parse_tag_specification()
+        snapshot_tags = tags.get("snapshot", {})
+
+        self.error_on_dryrun()
+
+        snapshots = self.ec2_backend.create_snapshots(
+            instance_spec, description, snapshot_tags
+        )
+        return ActionResult({"Snapshots": snapshots})
+
+    def create_volume(self) -> ActionResult:
         size = self._get_param("Size")
         zone = self._get_param("AvailabilityZone")
         snapshot_id = self._get_param("SnapshotId")
         volume_type = self._get_param("VolumeType")
-        tags = self._parse_tag_specification("TagSpecification")
+        tags = self._parse_tag_specification()
         volume_tags = tags.get("volume", {})
-        encrypted = self._get_bool_param("Encrypted", if_none=False)
+        encrypted = self._get_bool_param("Encrypted", False)
         kms_key_id = self._get_param("KmsKeyId")
-        if self.is_not_dryrun("CreateVolume"):
-            volume = self.ec2_backend.create_volume(
-                size=size,
-                zone_name=zone,
-                snapshot_id=snapshot_id,
-                encrypted=encrypted,
-                kms_key_id=kms_key_id,
-                volume_type=volume_type,
-            )
-            volume.add_tags(volume_tags)
-            template = self.response_template(CREATE_VOLUME_RESPONSE)
-            return template.render(volume=volume)
+        iops = self._get_param("Iops")
+        throughput = self._get_param("Throughput")
+        multi_attach_enabled = self._get_param("MultiAttachEnabled")
 
-    def delete_snapshot(self):
-        snapshot_id = self._get_param("SnapshotId")
-        if self.is_not_dryrun("DeleteSnapshot"):
-            self.ec2_backend.delete_snapshot(snapshot_id)
-            return DELETE_SNAPSHOT_RESPONSE
+        self.error_on_dryrun()
 
-    def delete_volume(self):
+        volume = self.ec2_backend.create_volume(
+            size=size,
+            zone_name=zone,
+            snapshot_id=snapshot_id,
+            encrypted=encrypted,
+            kms_key_id=kms_key_id,
+            volume_type=volume_type,
+            iops=iops,
+            throughput=throughput,
+            multi_attach_enabled=multi_attach_enabled,
+        )
+        volume.add_tags(volume_tags)
+        return ActionResult(volume)
+
+    def modify_volume(self) -> ActionResult:
         volume_id = self._get_param("VolumeId")
-        if self.is_not_dryrun("DeleteVolume"):
-            self.ec2_backend.delete_volume(volume_id)
-            return DELETE_VOLUME_RESPONSE
+        target_size = self._get_param("Size")
+        target_volume_type = self._get_param("VolumeType")
+        target_iops = self._get_param("Iops")
+        target_throughput = self._get_param("Throughput")
+        target_multi_attach_enabled = self._get_param("MultiAttachEnabled")
 
-    def describe_snapshots(self):
-        filters = filters_from_querystring(self.querystring)
-        snapshot_ids = self._get_multi_param("SnapshotId")
+        self.error_on_dryrun()
+
+        volume = self.ec2_backend.modify_volume(
+            volume_id,
+            target_size,
+            target_volume_type,
+            target_iops,
+            target_throughput,
+            target_multi_attach_enabled,
+        )
+        modification = volume.modifications[-1]
+        return ActionResult({"VolumeModification": modification})
+
+    def describe_volumes_modifications(self) -> ActionResult:
+        filters = self._filters_from_querystring()
+        volume_ids = self._get_param("VolumeIds", [])
+        modifications = self.ec2_backend.describe_volumes_modifications(
+            volume_ids=volume_ids, filters=filters
+        )
+        return ActionResult({"VolumesModifications": modifications})
+
+    def delete_snapshot(self) -> ActionResult:
+        snapshot_id = self._get_param("SnapshotId")
+
+        self.error_on_dryrun()
+
+        self.ec2_backend.delete_snapshot(snapshot_id)
+        return EmptyResult()
+
+    def delete_volume(self) -> ActionResult:
+        volume_id = self._get_param("VolumeId")
+
+        self.error_on_dryrun()
+
+        self.ec2_backend.delete_volume(volume_id)
+        return EmptyResult()
+
+    def describe_snapshots(self) -> ActionResult:
+        filters = self._filters_from_querystring()
+        snapshot_ids = self._get_param("SnapshotIds", [])
         snapshots = self.ec2_backend.describe_snapshots(
             snapshot_ids=snapshot_ids, filters=filters
         )
-        template = self.response_template(DESCRIBE_SNAPSHOTS_RESPONSE)
-        return template.render(snapshots=snapshots)
+        return ActionResult({"Snapshots": snapshots})
 
-    def describe_volumes(self):
-        filters = filters_from_querystring(self.querystring)
-        volume_ids = self._get_multi_param("VolumeId")
+    def modify_snapshot_tier(self) -> ActionResult:
+        snapshot_id = self._get_param("SnapshotId")
+        storage_tier = self._get_param("StorageTier")
+
+        self.error_on_dryrun()
+
+        snapshot = self.ec2_backend.modify_snapshot_tier(snapshot_id, storage_tier)
+        return ActionResult(
+            {
+                "SnapshotId": snapshot.id,
+                "TieringStartTime": snapshot.last_tiering_start_time,
+            }
+        )
+
+    def describe_snapshot_tier_status(self) -> ActionResult:
+        filters = self._filters_from_querystring()
+        snapshots = self.ec2_backend.describe_snapshot_tier_status(filters=filters)
+        statuses = [
+            {
+                "SnapshotId": snapshot.id,
+                "VolumeId": snapshot.volume_id,
+                "Status": snapshot.status,
+                "OwnerId": snapshot.owner_id,
+                "Tags": snapshot.tag_set,
+                "StorageTier": snapshot.storage_tier,
+                "LastTieringStartTime": snapshot.last_tiering_start_time,
+                "LastTieringProgress": snapshot.last_tiering_progress,
+                "LastTieringOperationStatus": snapshot.last_tiering_operation_status,
+                "LastTieringOperationStatusDetail": snapshot.last_tiering_operation_status_detail,
+                "ArchivalCompleteTime": snapshot.archival_complete_time,
+                "RestoreExpiryTime": snapshot.restore_expiry_time,
+            }
+            for snapshot in snapshots
+        ]
+        return ActionResult({"SnapshotTierStatuses": statuses})
+
+    def restore_snapshot_tier(self) -> ActionResult:
+        snapshot_id = self._get_param("SnapshotId")
+        temporary_restore_days = self._get_param("TemporaryRestoreDays")
+        permanent_restore = self._get_param("PermanentRestore", False)
+
+        self.error_on_dryrun()
+
+        snapshot = self.ec2_backend.restore_snapshot_tier(
+            snapshot_id,
+            temporary_restore_days=temporary_restore_days,
+            permanent_restore=permanent_restore,
+        )
+        result = {
+            "SnapshotId": snapshot.id,
+            "RestoreStartTime": snapshot.restore_start_time,
+            "IsPermanentRestore": bool(permanent_restore),
+        }
+        if not permanent_restore and temporary_restore_days is not None:
+            result["RestoreDuration"] = temporary_restore_days
+        return ActionResult(result)
+
+    def describe_volumes(self) -> ActionResult:
+        filters = self._filters_from_querystring()
+        volume_ids = self._get_param("VolumeIds", [])
         volumes = self.ec2_backend.describe_volumes(
             volume_ids=volume_ids, filters=filters
         )
-        template = self.response_template(DESCRIBE_VOLUMES_RESPONSE)
-        return template.render(volumes=volumes)
+        return ActionResult({"Volumes": volumes})
 
-    def describe_volume_attribute(self):
+    def describe_volume_attribute(self) -> str:
         raise NotImplementedError(
             "ElasticBlockStore.describe_volume_attribute is not yet implemented"
         )
 
-    def describe_volume_status(self):
+    def describe_volume_status(self) -> str:
         raise NotImplementedError(
             "ElasticBlockStore.describe_volume_status is not yet implemented"
         )
 
-    def detach_volume(self):
+    def detach_volume(self) -> ActionResult:
         volume_id = self._get_param("VolumeId")
         instance_id = self._get_param("InstanceId")
         device_path = self._get_param("Device")
-        if self.is_not_dryrun("DetachVolume"):
-            attachment = self.ec2_backend.detach_volume(
-                volume_id, instance_id, device_path
-            )
-            template = self.response_template(DETATCH_VOLUME_RESPONSE)
-            return template.render(attachment=attachment)
 
-    def enable_volume_io(self):
-        if self.is_not_dryrun("EnableVolumeIO"):
-            raise NotImplementedError(
-                "ElasticBlockStore.enable_volume_io is not yet implemented"
-            )
+        self.error_on_dryrun()
 
-    def import_volume(self):
-        if self.is_not_dryrun("ImportVolume"):
-            raise NotImplementedError(
-                "ElasticBlockStore.import_volume is not yet implemented"
-            )
+        attachment = self.ec2_backend.detach_volume(volume_id, instance_id, device_path)
+        return ActionResult(
+            {
+                "VolumeId": attachment.volume.id,
+                "InstanceId": attachment.instance.id,
+                "Device": attachment.device,
+                "State": "detaching",
+                "AttachTime": attachment.attach_time,
+            }
+        )
 
-    def describe_snapshot_attribute(self):
+    def enable_volume_io(self) -> str:
+        self.error_on_dryrun()
+
+        raise NotImplementedError(
+            "ElasticBlockStore.enable_volume_io is not yet implemented"
+        )
+
+    def import_volume(self) -> str:
+        self.error_on_dryrun()
+
+        raise NotImplementedError(
+            "ElasticBlockStore.import_volume is not yet implemented"
+        )
+
+    def describe_snapshot_attribute(self) -> ActionResult:
         snapshot_id = self._get_param("SnapshotId")
         groups = self.ec2_backend.get_create_volume_permission_groups(snapshot_id)
         user_ids = self.ec2_backend.get_create_volume_permission_userids(snapshot_id)
-        template = self.response_template(DESCRIBE_SNAPSHOT_ATTRIBUTES_RESPONSE)
-        return template.render(snapshot_id=snapshot_id, groups=groups, userIds=user_ids)
+        permissions = [{"Group": g} for g in groups] + [{"UserId": u} for u in user_ids]
+        return ActionResult(
+            {
+                "SnapshotId": snapshot_id,
+                "CreateVolumePermissions": permissions,
+            }
+        )
 
-    def modify_snapshot_attribute(self):
+    def modify_snapshot_attribute(self) -> ActionResult:
         snapshot_id = self._get_param("SnapshotId")
         operation_type = self._get_param("OperationType")
-        groups = self._get_multi_param("UserGroup")
-        user_ids = self._get_multi_param("UserId")
-        if self.is_not_dryrun("ModifySnapshotAttribute"):
-            if operation_type == "add":
-                self.ec2_backend.add_create_volume_permission(
-                    snapshot_id, user_ids=user_ids, groups=groups
-                )
-            elif operation_type == "remove":
-                self.ec2_backend.remove_create_volume_permission(
-                    snapshot_id, user_ids=user_ids, groups=groups
-                )
-            return MODIFY_SNAPSHOT_ATTRIBUTE_RESPONSE
+        groups = self._get_param("GroupNames", [])
+        user_ids = self._get_param("UserIds", [])
 
-    def modify_volume_attribute(self):
-        if self.is_not_dryrun("ModifyVolumeAttribute"):
-            raise NotImplementedError(
-                "ElasticBlockStore.modify_volume_attribute is not yet implemented"
+        self.error_on_dryrun()
+
+        if operation_type == "add":
+            self.ec2_backend.add_create_volume_permission(
+                snapshot_id, user_ids=user_ids, groups=groups
             )
-
-    def reset_snapshot_attribute(self):
-        if self.is_not_dryrun("ResetSnapshotAttribute"):
-            raise NotImplementedError(
-                "ElasticBlockStore.reset_snapshot_attribute is not yet implemented"
+        elif operation_type == "remove":
+            self.ec2_backend.remove_create_volume_permission(
+                snapshot_id, user_ids=user_ids, groups=groups
             )
+        return EmptyResult()
 
+    def modify_volume_attribute(self) -> str:
+        self.error_on_dryrun()
 
-CREATE_VOLUME_RESPONSE = """<CreateVolumeResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-  <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-  <volumeId>{{ volume.id }}</volumeId>
-  <size>{{ volume.size }}</size>
-  {% if volume.snapshot_id %}
-    <snapshotId>{{ volume.snapshot_id }}</snapshotId>
-  {% else %}
-    <snapshotId/>
-  {% endif %}
-  <encrypted>{{ 'true' if volume.encrypted else 'false' }}</encrypted>
-  {% if volume.encrypted %}
-  <kmsKeyId>{{ volume.kms_key_id }}</kmsKeyId>
-  {% endif %}
-  <availabilityZone>{{ volume.zone.name }}</availabilityZone>
-  <status>creating</status>
-  <createTime>{{ volume.create_time}}</createTime>
-  {% if volume.get_tags() %}
-    <tagSet>
-      {% for tag in volume.get_tags() %}
-          <item>
-          <resourceId>{{ tag.resource_id }}</resourceId>
-          <resourceType>{{ tag.resource_type }}</resourceType>
-          <key>{{ tag.key }}</key>
-          <value>{{ tag.value }}</value>
-          </item>
-      {% endfor %}
-    </tagSet>
-  {% endif %}
-  <volumeType>{{ volume.volume_type }}</volumeType>
-</CreateVolumeResponse>"""
+        raise NotImplementedError(
+            "ElasticBlockStore.modify_volume_attribute is not yet implemented"
+        )
 
-DESCRIBE_VOLUMES_RESPONSE = """<DescribeVolumesResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-   <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-   <volumeSet>
-      {% for volume in volumes %}
-          <item>
-             <volumeId>{{ volume.id }}</volumeId>
-             <size>{{ volume.size }}</size>
-             {% if volume.snapshot_id %}
-               <snapshotId>{{ volume.snapshot_id }}</snapshotId>
-             {% else %}
-               <snapshotId/>
-             {% endif %}
-             <encrypted>{{ 'true' if volume.encrypted else 'false' }}</encrypted>
-             {% if volume.encrypted %}
-             <kmsKeyId>{{ volume.kms_key_id }}</kmsKeyId>
-             {% endif %}
-             <availabilityZone>{{ volume.zone.name }}</availabilityZone>
-             <status>{{ volume.status }}</status>
-             <createTime>{{ volume.create_time}}</createTime>
-             <attachmentSet>
-                {% if volume.attachment %}
-                    <item>
-                       <volumeId>{{ volume.id }}</volumeId>
-                       <instanceId>{{ volume.attachment.instance.id }}</instanceId>
-                       <device>{{ volume.attachment.device }}</device>
-                       <status>attached</status>
-                       <attachTime>{{volume.attachment.attach_time}}</attachTime>
-                       <deleteOnTermination>false</deleteOnTermination>
-                    </item>
-                {% endif %}
-             </attachmentSet>
-             {% if volume.get_tags() %}
-               <tagSet>
-                 {% for tag in volume.get_tags() %}
-                   <item>
-                     <resourceId>{{ tag.resource_id }}</resourceId>
-                     <resourceType>{{ tag.resource_type }}</resourceType>
-                     <key>{{ tag.key }}</key>
-                     <value>{{ tag.value }}</value>
-                   </item>
-                 {% endfor %}
-               </tagSet>
-             {% endif %}
-             <volumeType>{{ volume.volume_type }}</volumeType>
-          </item>
-      {% endfor %}
-   </volumeSet>
-</DescribeVolumesResponse>"""
+    def reset_snapshot_attribute(self) -> str:
+        self.error_on_dryrun()
 
-DELETE_VOLUME_RESPONSE = """<DeleteVolumeResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-  <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-  <return>true</return>
-</DeleteVolumeResponse>"""
+        raise NotImplementedError(
+            "ElasticBlockStore.reset_snapshot_attribute is not yet implemented"
+        )
 
-ATTACHED_VOLUME_RESPONSE = """<AttachVolumeResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-  <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-  <volumeId>{{ attachment.volume.id }}</volumeId>
-  <instanceId>{{ attachment.instance.id }}</instanceId>
-  <device>{{ attachment.device }}</device>
-  <status>attaching</status>
-  <attachTime>{{attachment.attach_time}}</attachTime>
-</AttachVolumeResponse>"""
-
-DETATCH_VOLUME_RESPONSE = """<DetachVolumeResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-   <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-   <volumeId>{{ attachment.volume.id }}</volumeId>
-   <instanceId>{{ attachment.instance.id }}</instanceId>
-   <device>{{ attachment.device }}</device>
-   <status>detaching</status>
-   <attachTime>2013-10-04T17:38:53.000Z</attachTime>
-</DetachVolumeResponse>"""
-
-CREATE_SNAPSHOT_RESPONSE = """<CreateSnapshotResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-  <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-  <snapshotId>{{ snapshot.id }}</snapshotId>
-  <volumeId>{{ snapshot.volume.id }}</volumeId>
-  <status>pending</status>
-  <startTime>{{ snapshot.start_time}}</startTime>
-  <progress>60%</progress>
-  <ownerId>{{ snapshot.owner_id }}</ownerId>
-  <volumeSize>{{ snapshot.volume.size }}</volumeSize>
-  <description>{{ snapshot.description }}</description>
-  <encrypted>{{ 'true' if snapshot.encrypted else 'false' }}</encrypted>
-  <tagSet>
-    {% for tag in snapshot.get_tags() %}
-      <item>
-      <resourceId>{{ tag.resource_id }}</resourceId>
-      <resourceType>{{ tag.resource_type }}</resourceType>
-      <key>{{ tag.key }}</key>
-      <value>{{ tag.value }}</value>
-      </item>
-    {% endfor %}
-  </tagSet>
-</CreateSnapshotResponse>"""
-
-COPY_SNAPSHOT_RESPONSE = """<CopySnapshotResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
-  <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-  <snapshotId>{{ snapshot.id }}</snapshotId>
-  <tagSet>
-    {% for tag in snapshot.get_tags() %}
-      <item>
-      <resourceId>{{ tag.resource_id }}</resourceId>
-      <resourceType>{{ tag.resource_type }}</resourceType>
-      <key>{{ tag.key }}</key>
-      <value>{{ tag.value }}</value>
-      </item>
-    {% endfor %}
-  </tagSet>
-</CopySnapshotResponse>"""
-
-DESCRIBE_SNAPSHOTS_RESPONSE = """<DescribeSnapshotsResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-   <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-   <snapshotSet>
-      {% for snapshot in snapshots %}
-          <item>
-             <snapshotId>{{ snapshot.id }}</snapshotId>
-            <volumeId>{{ snapshot.volume.id }}</volumeId>
-             <status>{{ snapshot.status }}</status>
-             <startTime>{{ snapshot.start_time}}</startTime>
-             <progress>100%</progress>
-             <ownerId>{{ snapshot.owner_id }}</ownerId>
-            <volumeSize>{{ snapshot.volume.size }}</volumeSize>
-             <description>{{ snapshot.description }}</description>
-             <encrypted>{{ 'true' if snapshot.encrypted else 'false' }}</encrypted>
-             <tagSet>
-               {% for tag in snapshot.get_tags() %}
-                 <item>
-                   <resourceId>{{ tag.resource_id }}</resourceId>
-                   <resourceType>{{ tag.resource_type }}</resourceType>
-                   <key>{{ tag.key }}</key>
-                   <value>{{ tag.value }}</value>
-                 </item>
-               {% endfor %}
-             </tagSet>
-          </item>
-      {% endfor %}
-   </snapshotSet>
-</DescribeSnapshotsResponse>"""
-
-DELETE_SNAPSHOT_RESPONSE = """<DeleteSnapshotResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-  <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-  <return>true</return>
-</DeleteSnapshotResponse>"""
-
-DESCRIBE_SNAPSHOT_ATTRIBUTES_RESPONSE = """
-<DescribeSnapshotAttributeResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-    <requestId>a9540c9f-161a-45d8-9cc1-1182b89ad69f</requestId>
-    <snapshotId>snap-a0332ee0</snapshotId>
-    <createVolumePermission>
-       {% for group in groups %}
-          <item>
-             <group>{{ group }}</group>
-          </item>
-       {% endfor %}
-       {% for userId in userIds %}
-          <item>
-             <userId>{{ userId }}</userId>
-          </item>
-       {% endfor %}
-    </createVolumePermission>
-</DescribeSnapshotAttributeResponse>
-"""
-
-MODIFY_SNAPSHOT_ATTRIBUTE_RESPONSE = """
-<ModifySnapshotAttributeResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-    <requestId>666d2944-9276-4d6a-be12-1f4ada972fd8</requestId>
-    <return>true</return>
-</ModifySnapshotAttributeResponse>
-"""
+    def modify_ebs_default_kms_key_id(self) -> ActionResult:
+        self.error_on_dryrun()
+        kms_key_id = self._get_param("KmsKeyId")
+        new_default_kms_arn = self.ec2_backend.modify_ebs_default_kms_key_id(kms_key_id)
+        return ActionResult({"KmsKeyId": new_default_kms_arn})

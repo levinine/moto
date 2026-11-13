@@ -1,13 +1,20 @@
-import sure  # noqa # pylint: disable=unused-import
+import gzip
+import json
+import uuid
+from collections.abc import Iterable
+from unittest.mock import Mock, patch
 
-from unittest.mock import patch
-from moto.server import main, create_backend_app, DomainDispatcherApplication
+import boto3
+import pytest
+
+from moto import server
+from moto.server import ThreadedMotoServer, main
 
 
-def test_wrong_arguments():
+def test_wrong_arguments() -> None:
     try:
-        main(["name", "test1", "test2", "test3"])
-        assert False, (
+        main(["test1", "test2", "test3"])
+        raise AssertionError(
             "main() when called with the incorrect number of args"
             " should raise a system exit"
         )
@@ -16,33 +23,104 @@ def test_wrong_arguments():
 
 
 @patch("moto.server.run_simple")
-def test_right_arguments(run_simple):
-    main(["s3"])
+def test_right_arguments(run_simple: Mock) -> None:  # type: ignore[misc]
+    main(["-r"])
     func_call = run_simple.call_args[0]
-    func_call[0].should.equal("127.0.0.1")
-    func_call[1].should.equal(5000)
+    assert func_call[0] == "127.0.0.1"
+    assert func_call[1] == 5000
 
 
 @patch("moto.server.run_simple")
-def test_port_argument(run_simple):
-    main(["s3", "--port", "8080"])
+def test_port_argument(run_simple: Mock) -> None:  # type: ignore[misc]
+    main(["--port", "8080"])
     func_call = run_simple.call_args[0]
-    func_call[0].should.equal("127.0.0.1")
-    func_call[1].should.equal(8080)
+    assert func_call[0] == "127.0.0.1"
+    assert func_call[1] == 8080
 
 
-def test_domain_dispatched():
-    dispatcher = DomainDispatcherApplication(create_backend_app)
-    backend_app = dispatcher.get_application(
-        {"HTTP_HOST": "email.us-east1.amazonaws.com"}
-    )
-    keys = list(backend_app.view_functions.keys())
-    keys[0].should.equal("EmailResponse.dispatch")
+@pytest.fixture(scope="module")
+def moto_server() -> Iterable[str]:
+    """Fixture to run a mocked AWS server for testing."""
+    # Note: pass `port=0` to get a random free port.
+    server = ThreadedMotoServer(port=0)
+    server.start()
+    host, port = server.get_host_and_port()
+    yield f"http://{host}:{port}"
+    server.stop()
 
 
-def test_domain_dispatched_with_service():
-    # If we pass a particular service, always return that.
-    dispatcher = DomainDispatcherApplication(create_backend_app, service="s3")
-    backend_app = dispatcher.get_application({"HTTP_HOST": "s3.us-east1.amazonaws.com"})
-    keys = set(backend_app.view_functions.keys())
-    keys.should.contain("ResponseObject.key_or_control_response")
+def test_s3_using_moto_fixture(moto_server: str) -> None:
+    client = boto3.client("s3", endpoint_url=moto_server)
+    client.list_buckets()
+
+
+def test_request_decompression() -> None:
+    backend = server.create_backend_app("rds")
+    test_client = backend.test_client()
+    headers = {
+        "Content-Encoding": "gzip",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Host": "rds.us-east-1.amazonaws.com",
+    }
+    data = gzip.compress(b"Action=DescribeDBInstances")
+    resp = test_client.post(headers=headers, data=data)
+    assert resp.status_code == 200
+    assert "<DescribeDBInstancesResult>" in resp.data.decode("utf-8")
+
+
+def test_date_header_is_not_duplicated(moto_server: str) -> None:
+    client = boto3.client("glue", region_name="us-east-1", endpoint_url=moto_server)
+    resp = client.get_connections()
+    date_header_value = resp["ResponseMetadata"]["HTTPHeaders"]["date"]
+    # RFC 2822 dates should only have 1 comma, e.g. 'Mon, 20 Nov 1995 19:12:08 GMT'
+    # If multiple date headers exist, their values will be concatenated with a comma
+    # and this assertion will fail.
+    assert len(date_header_value.split(",")) == 2
+
+
+def test_bedrock_service_resolution(moto_server: str) -> None:
+    # Multiple Bedrock services use the same signing name (bedrock),
+    # so this test checks that a bedrock-runtime request is correctly
+    # differentiated in server mode (where there is no host name available).
+    from botocore.exceptions import UnknownServiceError
+
+    try:
+        client = boto3.client(
+            "bedrock-runtime", region_name="us-east-1", endpoint_url=moto_server
+        )
+    except UnknownServiceError:
+        pytest.skip("Bedrock Runtime not supported in this version of Botocore.")
+    else:
+        resp = client.invoke_model(
+            modelId="test-model-id",
+            body=json.dumps({}),
+            performanceConfigLatency="optimized",
+            serviceTier="flex",
+        )
+        assert resp["performanceConfigLatency"] == "optimized"
+        assert resp["serviceTier"] == "flex"
+
+
+def test_bedrock_agentcore_service_resolution(moto_server: str) -> None:
+    # Multiple Bedrock services use the same signing name (bedrock-agentcore),
+    # so this test checks that a bedrock-agentcore request is correctly
+    # differentiated in server mode (where there is no host name available).
+    from botocore.exceptions import UnknownServiceError
+
+    try:
+        client = boto3.client(
+            "bedrock-agentcore", region_name="us-east-1", endpoint_url=moto_server
+        )
+    except UnknownServiceError:
+        pytest.skip("Bedrock AgentCore not supported in this version of Botocore.")
+    else:
+        resp = client.create_event(
+            memoryId=str(uuid.uuid4()),
+            actorId="actor-1",
+            sessionId="session-1",
+            eventTimestamp="2026-01-01T00:00:00Z",
+            payload=[
+                {"conversational": {"content": {"text": "test text"}, "role": "USER"}}
+            ],
+        )
+        assert "event" in resp

@@ -1,45 +1,15 @@
-import pytest
-
-import boto
-import boto3
-from boto.exception import EC2ResponseError
-from botocore.exceptions import ClientError
-import sure  # noqa # pylint: disable=unused-import
-
-from moto import mock_ec2, mock_ec2_deprecated, settings
-from tests import EXAMPLE_AMI_ID
-from tests.helpers import requires_boto_gte
 from uuid import uuid4
 
+import boto3
+import pytest
+from botocore.exceptions import ClientError
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+from moto import mock_aws, settings
+from tests import EXAMPLE_AMI_ID
+
+
+@mock_aws
 def test_route_tables_defaults():
-    conn = boto.connect_vpc("the_key", "the_secret")
-    vpc = conn.create_vpc("10.0.0.0/16")
-
-    all_route_tables = conn.get_all_route_tables(filters={"vpc-id": vpc.id})
-    all_route_tables.should.have.length_of(1)
-
-    main_route_table = all_route_tables[0]
-    main_route_table.vpc_id.should.equal(vpc.id)
-
-    routes = main_route_table.routes
-    routes.should.have.length_of(1)
-
-    local_route = routes[0]
-    local_route.gateway_id.should.equal("local")
-    local_route.state.should.equal("active")
-    local_route.destination_cidr_block.should.equal(vpc.cidr_block)
-
-    vpc.delete()
-
-    all_route_tables = conn.get_all_route_tables(filters={"vpc-id": vpc.id})
-    all_route_tables.should.have.length_of(0)
-
-
-@mock_ec2
-def test_route_tables_defaults_boto3():
     client = boto3.client("ec2", region_name="us-east-1")
     ec2 = boto3.resource("ec2", region_name="us-east-1")
     vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
@@ -47,70 +17,29 @@ def test_route_tables_defaults_boto3():
     all_route_tables = client.describe_route_tables(
         Filters=[{"Name": "vpc-id", "Values": [vpc.id]}]
     )["RouteTables"]
-    all_route_tables.should.have.length_of(1)
+    assert len(all_route_tables) == 1
 
     main_route_table = all_route_tables[0]
-    main_route_table["VpcId"].should.equal(vpc.id)
+    assert main_route_table["VpcId"] == vpc.id
 
     routes = main_route_table["Routes"]
-    routes.should.have.length_of(1)
+    assert len(routes) == 1
 
     local_route = routes[0]
-    local_route["GatewayId"].should.equal("local")
-    local_route["State"].should.equal("active")
-    local_route["DestinationCidrBlock"].should.equal(vpc.cidr_block)
+    assert local_route["GatewayId"] == "local"
+    assert local_route["State"] == "active"
+    assert local_route["DestinationCidrBlock"] == vpc.cidr_block
 
     vpc.delete()
 
     all_route_tables = client.describe_route_tables(
         Filters=[{"Name": "vpc-id", "Values": [vpc.id]}]
     )["RouteTables"]
-    all_route_tables.should.have.length_of(0)
+    assert len(all_route_tables) == 0
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_route_tables_additional():
-    conn = boto.connect_vpc("the_key", "the_secret")
-    vpc = conn.create_vpc("10.0.0.0/16")
-    route_table = conn.create_route_table(vpc.id)
-
-    all_route_tables = conn.get_all_route_tables(filters={"vpc-id": vpc.id})
-    all_route_tables.should.have.length_of(2)
-    all_route_tables[0].vpc_id.should.equal(vpc.id)
-    all_route_tables[1].vpc_id.should.equal(vpc.id)
-
-    all_route_table_ids = [route_table.id for route_table in all_route_tables]
-    all_route_table_ids.should.contain(route_table.id)
-
-    routes = route_table.routes
-    routes.should.have.length_of(1)
-
-    local_route = routes[0]
-    local_route.gateway_id.should.equal("local")
-    local_route.state.should.equal("active")
-    local_route.destination_cidr_block.should.equal(vpc.cidr_block)
-
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.delete_vpc(vpc.id)
-    cm.value.code.should.equal("DependencyViolation")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-    conn.delete_route_table(route_table.id)
-
-    all_route_tables = conn.get_all_route_tables(filters={"vpc-id": vpc.id})
-    all_route_tables.should.have.length_of(1)
-
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.delete_route_table("rtb-1234abcd")
-    cm.value.code.should.equal("InvalidRouteTableID.NotFound")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-
-@mock_ec2
-def test_route_tables_additional_boto3():
     client = boto3.client("ec2", region_name="us-east-1")
     ec2 = boto3.resource("ec2", region_name="us-east-1")
     vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
@@ -119,88 +48,43 @@ def test_route_tables_additional_boto3():
     all_route_tables = client.describe_route_tables(
         Filters=[{"Name": "vpc-id", "Values": [vpc.id]}]
     )["RouteTables"]
-    all_route_tables.should.have.length_of(2)
-    all_route_tables[0]["VpcId"].should.equal(vpc.id)
-    all_route_tables[1]["VpcId"].should.equal(vpc.id)
+    assert len(all_route_tables) == 2
+    assert all_route_tables[0]["VpcId"] == vpc.id
+    assert all_route_tables[1]["VpcId"] == vpc.id
 
     all_route_table_ids = [r["RouteTableId"] for r in all_route_tables]
-    all_route_table_ids.should.contain(route_table.route_table_id)
+    assert route_table.route_table_id in all_route_table_ids
 
     routes = route_table.routes
-    routes.should.have.length_of(1)
+    assert len(routes) == 1
 
     local_route = routes[0]
-    local_route.gateway_id.should.equal("local")
-    local_route.state.should.equal("active")
-    local_route.destination_cidr_block.should.equal(vpc.cidr_block)
+    assert local_route.gateway_id == "local"
+    assert local_route.state == "active"
+    assert local_route.destination_cidr_block == vpc.cidr_block
 
     with pytest.raises(ClientError) as ex:
         client.delete_vpc(VpcId=vpc.id)
-    ex.value.response["Error"]["Code"].should.equal("DependencyViolation")
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
+    assert ex.value.response["Error"]["Code"] == "DependencyViolation"
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
 
     client.delete_route_table(RouteTableId=route_table.route_table_id)
 
     all_route_tables = client.describe_route_tables(
         Filters=[{"Name": "vpc-id", "Values": [vpc.id]}]
     )["RouteTables"]
-    all_route_tables.should.have.length_of(1)
+    assert len(all_route_tables) == 1
 
     with pytest.raises(ClientError) as ex:
         client.delete_route_table(RouteTableId="rtb-1234abcd")
-    ex.value.response["Error"]["Code"].should.equal("InvalidRouteTableID.NotFound")
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
+    assert ex.value.response["Error"]["Code"] == "InvalidRouteTableID.NotFound"
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_route_tables_filters_standard():
-    conn = boto.connect_vpc("the_key", "the_secret")
-
-    vpc1 = conn.create_vpc("10.0.0.0/16")
-    route_table1 = conn.create_route_table(vpc1.id)
-
-    vpc2 = conn.create_vpc("10.0.0.0/16")
-    route_table2 = conn.create_route_table(vpc2.id)
-
-    all_route_tables = conn.get_all_route_tables()
-    all_route_tables.should.have.length_of(5)
-
-    # Filter by main route table
-    main_route_tables = conn.get_all_route_tables(filters={"association.main": "true"})
-    main_route_tables.should.have.length_of(3)
-    main_route_table_ids = [route_table.id for route_table in main_route_tables]
-    main_route_table_ids.should_not.contain(route_table1.id)
-    main_route_table_ids.should_not.contain(route_table2.id)
-
-    # Filter by VPC
-    vpc1_route_tables = conn.get_all_route_tables(filters={"vpc-id": vpc1.id})
-    vpc1_route_tables.should.have.length_of(2)
-    vpc1_route_table_ids = [route_table.id for route_table in vpc1_route_tables]
-    vpc1_route_table_ids.should.contain(route_table1.id)
-    vpc1_route_table_ids.should_not.contain(route_table2.id)
-
-    # Filter by VPC and main route table
-    vpc2_main_route_tables = conn.get_all_route_tables(
-        filters={"association.main": "true", "vpc-id": vpc2.id}
-    )
-    vpc2_main_route_tables.should.have.length_of(1)
-    vpc2_main_route_table_ids = [
-        route_table.id for route_table in vpc2_main_route_tables
-    ]
-    vpc2_main_route_table_ids.should_not.contain(route_table1.id)
-    vpc2_main_route_table_ids.should_not.contain(route_table2.id)
-
-    # Unsupported filter
-    conn.get_all_route_tables.when.called_with(
-        filters={"not-implemented-filter": "foobar"}
-    ).should.throw(NotImplementedError)
-
-
-@mock_ec2
-def test_route_tables_filters_standard_boto3():
     client = boto3.client("ec2", region_name="us-east-1")
     ec2 = boto3.resource("ec2", region_name="us-east-1")
 
@@ -209,11 +93,13 @@ def test_route_tables_filters_standard_boto3():
 
     vpc2 = ec2.create_vpc(CidrBlock="10.0.0.0/16")
     route_table2 = ec2.create_route_table(VpcId=vpc2.id)
+    igw = ec2.create_internet_gateway()
+    route_table2.create_route(DestinationCidrBlock="10.0.0.4/24", GatewayId=igw.id)
 
     all_route_tables = client.describe_route_tables()["RouteTables"]
     all_ids = [rt["RouteTableId"] for rt in all_route_tables]
-    all_ids.should.contain(route_table1.id)
-    all_ids.should.contain(route_table2.id)
+    assert route_table1.id in all_ids
+    assert route_table2.id in all_ids
 
     # Filter by main route table
     main_route_tables = client.describe_route_tables(
@@ -222,19 +108,19 @@ def test_route_tables_filters_standard_boto3():
     main_route_table_ids = [
         route_table["RouteTableId"] for route_table in main_route_tables
     ]
-    main_route_table_ids.should_not.contain(route_table1.id)
-    main_route_table_ids.should_not.contain(route_table2.id)
+    assert route_table1.id not in main_route_table_ids
+    assert route_table2.id not in main_route_table_ids
 
     # Filter by VPC
     vpc1_route_tables = client.describe_route_tables(
         Filters=[{"Name": "vpc-id", "Values": [vpc1.id]}]
     )["RouteTables"]
-    vpc1_route_tables.should.have.length_of(2)
+    assert len(vpc1_route_tables) == 2
     vpc1_route_table_ids = [
         route_table["RouteTableId"] for route_table in vpc1_route_tables
     ]
-    vpc1_route_table_ids.should.contain(route_table1.id)
-    vpc1_route_table_ids.should_not.contain(route_table2.id)
+    assert route_table1.id in vpc1_route_table_ids
+    assert route_table2.id not in vpc1_route_table_ids
 
     # Filter by VPC and main route table
     vpc2_main_route_tables = client.describe_route_tables(
@@ -243,68 +129,46 @@ def test_route_tables_filters_standard_boto3():
             {"Name": "vpc-id", "Values": [vpc2.id]},
         ]
     )["RouteTables"]
-    vpc2_main_route_tables.should.have.length_of(1)
+    assert len(vpc2_main_route_tables) == 1
     vpc2_main_route_table_ids = [
         route_table["RouteTableId"] for route_table in vpc2_main_route_tables
     ]
-    vpc2_main_route_table_ids.should_not.contain(route_table1.id)
-    vpc2_main_route_table_ids.should_not.contain(route_table2.id)
+    assert route_table1.id not in vpc2_main_route_table_ids
+    assert route_table2.id not in vpc2_main_route_table_ids
+
+    # Filter by route gateway id
+    resp = client.describe_route_tables(
+        Filters=[
+            {"Name": "route.gateway-id", "Values": [igw.id]},
+        ]
+    )["RouteTables"]
+    assert any(
+        route["GatewayId"] == igw.id for table in resp for route in table["Routes"]
+    )
+
+    # Filter by route destination CIDR block
+    resp = client.describe_route_tables(
+        Filters=[
+            {"Name": "route.destination-cidr-block", "Values": ["10.0.0.4/24"]},
+        ]
+    )["RouteTables"]
+    assert any(route_table["RouteTableId"] == route_table2.id for route_table in resp)
+    assert any(
+        route["DestinationCidrBlock"] == "10.0.0.4/24"
+        for table in resp
+        for route in table["Routes"]
+    )
 
     # Unsupported filter
     if not settings.TEST_SERVER_MODE:
         # ServerMode will just throw a generic 500
         filters = [{"Name": "not-implemented-filter", "Values": ["foobar"]}]
-        client.describe_route_tables.when.called_with(Filters=filters).should.throw(
-            NotImplementedError
-        )
+        with pytest.raises(NotImplementedError):
+            client.describe_route_tables(Filters=filters)
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_route_tables_filters_associations():
-    conn = boto.connect_vpc("the_key", "the_secret")
-
-    vpc = conn.create_vpc("10.0.0.0/16")
-    subnet1 = conn.create_subnet(vpc.id, "10.0.0.0/24")
-    subnet2 = conn.create_subnet(vpc.id, "10.0.1.0/24")
-    subnet3 = conn.create_subnet(vpc.id, "10.0.2.0/24")
-    route_table1 = conn.create_route_table(vpc.id)
-    route_table2 = conn.create_route_table(vpc.id)
-
-    association_id1 = conn.associate_route_table(route_table1.id, subnet1.id)
-    conn.associate_route_table(route_table1.id, subnet2.id)
-    conn.associate_route_table(route_table2.id, subnet3.id)
-
-    all_route_tables = conn.get_all_route_tables()
-    all_route_tables.should.have.length_of(4)
-
-    # Filter by association ID
-    association1_route_tables = conn.get_all_route_tables(
-        filters={"association.route-table-association-id": association_id1}
-    )
-    association1_route_tables.should.have.length_of(1)
-    association1_route_tables[0].id.should.equal(route_table1.id)
-    association1_route_tables[0].associations.should.have.length_of(2)
-
-    # Filter by route table ID
-    route_table2_route_tables = conn.get_all_route_tables(
-        filters={"association.route-table-id": route_table2.id}
-    )
-    route_table2_route_tables.should.have.length_of(1)
-    route_table2_route_tables[0].id.should.equal(route_table2.id)
-    route_table2_route_tables[0].associations.should.have.length_of(1)
-
-    # Filter by subnet ID
-    subnet_route_tables = conn.get_all_route_tables(
-        filters={"association.subnet-id": subnet1.id}
-    )
-    subnet_route_tables.should.have.length_of(1)
-    subnet_route_tables[0].id.should.equal(route_table1.id)
-    association1_route_tables[0].associations.should.have.length_of(2)
-
-
-@mock_ec2
-def test_route_tables_filters_associations_boto3():
     client = boto3.client("ec2", region_name="us-east-1")
     ec2 = boto3.resource("ec2", region_name="us-east-1")
 
@@ -330,708 +194,29 @@ def test_route_tables_filters_associations_boto3():
             }
         ]
     )["RouteTables"]
-    association1_route_tables.should.have.length_of(1)
-    association1_route_tables[0]["RouteTableId"].should.equal(route_table1.id)
-    association1_route_tables[0]["Associations"].should.have.length_of(2)
+    assert len(association1_route_tables) == 1
+    assert association1_route_tables[0]["RouteTableId"] == route_table1.id
+    assert len(association1_route_tables[0]["Associations"]) == 2
 
     # Filter by route table ID
     route_table2_route_tables = client.describe_route_tables(
         Filters=[{"Name": "association.route-table-id", "Values": [route_table2.id]}]
     )["RouteTables"]
-    route_table2_route_tables.should.have.length_of(1)
-    route_table2_route_tables[0]["RouteTableId"].should.equal(route_table2.id)
-    route_table2_route_tables[0]["Associations"].should.have.length_of(1)
+    assert len(route_table2_route_tables) == 1
+    assert route_table2_route_tables[0]["RouteTableId"] == route_table2.id
+    assert len(route_table2_route_tables[0]["Associations"]) == 1
 
     # Filter by subnet ID
     subnet_route_tables = client.describe_route_tables(
         Filters=[{"Name": "association.subnet-id", "Values": [subnet1.id]}]
     )["RouteTables"]
-    subnet_route_tables.should.have.length_of(1)
-    subnet_route_tables[0]["RouteTableId"].should.equal(route_table1.id)
-    subnet_route_tables[0]["Associations"].should.have.length_of(2)
+    assert len(subnet_route_tables) == 1
+    assert subnet_route_tables[0]["RouteTableId"] == route_table1.id
+    assert len(subnet_route_tables[0]["Associations"]) == 2
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
-def test_route_table_associations():
-    conn = boto.connect_vpc("the_key", "the_secret")
-    vpc = conn.create_vpc("10.0.0.0/16")
-    subnet = conn.create_subnet(vpc.id, "10.0.0.0/18")
-    route_table = conn.create_route_table(vpc.id)
-
-    all_route_tables = conn.get_all_route_tables()
-    all_route_tables.should.have.length_of(3)
-
-    # Refresh
-    route_table = conn.get_all_route_tables(route_table.id)[0]
-    route_table.associations.should.have.length_of(0)
-
-    # Associate
-    association_id = conn.associate_route_table(route_table.id, subnet.id)
-
-    # Refresh
-    route_table = conn.get_all_route_tables(route_table.id)[0]
-    route_table.associations.should.have.length_of(1)
-
-    route_table.associations[0].id.should.equal(association_id)
-    route_table.associations[0].main.should.equal(True)
-    route_table.associations[0].route_table_id.should.equal(route_table.id)
-    route_table.associations[0].subnet_id.should.equal(subnet.id)
-
-    # Associate is idempotent
-    association_id_idempotent = conn.associate_route_table(route_table.id, subnet.id)
-    association_id_idempotent.should.equal(association_id)
-
-    # Error: Attempt delete associated route table.
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.delete_route_table(route_table.id)
-    cm.value.code.should.equal("DependencyViolation")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-    # Disassociate
-    conn.disassociate_route_table(association_id)
-
-    # Refresh
-    route_table = conn.get_all_route_tables(route_table.id)[0]
-    route_table.associations.should.have.length_of(0)
-
-    # Error: Disassociate with invalid association ID
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.disassociate_route_table(association_id)
-    cm.value.code.should.equal("InvalidAssociationID.NotFound")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-    # Error: Associate with invalid subnet ID
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.associate_route_table(route_table.id, "subnet-1234abcd")
-    cm.value.code.should.equal("InvalidSubnetID.NotFound")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-    # Error: Associate with invalid route table ID
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.associate_route_table("rtb-1234abcd", subnet.id)
-    cm.value.code.should.equal("InvalidRouteTableID.NotFound")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-
-@mock_ec2
-def test_route_table_associations_boto3():
-    client = boto3.client("ec2", region_name="us-east-1")
-    ec2 = boto3.resource("ec2", region_name="us-east-1")
-
-    vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
-    subnet = ec2.create_subnet(VpcId=vpc.id, CidrBlock="10.0.0.0/18")
-    route_table = ec2.create_route_table(VpcId=vpc.id)
-
-    # Refresh
-    r = client.describe_route_tables(RouteTableIds=[route_table.id])["RouteTables"][0]
-    r["Associations"].should.have.length_of(0)
-
-    # Associate
-    association_id = client.associate_route_table(
-        RouteTableId=route_table.id, SubnetId=subnet.id
-    )["AssociationId"]
-
-    # Refresh
-    r = client.describe_route_tables(RouteTableIds=[route_table.id])["RouteTables"][0]
-    r["Associations"].should.have.length_of(1)
-
-    r["Associations"][0]["RouteTableAssociationId"].should.equal(association_id)
-    r["Associations"][0]["Main"].should.equal(True)
-    r["Associations"][0]["RouteTableId"].should.equal(route_table.id)
-    r["Associations"][0]["SubnetId"].should.equal(subnet.id)
-
-    # Associate is idempotent
-    association_id_idempotent = client.associate_route_table(
-        RouteTableId=route_table.id, SubnetId=subnet.id
-    )["AssociationId"]
-    association_id_idempotent.should.equal(association_id)
-
-    # Error: Attempt delete associated route table.
-    with pytest.raises(ClientError) as ex:
-        client.delete_route_table(RouteTableId=route_table.id)
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("DependencyViolation")
-
-    # Disassociate
-    client.disassociate_route_table(AssociationId=association_id)
-
-    # Refresh
-    r = client.describe_route_tables(RouteTableIds=[route_table.id])["RouteTables"][0]
-    r["Associations"].should.have.length_of(0)
-
-    # Error: Disassociate with invalid association ID
-    with pytest.raises(ClientError) as ex:
-        client.disassociate_route_table(AssociationId=association_id)
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidAssociationID.NotFound")
-
-    # Error: Associate with invalid subnet ID
-    with pytest.raises(ClientError) as ex:
-        client.associate_route_table(
-            RouteTableId=route_table.id, SubnetId="subnet-1234abcd"
-        )
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidSubnetID.NotFound")
-
-    # Error: Associate with invalid route table ID
-    with pytest.raises(ClientError) as ex:
-        client.associate_route_table(RouteTableId="rtb-1234abcd", SubnetId=subnet.id)
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidRouteTableID.NotFound")
-
-
-# Has boto3 equivalent
-@requires_boto_gte("2.16.0")
-@mock_ec2_deprecated
-def test_route_table_replace_route_table_association():
-    """
-    Note: Boto has deprecated replace_route_table_association (which returns status)
-      and now uses replace_route_table_association_with_assoc (which returns association ID).
-    """
-    conn = boto.connect_vpc("the_key", "the_secret")
-    vpc = conn.create_vpc("10.0.0.0/16")
-    subnet = conn.create_subnet(vpc.id, "10.0.0.0/18")
-    route_table1 = conn.create_route_table(vpc.id)
-    route_table2 = conn.create_route_table(vpc.id)
-
-    all_route_tables = conn.get_all_route_tables()
-    all_route_tables.should.have.length_of(4)
-
-    # Refresh
-    route_table1 = conn.get_all_route_tables(route_table1.id)[0]
-    route_table1.associations.should.have.length_of(0)
-
-    # Associate
-    association_id1 = conn.associate_route_table(route_table1.id, subnet.id)
-
-    # Refresh
-    route_table1 = conn.get_all_route_tables(route_table1.id)[0]
-    route_table2 = conn.get_all_route_tables(route_table2.id)[0]
-
-    # Validate
-    route_table1.associations.should.have.length_of(1)
-    route_table2.associations.should.have.length_of(0)
-
-    route_table1.associations[0].id.should.equal(association_id1)
-    route_table1.associations[0].main.should.equal(True)
-    route_table1.associations[0].route_table_id.should.equal(route_table1.id)
-    route_table1.associations[0].subnet_id.should.equal(subnet.id)
-
-    # Replace Association
-    association_id2 = conn.replace_route_table_association_with_assoc(
-        association_id1, route_table2.id
-    )
-
-    # Refresh
-    route_table1 = conn.get_all_route_tables(route_table1.id)[0]
-    route_table2 = conn.get_all_route_tables(route_table2.id)[0]
-
-    # Validate
-    route_table1.associations.should.have.length_of(0)
-    route_table2.associations.should.have.length_of(1)
-
-    route_table2.associations[0].id.should.equal(association_id2)
-    route_table2.associations[0].main.should.equal(True)
-    route_table2.associations[0].route_table_id.should.equal(route_table2.id)
-    route_table2.associations[0].subnet_id.should.equal(subnet.id)
-
-    # Replace Association is idempotent
-    association_id_idempotent = conn.replace_route_table_association_with_assoc(
-        association_id2, route_table2.id
-    )
-    association_id_idempotent.should.equal(association_id2)
-
-    # Error: Replace association with invalid association ID
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.replace_route_table_association_with_assoc(
-            "rtbassoc-1234abcd", route_table1.id
-        )
-    cm.value.code.should.equal("InvalidAssociationID.NotFound")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-    # Error: Replace association with invalid route table ID
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.replace_route_table_association_with_assoc(association_id2, "rtb-1234abcd")
-    cm.value.code.should.equal("InvalidRouteTableID.NotFound")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-
-@mock_ec2
-def test_route_table_replace_route_table_association_boto3():
-    client = boto3.client("ec2", region_name="us-east-1")
-    ec2 = boto3.resource("ec2", region_name="us-east-1")
-
-    vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
-    subnet = ec2.create_subnet(VpcId=vpc.id, CidrBlock="10.0.0.0/18")
-    route_table1_id = ec2.create_route_table(VpcId=vpc.id).id
-    route_table2_id = ec2.create_route_table(VpcId=vpc.id).id
-
-    all_route_tables = client.describe_route_tables()["RouteTables"]
-    all_ids = [rt["RouteTableId"] for rt in all_route_tables]
-    all_ids.should.contain(route_table1_id)
-    all_ids.should.contain(route_table2_id)
-
-    # Refresh
-    route_table1 = client.describe_route_tables(RouteTableIds=[route_table1_id])[
-        "RouteTables"
-    ][0]
-    route_table1["Associations"].should.have.length_of(0)
-
-    # Associate
-    association_id1 = client.associate_route_table(
-        RouteTableId=route_table1_id, SubnetId=subnet.id
-    )["AssociationId"]
-
-    # Refresh
-    route_table1 = client.describe_route_tables(RouteTableIds=[route_table1_id])[
-        "RouteTables"
-    ][0]
-    route_table2 = client.describe_route_tables(RouteTableIds=[route_table2_id])[
-        "RouteTables"
-    ][0]
-
-    # Validate
-    route_table1["Associations"].should.have.length_of(1)
-    route_table2["Associations"].should.have.length_of(0)
-
-    route_table1["Associations"][0]["RouteTableAssociationId"].should.equal(
-        association_id1
-    )
-    route_table1["Associations"][0]["Main"].should.equal(True)
-    route_table1["Associations"][0]["RouteTableId"].should.equal(route_table1_id)
-    route_table1["Associations"][0]["SubnetId"].should.equal(subnet.id)
-
-    # Replace Association
-    association_id2 = client.replace_route_table_association(
-        AssociationId=association_id1, RouteTableId=route_table2_id
-    )["NewAssociationId"]
-
-    # Refresh
-    route_table1 = client.describe_route_tables(RouteTableIds=[route_table1_id])[
-        "RouteTables"
-    ][0]
-    route_table2 = client.describe_route_tables(RouteTableIds=[route_table2_id])[
-        "RouteTables"
-    ][0]
-
-    # Validate
-    route_table1["Associations"].should.have.length_of(0)
-    route_table2["Associations"].should.have.length_of(1)
-
-    route_table2["Associations"][0]["RouteTableAssociationId"].should.equal(
-        association_id2
-    )
-    route_table2["Associations"][0]["Main"].should.equal(True)
-    route_table2["Associations"][0]["RouteTableId"].should.equal(route_table2_id)
-    route_table2["Associations"][0]["SubnetId"].should.equal(subnet.id)
-
-    # Replace Association is idempotent
-    association_id_idempotent = client.replace_route_table_association(
-        AssociationId=association_id2, RouteTableId=route_table2_id
-    )["NewAssociationId"]
-    association_id_idempotent.should.equal(association_id2)
-
-    # Error: Replace association with invalid association ID
-    with pytest.raises(ClientError) as ex:
-        client.replace_route_table_association(
-            AssociationId="rtbassoc-1234abcd", RouteTableId=route_table1_id
-        )
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidAssociationID.NotFound")
-
-    # Error: Replace association with invalid route table ID
-    with pytest.raises(ClientError) as ex:
-        client.replace_route_table_association(
-            AssociationId=association_id2, RouteTableId="rtb-1234abcd"
-        )
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidRouteTableID.NotFound")
-
-
-# Has boto3 equivalent
-@mock_ec2_deprecated
-def test_route_table_get_by_tag():
-    conn = boto.connect_vpc("the_key", "the_secret")
-
-    vpc = conn.create_vpc("10.0.0.0/16")
-
-    route_table = conn.create_route_table(vpc.id)
-    route_table.add_tag("Name", "TestRouteTable")
-
-    route_tables = conn.get_all_route_tables(filters={"tag:Name": "TestRouteTable"})
-
-    route_tables.should.have.length_of(1)
-    route_tables[0].vpc_id.should.equal(vpc.id)
-    route_tables[0].id.should.equal(route_table.id)
-    route_tables[0].tags.should.have.length_of(1)
-    route_tables[0].tags["Name"].should.equal("TestRouteTable")
-
-
-@mock_ec2
-def test_route_table_get_by_tag_boto3():
-    ec2 = boto3.resource("ec2", region_name="eu-central-1")
-
-    vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
-
-    route_table = ec2.create_route_table(VpcId=vpc.id)
-    tag_value = str(uuid4())
-    route_table.create_tags(Tags=[{"Key": "Name", "Value": tag_value}])
-
-    filters = [{"Name": "tag:Name", "Values": [tag_value]}]
-    route_tables = list(ec2.route_tables.filter(Filters=filters))
-
-    route_tables.should.have.length_of(1)
-    route_tables[0].vpc_id.should.equal(vpc.id)
-    route_tables[0].id.should.equal(route_table.id)
-    route_tables[0].tags.should.have.length_of(1)
-    route_tables[0].tags[0].should.equal({"Key": "Name", "Value": tag_value})
-
-
-# Has boto3 equivalent
-@mock_ec2_deprecated
-def test_routes_additional():
-    conn = boto.connect_vpc("the_key", "the_secret")
-    vpc = conn.create_vpc("10.0.0.0/16")
-    main_route_table = conn.get_all_route_tables(filters={"vpc-id": vpc.id})[0]
-
-    igw = conn.create_internet_gateway()
-    ROUTE_CIDR = "10.0.0.4/24"
-
-    conn.create_route(main_route_table.id, ROUTE_CIDR, gateway_id=igw.id)
-
-    main_route_table = conn.get_all_route_tables(filters={"vpc-id": vpc.id})[
-        0
-    ]  # Refresh route table
-
-    main_route_table.routes.should.have.length_of(2)
-    new_routes = [
-        route
-        for route in main_route_table.routes
-        if route.destination_cidr_block != vpc.cidr_block
-    ]
-    new_routes.should.have.length_of(1)
-
-    new_route = new_routes[0]
-    new_route.gateway_id.should.equal(igw.id)
-    new_route.instance_id.should.be.none
-    new_route.state.should.equal("active")
-    new_route.destination_cidr_block.should.equal(ROUTE_CIDR)
-
-    conn.delete_route(main_route_table.id, ROUTE_CIDR)
-
-    main_route_table = conn.get_all_route_tables(filters={"vpc-id": vpc.id})[
-        0
-    ]  # Refresh route table
-
-    main_route_table.routes.should.have.length_of(1)
-    new_routes = [
-        route
-        for route in main_route_table.routes
-        if route.destination_cidr_block != vpc.cidr_block
-    ]
-    new_routes.should.have.length_of(0)
-
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.delete_route(main_route_table.id, ROUTE_CIDR)
-    cm.value.code.should.equal("InvalidRoute.NotFound")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-
-@mock_ec2
-def test_routes_additional_boto3():
-    client = boto3.client("ec2", region_name="us-east-1")
-    ec2 = boto3.resource("ec2", region_name="us-east-1")
-    vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
-    main_route_table_id = client.describe_route_tables(
-        Filters=[{"Name": "vpc-id", "Values": [vpc.id]}]
-    )["RouteTables"][0]["RouteTableId"]
-    main_route_table = ec2.RouteTable(main_route_table_id)
-
-    main_route_table.routes.should.have.length_of(1)
-    igw = ec2.create_internet_gateway()
-    ROUTE_CIDR = "10.0.0.4/24"
-
-    main_route_table.create_route(DestinationCidrBlock=ROUTE_CIDR, GatewayId=igw.id)
-
-    main_route_table.routes.should.have.length_of(2)
-    new_routes = [
-        route
-        for route in main_route_table.routes
-        if route.destination_cidr_block != vpc.cidr_block
-    ]
-    new_routes.should.have.length_of(1)
-
-    new_route = new_routes[0]
-    new_route.gateway_id.should.equal(igw.id)
-    new_route.instance_id.should.be.none
-    new_route.state.should.equal("active")
-    new_route.destination_cidr_block.should.equal(ROUTE_CIDR)
-
-    client.delete_route(
-        RouteTableId=main_route_table.id, DestinationCidrBlock=ROUTE_CIDR
-    )
-
-    main_route_table.reload()
-
-    main_route_table.routes.should.have.length_of(1)
-    new_routes = [
-        route
-        for route in main_route_table.routes
-        if route.destination_cidr_block != vpc.cidr_block
-    ]
-    new_routes.should.have.length_of(0)
-
-    with pytest.raises(ClientError) as ex:
-        client.delete_route(
-            RouteTableId=main_route_table.id, DestinationCidrBlock=ROUTE_CIDR
-        )
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidRoute.NotFound")
-
-
-# Has boto3 equivalent
-@mock_ec2_deprecated
-def test_routes_replace():
-    conn = boto.connect_vpc("the_key", "the_secret")
-    vpc = conn.create_vpc("10.0.0.0/16")
-    main_route_table = conn.get_all_route_tables(
-        filters={"association.main": "true", "vpc-id": vpc.id}
-    )[0]
-
-    ROUTE_CIDR = "10.0.0.4/24"
-
-    # Various route targets
-    igw = conn.create_internet_gateway()
-
-    reservation = conn.run_instances(EXAMPLE_AMI_ID)
-    instance = reservation.instances[0]
-
-    # Create initial route
-    conn.create_route(main_route_table.id, ROUTE_CIDR, gateway_id=igw.id)
-
-    # Replace...
-    def get_target_route():
-        route_table = conn.get_all_route_tables(main_route_table.id)[0]
-        routes = [
-            route
-            for route in route_table.routes
-            if route.destination_cidr_block != vpc.cidr_block
-        ]
-        routes.should.have.length_of(1)
-        return routes[0]
-
-    conn.replace_route(main_route_table.id, ROUTE_CIDR, instance_id=instance.id)
-
-    target_route = get_target_route()
-    target_route.gateway_id.should.be.none
-    target_route.instance_id.should.equal(instance.id)
-    target_route.state.should.equal("active")
-    target_route.destination_cidr_block.should.equal(ROUTE_CIDR)
-
-    conn.replace_route(main_route_table.id, ROUTE_CIDR, gateway_id=igw.id)
-
-    target_route = get_target_route()
-    target_route.gateway_id.should.equal(igw.id)
-    target_route.instance_id.should.be.none
-    target_route.state.should.equal("active")
-    target_route.destination_cidr_block.should.equal(ROUTE_CIDR)
-
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.replace_route("rtb-1234abcd", ROUTE_CIDR, gateway_id=igw.id)
-    cm.value.code.should.equal("InvalidRouteTableID.NotFound")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-
-@mock_ec2
-def test_routes_replace_boto3():
-    client = boto3.client("ec2", region_name="us-east-1")
-    ec2 = boto3.resource("ec2", region_name="us-east-1")
-    vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
-
-    main_route_table_id = client.describe_route_tables(
-        Filters=[
-            {"Name": "vpc-id", "Values": [vpc.id]},
-            {"Name": "association.main", "Values": ["true"]},
-        ]
-    )["RouteTables"][0]["RouteTableId"]
-    main_route_table = ec2.RouteTable(main_route_table_id)
-    ROUTE_CIDR = "10.0.0.4/24"
-
-    # Various route targets
-    igw = ec2.create_internet_gateway()
-
-    instance = ec2.create_instances(ImageId=EXAMPLE_AMI_ID, MinCount=1, MaxCount=1)[0]
-
-    # Create initial route
-    main_route_table.create_route(DestinationCidrBlock=ROUTE_CIDR, GatewayId=igw.id)
-
-    # Replace...
-    def get_target_route():
-        route_table = client.describe_route_tables(RouteTableIds=[main_route_table.id])[
-            "RouteTables"
-        ][0]
-        routes = [
-            route
-            for route in route_table["Routes"]
-            if route["DestinationCidrBlock"] != vpc.cidr_block
-        ]
-        routes.should.have.length_of(1)
-        return routes[0]
-
-    client.replace_route(
-        RouteTableId=main_route_table.id,
-        DestinationCidrBlock=ROUTE_CIDR,
-        InstanceId=instance.id,
-    )
-
-    target_route = get_target_route()
-    target_route.shouldnt.have.key("GatewayId")
-    target_route["InstanceId"].should.equal(instance.id)
-    target_route["State"].should.equal("active")
-    target_route["DestinationCidrBlock"].should.equal(ROUTE_CIDR)
-
-    client.replace_route(
-        RouteTableId=main_route_table.id,
-        DestinationCidrBlock=ROUTE_CIDR,
-        GatewayId=igw.id,
-    )
-
-    target_route = get_target_route()
-    target_route["GatewayId"].should.equal(igw.id)
-    target_route.shouldnt.have.key("InstanceId")
-    target_route["State"].should.equal("active")
-    target_route["DestinationCidrBlock"].should.equal(ROUTE_CIDR)
-
-    with pytest.raises(ClientError) as ex:
-        client.replace_route(
-            RouteTableId="rtb-1234abcd",
-            DestinationCidrBlock=ROUTE_CIDR,
-            GatewayId=igw.id,
-        )
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidRouteTableID.NotFound")
-
-
-# Has boto3 equivalent
-@requires_boto_gte("2.19.0")
-@mock_ec2_deprecated
-def test_routes_not_supported():
-    conn = boto.connect_vpc("the_key", "the_secret")
-    conn.create_vpc("10.0.0.0/16")
-    main_route_table = conn.get_all_route_tables()[0]
-
-    conn.create_internet_gateway()
-    ROUTE_CIDR = "10.0.0.4/24"
-
-    # Create
-    conn.create_route.when.called_with(
-        main_route_table.id, ROUTE_CIDR, interface_id="eni-1234abcd"
-    ).should.throw("InvalidNetworkInterfaceID.NotFound")
-
-    # Replace
-    igw = conn.create_internet_gateway()
-    conn.create_route(main_route_table.id, ROUTE_CIDR, gateway_id=igw.id)
-    conn.replace_route.when.called_with(
-        main_route_table.id, ROUTE_CIDR, interface_id="eni-1234abcd"
-    ).should.throw(NotImplementedError)
-
-
-@mock_ec2
-def test_routes_not_supported_boto3():
-    client = boto3.client("ec2", region_name="us-east-1")
-    ec2 = boto3.resource("ec2", region_name="us-east-1")
-    main_route_table_id = client.describe_route_tables()["RouteTables"][0][
-        "RouteTableId"
-    ]
-    main_route_table = ec2.RouteTable(main_route_table_id)
-
-    ROUTE_CIDR = "10.0.0.4/24"
-
-    # Create
-    with pytest.raises(ClientError) as ex:
-        client.create_route(
-            RouteTableId=main_route_table_id,
-            DestinationCidrBlock=ROUTE_CIDR,
-            NetworkInterfaceId="eni-1234abcd",
-        )
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal(
-        "InvalidNetworkInterfaceID.NotFound"
-    )
-
-    igw = ec2.create_internet_gateway()
-    client.create_route(
-        RouteTableId=main_route_table_id,
-        DestinationCidrBlock=ROUTE_CIDR,
-        GatewayId=igw.id,
-    )
-
-    # Replace
-    if not settings.TEST_SERVER_MODE:
-        args = {
-            "RouteTableId": main_route_table.id,
-            "DestinationCidrBlock": ROUTE_CIDR,
-            "NetworkInterfaceId": "eni-1234abcd",
-        }
-        client.replace_route.when.called_with(**args).should.throw(NotImplementedError)
-
-
-# Has boto3 equivalent
-@requires_boto_gte("2.34.0")
-@mock_ec2_deprecated
-def test_routes_vpc_peering_connection():
-    conn = boto.connect_vpc("the_key", "the_secret")
-    vpc = conn.create_vpc("10.0.0.0/16")
-    main_route_table = conn.get_all_route_tables(
-        filters={"association.main": "true", "vpc-id": vpc.id}
-    )[0]
-
-    ROUTE_CIDR = "10.0.0.4/24"
-
-    peer_vpc = conn.create_vpc("11.0.0.0/16")
-    vpc_pcx = conn.create_vpc_peering_connection(vpc.id, peer_vpc.id)
-
-    conn.create_route(
-        main_route_table.id, ROUTE_CIDR, vpc_peering_connection_id=vpc_pcx.id
-    )
-
-    # Refresh route table
-    main_route_table = conn.get_all_route_tables(main_route_table.id)[0]
-    new_routes = [
-        route
-        for route in main_route_table.routes
-        if route.destination_cidr_block != vpc.cidr_block
-    ]
-    new_routes.should.have.length_of(1)
-
-    new_route = new_routes[0]
-    new_route.gateway_id.should.be.none
-    new_route.instance_id.should.be.none
-    new_route.vpc_peering_connection_id.should.equal(vpc_pcx.id)
-    new_route.state.should.equal("active")
-    new_route.destination_cidr_block.should.equal(ROUTE_CIDR)
-
-
-@mock_ec2
-def test_routes_vpc_peering_connection_boto3():
+@mock_aws
+def test_route_tables_filters_vpc_peering_connection():
     client = boto3.client("ec2", region_name="us-east-1")
     ec2 = boto3.resource("ec2", region_name="us-east-1")
     vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
@@ -1058,48 +243,598 @@ def test_routes_vpc_peering_connection_boto3():
         for route in main_route_table.routes
         if route.destination_cidr_block != vpc.cidr_block
     ]
-    new_routes.should.have.length_of(1)
+    assert len(new_routes) == 1
 
     new_route = new_routes[0]
-    new_route.gateway_id.should.be.none
-    new_route.instance_id.should.be.none
-    new_route.vpc_peering_connection_id.should.equal(vpc_pcx.id)
-    new_route.state.should.equal("active")
-    new_route.destination_cidr_block.should.equal(ROUTE_CIDR)
+    assert new_route.gateway_id is None
+    assert new_route.instance_id is None
+    assert new_route.vpc_peering_connection_id == vpc_pcx.id
+    assert new_route.state == "active"
+    assert new_route.destination_cidr_block == ROUTE_CIDR
+
+    # Filter by Peering Connection
+    route_tables = client.describe_route_tables(
+        Filters=[{"Name": "route.vpc-peering-connection-id", "Values": [vpc_pcx.id]}]
+    )["RouteTables"]
+    assert len(route_tables) == 1
+    route_table = route_tables[0]
+    assert route_table["RouteTableId"] == main_route_table_id
+    vpc_pcx_ids = [
+        route["VpcPeeringConnectionId"]
+        for route in route_table["Routes"]
+        if "VpcPeeringConnectionId" in route
+    ]
+    all(vpc_pcx_id == vpc_pcx.id for vpc_pcx_id in vpc_pcx_ids)
 
 
-# Has boto3 equivalent
-@requires_boto_gte("2.34.0")
-@mock_ec2_deprecated
-def test_routes_vpn_gateway():
+@mock_aws
+def test_route_tables_filters_transit_gateway():
+    client = boto3.client("ec2", region_name="us-east-1")
+    ec2 = boto3.resource("ec2", region_name="us-east-1")
+    vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
+    main_route_table_id = client.describe_route_tables(
+        Filters=[{"Name": "vpc-id", "Values": [vpc.id]}]
+    )["RouteTables"][0]["RouteTableId"]
+    main_route_table = ec2.RouteTable(main_route_table_id)
 
-    conn = boto.connect_vpc("the_key", "the_secret")
-    vpc = conn.create_vpc("10.0.0.0/16")
-    main_route_table = conn.get_all_route_tables(
-        filters={"association.main": "true", "vpc-id": vpc.id}
-    )[0]
+    response = client.create_transit_gateway()
+
+    gateway = response["TransitGateway"]
+    main_route_table.create_route(TransitGatewayId=gateway["TransitGatewayId"])
+    route_tables = client.describe_route_tables(
+        Filters=[
+            {
+                "Name": "route.transit-gateway-id",
+                "Values": [gateway["TransitGatewayId"]],
+            }
+        ]
+    )["RouteTables"]
+
+    assert len(route_tables) == 1
+    route_table = route_tables[0]
+    assert route_table["RouteTableId"] == main_route_table_id
+
+    # Filter using regex
+    route_tables = client.describe_route_tables(
+        Filters=[
+            {
+                "Name": "route.transit-gateway-id",
+                "Values": ["tgw-*"],
+            }
+        ]
+    )["RouteTables"]
+
+    assert len(route_tables) == 1
+    route_table = route_tables[0]
+    assert route_table["RouteTableId"] == main_route_table_id
+
+
+@mock_aws
+def test_route_table_associations():
+    client = boto3.client("ec2", region_name="us-east-1")
+    ec2 = boto3.resource("ec2", region_name="us-east-1")
+
+    vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
+    subnet = ec2.create_subnet(VpcId=vpc.id, CidrBlock="10.0.0.0/18")
+    route_table = ec2.create_route_table(VpcId=vpc.id)
+
+    # Refresh
+    r = client.describe_route_tables(RouteTableIds=[route_table.id])["RouteTables"][0]
+    assert len(r["Associations"]) == 0
+
+    # Associate
+    association_id = client.associate_route_table(
+        RouteTableId=route_table.id, SubnetId=subnet.id
+    )["AssociationId"]
+
+    # Refresh
+    r = client.describe_route_tables(RouteTableIds=[route_table.id])["RouteTables"][0]
+    assert len(r["Associations"]) == 1
+
+    assert r["Associations"][0]["RouteTableAssociationId"] == association_id
+    assert r["Associations"][0]["Main"] is False
+    assert r["Associations"][0]["RouteTableId"] == route_table.id
+    assert r["Associations"][0]["SubnetId"] == subnet.id
+
+    # Associate is idempotent
+    association_id_idempotent = client.associate_route_table(
+        RouteTableId=route_table.id, SubnetId=subnet.id
+    )["AssociationId"]
+    assert association_id_idempotent == association_id
+
+    # Error: Attempt delete associated route table.
+    with pytest.raises(ClientError) as ex:
+        client.delete_route_table(RouteTableId=route_table.id)
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "DependencyViolation"
+
+    # Disassociate
+    client.disassociate_route_table(AssociationId=association_id)
+
+    # Validate
+    r = client.describe_route_tables(RouteTableIds=[route_table.id])["RouteTables"][0]
+    assert len(r["Associations"]) == 0
+
+    # Error: Disassociate with invalid association ID
+    with pytest.raises(ClientError) as ex:
+        client.disassociate_route_table(AssociationId=association_id)
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidAssociationID.NotFound"
+
+    # Error: Associate with invalid subnet ID
+    with pytest.raises(ClientError) as ex:
+        client.associate_route_table(
+            RouteTableId=route_table.id, SubnetId="subnet-1234abcd"
+        )
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidSubnetID.NotFound"
+
+    # Error: Associate with invalid route table ID
+    with pytest.raises(ClientError) as ex:
+        client.associate_route_table(RouteTableId="rtb-1234abcd", SubnetId=subnet.id)
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidRouteTableID.NotFound"
+
+
+@mock_aws
+def test_route_table_replace_route_table_association():
+    client = boto3.client("ec2", region_name="us-east-1")
+    ec2 = boto3.resource("ec2", region_name="us-east-1")
+
+    vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
+    subnet = ec2.create_subnet(VpcId=vpc.id, CidrBlock="10.0.0.0/18")
+    route_table1_id = ec2.create_route_table(VpcId=vpc.id).id
+    route_table2_id = ec2.create_route_table(VpcId=vpc.id).id
+
+    all_route_tables = client.describe_route_tables()["RouteTables"]
+    all_ids = [rt["RouteTableId"] for rt in all_route_tables]
+    assert route_table1_id in all_ids
+    assert route_table2_id in all_ids
+
+    # Refresh
+    route_table1 = client.describe_route_tables(RouteTableIds=[route_table1_id])[
+        "RouteTables"
+    ][0]
+    assert len(route_table1["Associations"]) == 0
+
+    # Associate
+    association_id1 = client.associate_route_table(
+        RouteTableId=route_table1_id, SubnetId=subnet.id
+    )["AssociationId"]
+
+    # Refresh
+    route_table1 = client.describe_route_tables(RouteTableIds=[route_table1_id])[
+        "RouteTables"
+    ][0]
+    route_table2 = client.describe_route_tables(RouteTableIds=[route_table2_id])[
+        "RouteTables"
+    ][0]
+
+    # Validate
+    assert len(route_table1["Associations"]) == 1
+    assert len(route_table2["Associations"]) == 0
+
+    assert route_table1["Associations"][0]["RouteTableAssociationId"] == association_id1
+    assert route_table1["Associations"][0]["Main"] is False
+    assert route_table1["Associations"][0]["RouteTableId"] == route_table1_id
+    assert route_table1["Associations"][0]["SubnetId"] == subnet.id
+
+    # Replace Association
+    association_id2 = client.replace_route_table_association(
+        AssociationId=association_id1, RouteTableId=route_table2_id
+    )["NewAssociationId"]
+
+    # Refresh
+    route_table1 = client.describe_route_tables(RouteTableIds=[route_table1_id])[
+        "RouteTables"
+    ][0]
+    route_table2 = client.describe_route_tables(RouteTableIds=[route_table2_id])[
+        "RouteTables"
+    ][0]
+
+    # Validate
+    assert len(route_table1["Associations"]) == 0
+    assert len(route_table2["Associations"]) == 1
+
+    assert route_table2["Associations"][0]["RouteTableAssociationId"] == association_id2
+    assert route_table2["Associations"][0]["Main"] is False
+    assert route_table2["Associations"][0]["RouteTableId"] == route_table2_id
+    assert route_table2["Associations"][0]["SubnetId"] == subnet.id
+
+    # Replace Association is idempotent
+    association_id_idempotent = client.replace_route_table_association(
+        AssociationId=association_id2, RouteTableId=route_table2_id
+    )["NewAssociationId"]
+    assert association_id_idempotent == association_id2
+
+    # Error: Replace association with invalid association ID
+    with pytest.raises(ClientError) as ex:
+        client.replace_route_table_association(
+            AssociationId="rtbassoc-1234abcd", RouteTableId=route_table1_id
+        )
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidAssociationID.NotFound"
+
+    # Error: Replace association with invalid route table ID
+    with pytest.raises(ClientError) as ex:
+        client.replace_route_table_association(
+            AssociationId=association_id2, RouteTableId="rtb-1234abcd"
+        )
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidRouteTableID.NotFound"
+
+
+@mock_aws
+def test_route_table_replace_route_table_association_for_main():
+    client = boto3.client("ec2", region_name="us-east-1")
+    ec2 = boto3.resource("ec2", region_name="us-east-1")
+
+    vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
+    new_route_table_id = ec2.create_route_table(VpcId=vpc.id).id
+
+    # Get main route table details
+    main_route_table = client.describe_route_tables(
+        Filters=[
+            {"Name": "vpc-id", "Values": [vpc.id]},
+            {"Name": "association.main", "Values": ["true"]},
+        ]
+    )["RouteTables"][0]
+    main_route_table_id = main_route_table["RouteTableId"]
+    main_route_table_association_id = main_route_table["Associations"][0][
+        "RouteTableAssociationId"
+    ]
+
+    # Replace Association
+    new_association = client.replace_route_table_association(
+        AssociationId=main_route_table_association_id, RouteTableId=new_route_table_id
+    )
+    new_association_id = new_association["NewAssociationId"]
+
+    # Validate the format
+    assert new_association["AssociationState"]["State"] == "associated"
+
+    # Refresh
+    main_route_table = client.describe_route_tables(
+        RouteTableIds=[main_route_table_id]
+    )["RouteTables"][0]
+    new_route_table = client.describe_route_tables(RouteTableIds=[new_route_table_id])[
+        "RouteTables"
+    ][0]
+
+    # Validate
+    assert len(main_route_table["Associations"]) == 0
+    assert len(new_route_table["Associations"]) == 1
+    assert (
+        new_route_table["Associations"][0]["RouteTableAssociationId"]
+        == new_association_id
+    )
+    assert new_route_table["Associations"][0]["Main"] is True
+
+
+@mock_aws
+def test_route_table_get_by_tag():
+    ec2 = boto3.resource("ec2", region_name="eu-central-1")
+
+    vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
+
+    route_table = ec2.create_route_table(VpcId=vpc.id)
+    tag_value = str(uuid4())
+    route_table.create_tags(Tags=[{"Key": "Name", "Value": tag_value}])
+
+    filters = [{"Name": "tag:Name", "Values": [tag_value]}]
+    route_tables = list(ec2.route_tables.filter(Filters=filters))
+
+    assert len(route_tables) == 1
+    assert route_tables[0].vpc_id == vpc.id
+    assert route_tables[0].id == route_table.id
+    assert len(route_tables[0].tags) == 1
+    assert route_tables[0].tags[0] == {"Key": "Name", "Value": tag_value}
+
+
+@mock_aws
+def test_routes_additional():
+    client = boto3.client("ec2", region_name="us-east-1")
+    ec2 = boto3.resource("ec2", region_name="us-east-1")
+    vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
+    main_route_table_id = client.describe_route_tables(
+        Filters=[{"Name": "vpc-id", "Values": [vpc.id]}]
+    )["RouteTables"][0]["RouteTableId"]
+    main_route_table = ec2.RouteTable(main_route_table_id)
+
+    assert len(main_route_table.routes) == 1
+    igw = ec2.create_internet_gateway()
     ROUTE_CIDR = "10.0.0.4/24"
 
-    vpn_gw = conn.create_vpn_gateway(type="ipsec.1")
+    main_route_table.create_route(DestinationCidrBlock=ROUTE_CIDR, GatewayId=igw.id)
 
-    conn.create_route(main_route_table.id, ROUTE_CIDR, gateway_id=vpn_gw.id)
-
-    main_route_table = conn.get_all_route_tables(main_route_table.id)[0]
+    assert len(main_route_table.routes) == 2
     new_routes = [
         route
         for route in main_route_table.routes
         if route.destination_cidr_block != vpc.cidr_block
     ]
-    new_routes.should.have.length_of(1)
+    assert len(new_routes) == 1
 
     new_route = new_routes[0]
-    new_route.gateway_id.should.equal(vpn_gw.id)
-    new_route.instance_id.should.be.none
-    new_route.vpc_peering_connection_id.should.be.none
+    assert new_route.gateway_id == igw.id
+    assert new_route.instance_id is None
+    assert new_route.state == "active"
+    assert new_route.destination_cidr_block == ROUTE_CIDR
+
+    client.delete_route(
+        RouteTableId=main_route_table.id, DestinationCidrBlock=ROUTE_CIDR
+    )
+
+    main_route_table.reload()
+
+    assert len(main_route_table.routes) == 1
+    new_routes = [
+        route
+        for route in main_route_table.routes
+        if route.destination_cidr_block != vpc.cidr_block
+    ]
+    assert len(new_routes) == 0
+
+    with pytest.raises(ClientError) as ex:
+        client.delete_route(
+            RouteTableId=main_route_table.id, DestinationCidrBlock=ROUTE_CIDR
+        )
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidRoute.NotFound"
 
 
-@mock_ec2
-def test_routes_vpn_gateway_boto3():
+@mock_aws
+def test_routes_replace():
+    client = boto3.client("ec2", region_name="us-east-1")
+    ec2 = boto3.resource("ec2", region_name="us-east-1")
+    vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
+    subnet = ec2.create_subnet(VpcId=vpc.id, CidrBlock="10.0.0.0/24")
+
+    main_route_table_id = client.describe_route_tables(
+        Filters=[
+            {"Name": "vpc-id", "Values": [vpc.id]},
+            {"Name": "association.main", "Values": ["true"]},
+        ]
+    )["RouteTables"][0]["RouteTableId"]
+    main_route_table = ec2.RouteTable(main_route_table_id)
+
+    # Various route sources
+    ROUTE_CIDR = "10.0.0.4/24"
+
+    prefix_list = client.create_managed_prefix_list(
+        PrefixListName="examplelist", MaxEntries=2, AddressFamily="?"
+    )["PrefixList"]
+
+    # Various route targets
+    igw = ec2.create_internet_gateway()
+
+    instance = ec2.create_instances(ImageId=EXAMPLE_AMI_ID, MinCount=1, MaxCount=1)[0]
+
+    eni = ec2.create_network_interface(SubnetId=subnet.id)
+
+    # Create initial route
+    main_route_table.create_route(DestinationCidrBlock=ROUTE_CIDR, GatewayId=igw.id)
+
+    # Replace...
+    def get_target_route():
+        route_table = client.describe_route_tables(RouteTableIds=[main_route_table.id])[
+            "RouteTables"
+        ][0]
+        routes = [
+            route
+            for route in route_table["Routes"]
+            if "DestinationCidrBlock" not in route
+            or route["DestinationCidrBlock"] != vpc.cidr_block
+        ]
+        assert len(routes) == 1
+        return routes[0]
+
+    client.replace_route(
+        RouteTableId=main_route_table.id,
+        DestinationCidrBlock=ROUTE_CIDR,
+        InstanceId=instance.id,
+    )
+
+    target_route = get_target_route()
+    assert "GatewayId" not in target_route
+    assert target_route["InstanceId"] == instance.id
+    assert "NetworkInterfaceId" not in target_route
+    assert target_route["State"] == "active"
+    assert target_route["DestinationCidrBlock"] == ROUTE_CIDR
+
+    client.replace_route(
+        RouteTableId=main_route_table.id,
+        DestinationCidrBlock=ROUTE_CIDR,
+        GatewayId=igw.id,
+    )
+
+    target_route = get_target_route()
+    assert target_route["GatewayId"] == igw.id
+    assert "InstanceId" not in target_route
+    assert "NetworkInterfaceId" not in target_route
+    assert target_route["State"] == "active"
+    assert target_route["DestinationCidrBlock"] == ROUTE_CIDR
+
+    client.replace_route(
+        RouteTableId=main_route_table.id,
+        DestinationCidrBlock=ROUTE_CIDR,
+        NetworkInterfaceId=eni.id,
+    )
+
+    target_route = get_target_route()
+    assert "GatewayId" not in target_route
+    assert "InstanceId" not in target_route
+    assert target_route["NetworkInterfaceId"] == eni.id
+    assert target_route["State"] == "active"
+    assert target_route["DestinationCidrBlock"] == ROUTE_CIDR
+
+    with pytest.raises(ClientError) as ex:
+        client.replace_route(
+            RouteTableId="rtb-1234abcd",
+            DestinationCidrBlock=ROUTE_CIDR,
+            GatewayId=igw.id,
+        )
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidRouteTableID.NotFound"
+
+    with pytest.raises(ClientError) as ex:
+        client.replace_route(
+            RouteTableId=main_route_table.id,
+            DestinationCidrBlock="1.1.1.1/32",
+            NetworkInterfaceId=eni.id,
+        )
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    # This should be 'InvalidRoute.NotFound' in line with the delete_route()
+    # equivalent, but for some reason AWS returns InvalidParameterValue instead.
+    assert ex.value.response["Error"]["Code"] == "InvalidParameterValue"
+
+    # Remove route
+    client.delete_route(
+        RouteTableId=main_route_table.id, DestinationCidrBlock=ROUTE_CIDR
+    )
+
+    # Create prefix list source route
+    main_route_table.create_route(
+        DestinationPrefixListId=prefix_list["PrefixListId"], GatewayId=igw.id
+    )
+
+    # Replace...
+    client.replace_route(
+        RouteTableId=main_route_table.id,
+        DestinationPrefixListId=prefix_list["PrefixListId"],
+        InstanceId=instance.id,
+    )
+
+    target_route = get_target_route()
+    assert "GatewayId" not in target_route
+    assert target_route["InstanceId"] == instance.id
+    assert "NetworkInterfaceId" not in target_route
+    assert target_route["State"] == "active"
+    assert target_route["DestinationPrefixListId"] == prefix_list["PrefixListId"]
+
+
+@mock_aws
+def test_routes_already_exist():
+    client = boto3.client("ec2", region_name="us-east-1")
+    ec2 = boto3.resource("ec2", region_name="us-east-1")
+    vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
+
+    main_route_table_id = client.describe_route_tables(
+        Filters=[
+            {"Name": "vpc-id", "Values": [vpc.id]},
+            {"Name": "association.main", "Values": ["true"]},
+        ]
+    )["RouteTables"][0]["RouteTableId"]
+    main_route_table = ec2.RouteTable(main_route_table_id)
+    ROUTE_CIDR = "10.0.0.0/23"
+    ROUTE_SUB_CIDR = "10.0.0.0/24"
+    ROUTE_NO_CONFLICT_CIDR = "10.0.2.0/24"
+
+    # Various route targets
+    igw = ec2.create_internet_gateway()
+
+    # Create initial route
+    main_route_table.create_route(DestinationCidrBlock=ROUTE_CIDR, GatewayId=igw.id)
+    main_route_table.create_route(
+        DestinationCidrBlock=ROUTE_NO_CONFLICT_CIDR, GatewayId=igw.id
+    )
+
+    # Create
+    with pytest.raises(ClientError) as ex:
+        client.create_route(
+            RouteTableId=main_route_table.id,
+            DestinationCidrBlock=ROUTE_CIDR,
+            GatewayId=igw.id,
+        )
+
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "RouteAlreadyExists"
+
+    # We can create a sub cidr
+    client.create_route(
+        RouteTableId=main_route_table.id,
+        DestinationCidrBlock=ROUTE_SUB_CIDR,
+        GatewayId=igw.id,
+    )
+    # Or even a catch-all
+    client.create_route(
+        RouteTableId=main_route_table.id,
+        DestinationCidrBlock="0.0.0.0/0",
+        GatewayId=igw.id,
+    )
+
+
+@mock_aws
+def test_routes_not_supported():
+    client = boto3.client("ec2", region_name="us-east-1")
+    main_route_table_id = client.describe_route_tables()["RouteTables"][0][
+        "RouteTableId"
+    ]
+
+    ROUTE_CIDR = "10.0.0.4/24"
+
+    # Create
+    with pytest.raises(ClientError) as ex:
+        client.create_route(
+            RouteTableId=main_route_table_id,
+            DestinationCidrBlock=ROUTE_CIDR,
+            NetworkInterfaceId="eni-1234abcd",
+        )
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidNetworkInterfaceID.NotFound"
+
+
+@mock_aws
+def test_routes_vpc_peering_connection():
+    client = boto3.client("ec2", region_name="us-east-1")
+    ec2 = boto3.resource("ec2", region_name="us-east-1")
+    vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
+    main_route_table_id = client.describe_route_tables(
+        Filters=[
+            {"Name": "vpc-id", "Values": [vpc.id]},
+            {"Name": "association.main", "Values": ["true"]},
+        ]
+    )["RouteTables"][0]["RouteTableId"]
+    main_route_table = ec2.RouteTable(main_route_table_id)
+    ROUTE_CIDR = "10.0.0.4/24"
+
+    peer_vpc = ec2.create_vpc(CidrBlock="11.0.0.0/16")
+    vpc_pcx = ec2.create_vpc_peering_connection(VpcId=vpc.id, PeerVpcId=peer_vpc.id)
+
+    main_route_table.create_route(
+        DestinationCidrBlock=ROUTE_CIDR, VpcPeeringConnectionId=vpc_pcx.id
+    )
+
+    # Refresh route table
+    main_route_table.reload()
+    new_routes = [
+        route
+        for route in main_route_table.routes
+        if route.destination_cidr_block != vpc.cidr_block
+    ]
+    assert len(new_routes) == 1
+
+    new_route = new_routes[0]
+    assert new_route.gateway_id is None
+    assert new_route.instance_id is None
+    assert new_route.vpc_peering_connection_id == vpc_pcx.id
+    assert new_route.state == "active"
+    assert new_route.destination_cidr_block == ROUTE_CIDR
+
+
+@mock_aws
+def test_routes_vpn_gateway():
     client = boto3.client("ec2", region_name="us-east-1")
     ec2 = boto3.resource("ec2", region_name="us-east-1")
     vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
@@ -1123,36 +858,16 @@ def test_routes_vpn_gateway_boto3():
         for route in main_route_table.routes
         if route.destination_cidr_block != vpc.cidr_block
     ]
-    new_routes.should.have.length_of(1)
+    assert len(new_routes) == 1
 
     new_route = new_routes[0]
-    new_route.gateway_id.should.equal(vpn_gw_id)
-    new_route.instance_id.should.be.none
-    new_route.vpc_peering_connection_id.should.be.none
+    assert new_route.gateway_id == vpn_gw_id
+    assert new_route.instance_id is None
+    assert new_route.vpc_peering_connection_id is None
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_network_acl_tagging():
-
-    conn = boto.connect_vpc("the_key", "the secret")
-    vpc = conn.create_vpc("10.0.0.0/16")
-
-    route_table = conn.create_route_table(vpc.id)
-    route_table.add_tag("a key", "some value")
-
-    tag = conn.get_all_tags()[0]
-    tag.name.should.equal("a key")
-    tag.value.should.equal("some value")
-
-    all_route_tables = conn.get_all_route_tables()
-    test_route_table = next(na for na in all_route_tables if na.id == route_table.id)
-    test_route_table.tags.should.have.length_of(1)
-    test_route_table.tags["a key"].should.equal("some value")
-
-
-@mock_ec2
-def test_network_acl_tagging_boto3():
     client = boto3.client("ec2", region_name="us-east-1")
     ec2 = boto3.resource("ec2", region_name="us-east-1")
     vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
@@ -1163,24 +878,24 @@ def test_network_acl_tagging_boto3():
     tag = client.describe_tags(
         Filters=[{"Name": "resource-id", "Values": [route_table.id]}]
     )["Tags"][0]
-    tag.should.have.key("ResourceType").equal("route-table")
-    tag.should.have.key("Key").equal("a key")
-    tag.should.have.key("Value").equal("some value")
+    assert tag["ResourceType"] == "route-table"
+    assert tag["Key"] == "a key"
+    assert tag["Value"] == "some value"
 
     all_route_tables = client.describe_route_tables()["RouteTables"]
     test_route_table = next(
         na for na in all_route_tables if na["RouteTableId"] == route_table.id
     )
-    test_route_table["Tags"].should.equal([{"Value": "some value", "Key": "a key"}])
+    assert test_route_table["Tags"] == [{"Value": "some value", "Key": "a key"}]
 
 
-@mock_ec2
+@mock_aws
 def test_create_route_with_invalid_destination_cidr_block_parameter():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
 
     vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
     vpc.reload()
-    vpc.is_default.shouldnt.be.ok
+    assert vpc.is_default is False
 
     route_table = ec2.create_route_table(VpcId=vpc.id)
     route_table.reload()
@@ -1191,14 +906,12 @@ def test_create_route_with_invalid_destination_cidr_block_parameter():
 
     destination_cidr_block = "1000.1.0.0/20"
     with pytest.raises(ClientError) as ex:
-        route = route_table.create_route(
+        route_table.create_route(
             DestinationCidrBlock=destination_cidr_block, GatewayId=internet_gateway.id
         )
-    str(ex.value).should.equal(
-        "An error occurred (InvalidParameterValue) when calling the CreateRoute "
-        "operation: Value ({}) for parameter destinationCidrBlock is invalid. This is not a valid CIDR block.".format(
-            destination_cidr_block
-        )
+    assert (
+        str(ex.value)
+        == f"An error occurred (InvalidParameterValue) when calling the CreateRoute operation: Value ({destination_cidr_block}) for parameter destinationCidrBlock is invalid. This is not a valid CIDR block."
     )
 
     route_table.create_route(
@@ -1210,11 +923,11 @@ def test_create_route_with_invalid_destination_cidr_block_parameter():
         if route.destination_cidr_block != vpc.cidr_block
         or route.destination_ipv6_cidr_block != vpc.cidr_block
     ]
-    new_routes.should.have.length_of(1)
-    new_routes[0].route_table_id.shouldnt.be.equal(None)
+    assert len(new_routes) == 1
+    assert new_routes[0].route_table_id is not None
 
 
-@mock_ec2
+@mock_aws
 def test_create_route_with_network_interface_id():
     ec2 = boto3.resource("ec2", region_name="us-west-2")
     ec2_client = boto3.client("ec2", region_name="us-west-2")
@@ -1237,10 +950,10 @@ def test_create_route_with_network_interface_id():
         RouteTableId=route_table_id,
     )
 
-    route["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
+    assert route["ResponseMetadata"]["HTTPStatusCode"] == 200
 
 
-@mock_ec2
+@mock_aws
 def test_describe_route_tables_with_nat_gateway():
     ec2 = boto3.client("ec2", region_name="us-west-1")
     vpc_id = ec2.create_vpc(CidrBlock="192.168.0.0/23")["Vpc"]["VpcId"]
@@ -1271,15 +984,55 @@ def test_describe_route_tables_with_nat_gateway():
         if route["DestinationCidrBlock"] == "0.0.0.0/0"
     ]
 
-    nat_gw_routes.should.have.length_of(1)
-    nat_gw_routes[0]["DestinationCidrBlock"].should.equal("0.0.0.0/0")
-    nat_gw_routes[0]["NatGatewayId"].should.equal(nat_gw_id)
-    nat_gw_routes[0]["State"].should.equal("active")
+    assert len(nat_gw_routes) == 1
+    assert nat_gw_routes[0]["DestinationCidrBlock"] == "0.0.0.0/0"
+    assert nat_gw_routes[0]["NatGatewayId"] == nat_gw_id
+    assert nat_gw_routes[0]["State"] == "active"
 
 
-@mock_ec2
+@mock_aws
+def test_describe_route_tables_filter_with_nat_gateway_id():
+    ec2 = boto3.client("ec2", region_name="us-west-1")
+    vpc_id = ec2.create_vpc(CidrBlock="192.168.0.0/23")["Vpc"]["VpcId"]
+    az = ec2.describe_availability_zones()["AvailabilityZones"][0]["ZoneName"]
+    sn_id = ec2.create_subnet(
+        AvailabilityZone=az, CidrBlock="192.168.0.0/24", VpcId=vpc_id
+    )["Subnet"]["SubnetId"]
+    route_table_id = ec2.create_route_table(VpcId=vpc_id)["RouteTable"]["RouteTableId"]
+    ec2.associate_route_table(SubnetId=sn_id, RouteTableId=route_table_id)
+    alloc_id = ec2.allocate_address(Domain="vpc")["AllocationId"]
+    nat_gw_id = ec2.create_nat_gateway(SubnetId=sn_id, AllocationId=alloc_id)[
+        "NatGateway"
+    ]["NatGatewayId"]
+
+    route_tables_by_nat_gateway_id = ec2.describe_route_tables(
+        Filters=[{"Name": "route.nat-gateway-id", "Values": [nat_gw_id]}]
+    )["RouteTables"]
+    assert len(route_tables_by_nat_gateway_id) == 0
+
+    ec2.create_route(
+        DestinationCidrBlock="0.0.0.0/0",
+        NatGatewayId=nat_gw_id,
+        RouteTableId=route_table_id,
+    )
+
+    route_tables_by_nat_gateway_id = ec2.describe_route_tables(
+        Filters=[{"Name": "route.nat-gateway-id", "Values": [nat_gw_id]}]
+    )["RouteTables"][0]
+    nat_gw_routes = [
+        route
+        for route in route_tables_by_nat_gateway_id["Routes"]
+        if route["DestinationCidrBlock"] == "0.0.0.0/0"
+    ]
+
+    assert len(nat_gw_routes) == 1
+    assert nat_gw_routes[0]["DestinationCidrBlock"] == "0.0.0.0/0"
+    assert nat_gw_routes[0]["NatGatewayId"] == nat_gw_id
+    assert nat_gw_routes[0]["State"] == "active"
+
+
+@mock_aws
 def test_create_vpc_end_point():
-
     ec2 = boto3.client("ec2", region_name="us-west-1")
     vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
     subnet = ec2.create_subnet(VpcId=vpc["Vpc"]["VpcId"], CidrBlock="10.0.0.0/24")
@@ -1293,14 +1046,13 @@ def test_create_vpc_end_point():
         RouteTableIds=[route_table["RouteTable"]["RouteTableId"]],
     )
 
-    vpc_end_point["VpcEndpoint"]["ServiceName"].should.equal(
-        "com.amazonaws.us-east-1.s3"
+    assert vpc_end_point["VpcEndpoint"]["ServiceName"] == "com.amazonaws.us-east-1.s3"
+    assert (
+        vpc_end_point["VpcEndpoint"]["RouteTableIds"][0]
+        == route_table["RouteTable"]["RouteTableId"]
     )
-    vpc_end_point["VpcEndpoint"]["RouteTableIds"][0].should.equal(
-        route_table["RouteTable"]["RouteTableId"]
-    )
-    vpc_end_point["VpcEndpoint"]["VpcId"].should.equal(vpc["Vpc"]["VpcId"])
-    vpc_end_point["VpcEndpoint"]["DnsEntries"].should.have.length_of(0)
+    assert vpc_end_point["VpcEndpoint"]["VpcId"] == vpc["Vpc"]["VpcId"]
+    assert len(vpc_end_point["VpcEndpoint"]["DnsEntries"]) == 0
 
     # test with any end point type as gateway
     vpc_end_point = ec2.create_vpc_endpoint(
@@ -1310,14 +1062,13 @@ def test_create_vpc_end_point():
         VpcEndpointType="gateway",
     )
 
-    vpc_end_point["VpcEndpoint"]["ServiceName"].should.equal(
-        "com.amazonaws.us-east-1.s3"
+    assert vpc_end_point["VpcEndpoint"]["ServiceName"] == "com.amazonaws.us-east-1.s3"
+    assert (
+        vpc_end_point["VpcEndpoint"]["RouteTableIds"][0]
+        == route_table["RouteTable"]["RouteTableId"]
     )
-    vpc_end_point["VpcEndpoint"]["RouteTableIds"][0].should.equal(
-        route_table["RouteTable"]["RouteTableId"]
-    )
-    vpc_end_point["VpcEndpoint"]["VpcId"].should.equal(vpc["Vpc"]["VpcId"])
-    vpc_end_point["VpcEndpoint"]["DnsEntries"].should.have.length_of(0)
+    assert vpc_end_point["VpcEndpoint"]["VpcId"] == vpc["Vpc"]["VpcId"]
+    assert len(vpc_end_point["VpcEndpoint"]["DnsEntries"]) == 0
 
     # test with end point type as interface
     vpc_end_point = ec2.create_vpc_endpoint(
@@ -1327,17 +1078,13 @@ def test_create_vpc_end_point():
         VpcEndpointType="interface",
     )
 
-    vpc_end_point["VpcEndpoint"]["ServiceName"].should.equal(
-        "com.amazonaws.us-east-1.s3"
-    )
-    vpc_end_point["VpcEndpoint"]["SubnetIds"][0].should.equal(
-        subnet["Subnet"]["SubnetId"]
-    )
-    vpc_end_point["VpcEndpoint"]["VpcId"].should.equal(vpc["Vpc"]["VpcId"])
-    len(vpc_end_point["VpcEndpoint"]["DnsEntries"]).should.be.greater_than(0)
+    assert vpc_end_point["VpcEndpoint"]["ServiceName"] == "com.amazonaws.us-east-1.s3"
+    assert vpc_end_point["VpcEndpoint"]["SubnetIds"][0] == subnet["Subnet"]["SubnetId"]
+    assert vpc_end_point["VpcEndpoint"]["VpcId"] == vpc["Vpc"]["VpcId"]
+    assert len(vpc_end_point["VpcEndpoint"]["DnsEntries"]) > 0
 
 
-@mock_ec2
+@mock_aws
 def test_create_route_tables_with_tags():
     ec2 = boto3.resource("ec2", region_name="eu-central-1")
 
@@ -1353,10 +1100,10 @@ def test_create_route_tables_with_tags():
         ],
     )
 
-    route_table.tags.should.have.length_of(1)
+    assert len(route_table.tags) == 1
 
 
-@mock_ec2
+@mock_aws
 def test_create_route_with_egress_only_igw():
     ec2 = boto3.resource("ec2", region_name="eu-central-1")
     ec2_client = boto3.client("ec2", region_name="eu-central-1")
@@ -1379,11 +1126,11 @@ def test_create_route_with_egress_only_igw():
         for r in route_table.routes_attribute
         if r.get("DestinationIpv6CidrBlock") == "::/0"
     ][0]
-    eigw_route.get("EgressOnlyInternetGatewayId").should.equal(eigw_id)
-    eigw_route.get("State").should.equal("active")
+    assert eigw_route.get("EgressOnlyInternetGatewayId") == eigw_id
+    assert eigw_route.get("State") == "active"
 
 
-@mock_ec2
+@mock_aws
 def test_create_route_with_unknown_egress_only_igw():
     ec2 = boto3.resource("ec2", region_name="eu-central-1")
     ec2_client = boto3.client("ec2", region_name="eu-central-1")
@@ -1400,28 +1147,90 @@ def test_create_route_with_unknown_egress_only_igw():
             RouteTableId=route_table.id, EgressOnlyInternetGatewayId="eoigw"
         )
     err = ex.value.response["Error"]
-    err["Code"].should.equal("InvalidGatewayID.NotFound")
-    err["Message"].should.equal("The eigw ID 'eoigw' does not exist")
+    assert err["Code"] == "InvalidGatewayID.NotFound"
+    assert err["Message"] == "The eigw ID 'eoigw' does not exist"
 
 
-@mock_ec2
+@mock_aws
+def test_create_route_with_vpc_endpoint():
+    # Setup
+    _, ec2_client, route_table, vpc = setup_vpc()
+    dest_cidr = "0.0.0.0/0"
+    vpc_end_point = ec2_client.create_vpc_endpoint(
+        VpcId=vpc.id,
+        ServiceName="com.amazonaws.vpce.eu-central-1.vpce-svc-084fa044c50cb1290",
+        RouteTableIds=[route_table.id],
+        VpcEndpointType="GatewayLoadBalancer",
+    )
+    vpce_id = vpc_end_point["VpcEndpoint"]["VpcEndpointId"]
+
+    # Execute
+    ec2_client.create_route(
+        DestinationCidrBlock=dest_cidr,
+        VpcEndpointId=vpce_id,
+        RouteTableId=route_table.id,
+    )
+    rt = ec2_client.describe_route_tables(RouteTableIds=[route_table.id])
+    new_route = rt["RouteTables"][-1]["Routes"][1]
+
+    # Verify
+    assert new_route["DestinationCidrBlock"] == dest_cidr
+    assert new_route["GatewayId"] == vpce_id
+
+
+@mock_aws
+def test_create_route_with_invalid_vpc_endpoint():
+    # Setup
+    _, ec2_client, route_table, vpc = setup_vpc()
+    dest_cidr = "0.0.0.0/0"
+    vpc_end_point = ec2_client.create_vpc_endpoint(
+        VpcId=vpc.id,
+        ServiceName="com.amazonaws.us-east-1.s3",
+        RouteTableIds=[route_table.id],
+        VpcEndpointType="Gateway",
+    )
+    vpce_id = vpc_end_point["VpcEndpoint"]["VpcEndpointId"]
+
+    # Execute
+    with pytest.raises(ClientError) as ex:
+        ec2_client.create_route(
+            DestinationCidrBlock=dest_cidr,
+            VpcEndpointId=vpce_id,
+            RouteTableId=route_table.id,
+        )
+    # Verify
+    err = ex.value.response["Error"]
+    assert err["Code"] == "RouteNotSupported"
+    assert (
+        err["Message"] == f"Route table contains unsupported route target: {vpce_id}. "
+        "VPC Endpoints of this type cannot be used as route targets."
+    )
+
+
+@mock_aws
 def test_associate_route_table_by_gateway():
     ec2 = boto3.client("ec2", region_name="us-west-1")
     vpc_id = ec2.create_vpc(CidrBlock="10.0.0.0/16")["Vpc"]["VpcId"]
     route_table_id = ec2.create_route_table(VpcId=vpc_id)["RouteTable"]["RouteTableId"]
     igw_id = ec2.create_internet_gateway()["InternetGateway"]["InternetGatewayId"]
-    assoc_id = ec2.associate_route_table(
-        RouteTableId=route_table_id, GatewayId=igw_id,
-    )["AssociationId"]
+    assoc_id = ec2.associate_route_table(RouteTableId=route_table_id, GatewayId=igw_id)[
+        "AssociationId"
+    ]
     verify = ec2.describe_route_tables(
         Filters=[
             {"Name": "association.route-table-association-id", "Values": [assoc_id]}
         ]
     )["RouteTables"]
-    verify[0]["Associations"][0]["RouteTableAssociationId"].should.equal(assoc_id)
+
+    assert len(verify[0]["Associations"]) == 1
+
+    assert verify[0]["Associations"][0]["Main"] is False
+    assert verify[0]["Associations"][0]["GatewayId"] == igw_id
+    assert verify[0]["Associations"][0]["RouteTableAssociationId"] == assoc_id
+    assert "SubnetId" not in verify[0]["Associations"][0]
 
 
-@mock_ec2
+@mock_aws
 def test_associate_route_table_by_subnet():
     ec2 = boto3.client("ec2", region_name="us-west-1")
     vpc_id = ec2.create_vpc(CidrBlock="10.0.0.0/16")["Vpc"]["VpcId"]
@@ -1430,11 +1239,31 @@ def test_associate_route_table_by_subnet():
         "SubnetId"
     ]
     assoc_id = ec2.associate_route_table(
-        RouteTableId=route_table_id, SubnetId=subnet_id,
+        RouteTableId=route_table_id, SubnetId=subnet_id
     )["AssociationId"]
     verify = ec2.describe_route_tables(
         Filters=[
             {"Name": "association.route-table-association-id", "Values": [assoc_id]}
         ]
     )["RouteTables"]
-    verify[0]["Associations"][0]["RouteTableAssociationId"].should.equal(assoc_id)
+
+    assert len(verify[0]["Associations"]) == 1
+
+    assert verify[0]["Associations"][0]["Main"] is False
+    assert verify[0]["Associations"][0]["SubnetId"] == subnet_id
+    assert verify[0]["Associations"][0]["RouteTableAssociationId"] == assoc_id
+    assert "GatewayId" not in verify[0]["Associations"][0]
+
+
+def setup_vpc():
+    ec2_resource = boto3.resource("ec2", region_name="eu-central-1")
+    ec2_client = boto3.client("ec2", region_name="eu-central-1")
+
+    vpc = ec2_resource.create_vpc(CidrBlock="10.0.0.0/16")
+    ec2_resource.create_subnet(
+        VpcId=vpc.id, CidrBlock="10.0.0.0/24", AvailabilityZone="us-west-2a"
+    )
+
+    route_table = ec2_resource.create_route_table(VpcId=vpc.id)
+
+    return ec2_resource, ec2_client, route_table, vpc

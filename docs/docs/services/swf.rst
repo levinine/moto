@@ -12,23 +12,14 @@
 swf
 ===
 
-|start-h3| Example usage |end-h3|
-
-.. sourcecode:: python
-
-            @mock_swf
-            def test_swf_behaviour:
-                boto3.client("swf")
-                ...
-
-
-
 |start-h3| Implemented features for this service |end-h3|
 
 - [ ] count_closed_workflow_executions
 - [ ] count_open_workflow_executions
 - [X] count_pending_activity_tasks
 - [X] count_pending_decision_tasks
+- [ ] delete_activity_type
+- [ ] delete_workflow_type
 - [ ] deprecate_activity_type
 - [X] deprecate_domain
 - [ ] deprecate_workflow_type
@@ -56,10 +47,10 @@ swf
 - [X] respond_decision_task_completed
 - [X] signal_workflow_execution
 - [X] start_workflow_execution
-- [ ] tag_resource
+- [X] tag_resource
 - [X] terminate_workflow_execution
 - [ ] undeprecate_activity_type
 - [X] undeprecate_domain
 - [ ] undeprecate_workflow_type
-- [ ] untag_resource
+- [X] untag_resource
 

@@ -1,22 +1,25 @@
 import hashlib
 from collections import OrderedDict
+from typing import Any
 
-from boto3 import Session
+from moto.core.base_backend import BackendDict, BaseBackend
+from moto.core.common_models import BaseModel
 
-from moto.core import BaseBackend, BaseModel
 from .exceptions import ClientError
 
 
 class Object(BaseModel):
-    def __init__(self, path, body, etag, storage_class="TEMPORAL"):
+    def __init__(
+        self, path: str, body: str, etag: str, storage_class: str = "TEMPORAL"
+    ):
         self.path = path
         self.body = body
         self.content_sha256 = hashlib.sha256(body.encode("utf-8")).hexdigest()
         self.etag = etag
         self.storage_class = storage_class
 
-    def to_dict(self):
-        data = {
+    def to_dict(self) -> dict[str, Any]:
+        return {
             "ETag": self.etag,
             "Name": self.path,
             "Type": "FILE",
@@ -26,63 +29,47 @@ class Object(BaseModel):
             "ContentSHA256": self.content_sha256,
         }
 
-        return data
-
 
 class MediaStoreDataBackend(BaseBackend):
-    def __init__(self, region_name=None):
-        super(MediaStoreDataBackend, self).__init__()
-        self.region_name = region_name
-        self._objects = OrderedDict()
-
-    def reset(self):
-        region_name = self.region_name
-        self.__dict__ = {}
-        self.__init__(region_name)
+    def __init__(self, region_name: str, account_id: str):
+        super().__init__(region_name, account_id)
+        self._objects: dict[str, Object] = OrderedDict()
 
     def put_object(
-        self,
-        body,
-        path,
-        content_type=None,
-        cache_control=None,
-        storage_class="TEMPORAL",
-        upload_availability="STANDARD",
-    ):
+        self, body: str, path: str, storage_class: str = "TEMPORAL"
+    ) -> Object:
+        """
+        The following parameters are not yet implemented: ContentType, CacheControl, UploadAvailability
+        """
         new_object = Object(
             path=path, body=body, etag="etag", storage_class=storage_class
         )
         self._objects[path] = new_object
         return new_object
 
-    def delete_object(self, path):
+    def delete_object(self, path: str) -> None:
         if path not in self._objects:
-            error = "ObjectNotFoundException"
-            raise ClientError(error, "Object with id={} not found".format(path))
+            raise ClientError(
+                "ObjectNotFoundException", f"Object with id={path} not found"
+            )
         del self._objects[path]
-        return {}
 
-    def get_object(self, path, range=None):
+    def get_object(self, path: str) -> Object:
+        """
+        The Range-parameter is not yet supported.
+        """
         objects_found = [item for item in self._objects.values() if item.path == path]
         if len(objects_found) == 0:
-            error = "ObjectNotFoundException"
-            raise ClientError(error, "Object with id={} not found".format(path))
+            raise ClientError(
+                "ObjectNotFoundException", f"Object with id={path} not found"
+            )
         return objects_found[0]
 
-    def list_items(self, path, max_results=1000, next_token=None):
-        items = self._objects.values()
-        response_items = [c.to_dict() for c in items]
-        return response_items
+    def list_items(self) -> list[dict[str, Any]]:
+        """
+        The Path- and MaxResults-parameters are not yet supported.
+        """
+        return [c.to_dict() for c in self._objects.values()]
 
 
-mediastoredata_backends = {}
-for region in Session().get_available_regions("mediastore-data"):
-    mediastoredata_backends[region] = MediaStoreDataBackend(region)
-for region in Session().get_available_regions(
-    "mediastore-data", partition_name="aws-us-gov"
-):
-    mediastoredata_backends[region] = MediaStoreDataBackend(region)
-for region in Session().get_available_regions(
-    "mediastore-data", partition_name="aws-cn"
-):
-    mediastoredata_backends[region] = MediaStoreDataBackend(region)
+mediastoredata_backends = BackendDict(MediaStoreDataBackend, "mediastore-data")

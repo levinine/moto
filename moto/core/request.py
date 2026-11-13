@@ -1,0 +1,182 @@
+from __future__ import annotations
+
+from collections.abc import Iterator
+from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import urlparse
+
+try:
+    from botocore.httpchecksum import AwsChunkedWrapper
+except ModuleNotFoundError:
+
+    class AwsChunkedWrapper:  # type: ignore[no-redef]
+        def read(self) -> bytes:
+            raise NotImplementedError()
+
+
+from botocore.awsrequest import AWSPreparedRequest
+from werkzeug.datastructures import EnvironHeaders as WerkzeugEnvironHeaders
+from werkzeug.local import LocalProxy
+from werkzeug.wrappers import Request as WerkzeugRequest
+
+from moto.settings import MAX_FORM_MEMORY_SIZE
+from moto.utilities.constants import (
+    APPLICATION_CBOR,
+    APPLICATION_JSON,
+    JSON_TYPES,
+    SMITHY_PROTOCOL_RPC_V2_CBOR,
+)
+
+if TYPE_CHECKING:
+    from moto.core.model import ServiceModel
+
+
+#: Environ key holding the original spelling of preserved header names, keyed
+#: by the WSGI name each was stored under (e.g. ``HTTP_X_AMZ_META_MY_KEY``).
+PRESERVED_HEADER_NAMES_ENVIRON_KEY = "moto.preserved_header_names"
+
+
+def should_preserve_original_header_name(header_name: str) -> bool:
+    """Whether underscores in a header name should be preserved."""
+    if "_" in header_name:
+        # Right now we're only preserving S3 object metadata headers.
+        if header_name.lower().startswith("x-amz-meta-"):
+            return True
+    return False
+
+
+def environ_key_for_header(header_name: str) -> str:
+    key = header_name.upper().replace("-", "_")
+    if key in ("CONTENT_TYPE", "CONTENT_LENGTH"):
+        return key
+    return f"HTTP_{key}"
+
+
+class EnvironHeaders(WerkzeugEnvironHeaders):
+    """EnvironHeaders that report any preserved headers under their original names.
+
+    WSGI folds both ``-`` and ``_`` into ``_`` in environ keys, so werkzeug
+    rebuilds every name with dashes: ``x-amz-meta-my_key`` comes back as
+    ``X-Amz-Meta-My-Key``.  S3 treats the two as distinct for user metadata
+    keys, so for those headers we report the name as originally sent.
+
+    Lookups are unaffected - werkzeug already maps either spelling to the same key.
+    """
+
+    def __iter__(self) -> Iterator[tuple[str, str]]:
+        names: dict[str, str] = (
+            self.environ.get(PRESERVED_HEADER_NAMES_ENVIRON_KEY) or {}
+        )
+        for key, value in super().__iter__():
+            yield names.get(environ_key_for_header(key), key), value
+
+
+class Request(WerkzeugRequest):
+    #: True when this request was received by a real WSGI server (Moto Server).
+    from_wsgi_server = False
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.max_form_memory_size = MAX_FORM_MEMORY_SIZE
+        self.headers = EnvironHeaders(self.environ)
+
+    @classmethod
+    def from_primitives(
+        cls, method: str, url: str, headers: Any, body: Any = None
+    ) -> Request:
+        """Build a request from the basic components of an HTTP message."""
+        if isinstance(body, AwsChunkedWrapper):
+            body = body.read()
+        # The proxy de-chunks before we ever see the request, and we (above) read
+        # an AwsChunkedWrapper out in full, so Transfer-Encoding no longer applies.
+        header_items = [
+            (key, value.decode("utf-8") if isinstance(value, bytes) else value)
+            for key, value in headers.items()
+            if key.lower() not in ["transfer-encoding"]
+        ]
+        parsed_url = urlparse(url)
+        request = cast(
+            Request,
+            cls.from_values(
+                method=method,
+                base_url=f"{parsed_url.scheme}://{parsed_url.netloc}",
+                path=parsed_url.path,
+                query_string=parsed_url.query,
+                data=body if body is not None else b"",
+                headers=header_items,
+            ),
+        )
+        # Preserve original header names in the environment for later lookup.
+        request.environ[PRESERVED_HEADER_NAMES_ENVIRON_KEY] = {
+            environ_key_for_header(key): key
+            for key, _ in header_items
+            if should_preserve_original_header_name(key)
+        }
+        # Ensure a Content-Length header is present, even for bodiless requests.
+        # (Some S3 endpoints return a 411 if this header is missing.)
+        request.environ.setdefault("CONTENT_LENGTH", "0")
+        return request
+
+    @property
+    def raw_path(self) -> str:
+        """The path as it arrived, before werkzeug percent-decoded it.
+
+        S3 keys routinely contain characters - an encoded slash, most awkwardly -
+        that `path` decodes away, and Moto matches backend URLs against the
+        encoded form.
+        """
+        # RAW_URI holds either a path or a full URL, depending on the server.
+        # A path may begin with a double slash, which urlparse would read as the
+        # start of a netloc, so only parse when there is really a scheme to strip.
+        raw_uri: str = self.environ.get("RAW_URI", "") or self.path
+        parsed = urlparse(raw_uri)
+        raw_path = parsed.path if parsed.scheme else raw_uri.split("?", 1)[0]
+        if not raw_path:
+            return "/"
+        return raw_path if raw_path.startswith("/") else f"/{raw_path}"
+
+    @property
+    def raw_url(self) -> str:
+        """The full URL as it arrived.  See `raw_path`."""
+        raw_url = f"{self.url_root.rstrip('/')}{self.raw_path}"
+        if self.query_string:
+            raw_url += f"?{self.query_string.decode()}"
+        return raw_url
+
+
+def normalize_request(
+    request: AWSPreparedRequest | LocalProxy[Request] | Request,
+) -> Request:
+    """Turn however this request reached us into the one type the core acts on."""
+    if isinstance(request, LocalProxy):
+        request = request._get_current_object()
+    if isinstance(request, Request):
+        return request
+    if isinstance(request, AWSPreparedRequest):
+        return Request.from_primitives(
+            request.method, request.url, request.headers, request.body
+        )
+    raise TypeError(f"Cannot normalize request of type {type(request).__name__}")
+
+
+def determine_request_protocol(service_model: ServiceModel, request: Request) -> str:
+    protocol = str(service_model.protocol)
+    # Short circuit protocol detection for S3 because the ContentType header
+    # is often set based on the MIME type of the object data being uploaded.
+    if service_model.service_name == "s3":
+        return protocol
+    supported_protocols = service_model.metadata.get("protocols", [protocol])
+    content_type = request.content_type or ""
+    if (
+        request.headers.get("smithy-protocol") == SMITHY_PROTOCOL_RPC_V2_CBOR
+        or content_type == APPLICATION_CBOR
+    ):
+        protocol = "smithy-rpc-v2-cbor"
+    elif content_type in JSON_TYPES:
+        protocol = "rest-json" if content_type == APPLICATION_JSON else "json"
+    elif content_type.startswith("application/x-www-form-urlencoded"):
+        protocol = "ec2" if "ec2" in supported_protocols else "query"
+    if protocol not in supported_protocols:
+        raise NotImplementedError(
+            f"Unsupported protocol [{protocol}] for service {service_model.service_name}"
+        )
+    return protocol

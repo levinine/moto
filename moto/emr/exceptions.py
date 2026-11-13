@@ -1,22 +1,21 @@
-from moto.core.exceptions import JsonRESTError
+from moto.core.exceptions import ServiceException
 
 
-class InvalidRequestException(JsonRESTError):
-    def __init__(self, message, **kwargs):
-        super(InvalidRequestException, self).__init__(
-            "InvalidRequestException", message, **kwargs
-        )
+class InvalidRequestException(ServiceException):
+    code = "InvalidRequestException"
 
 
-class ValidationException(JsonRESTError):
-    def __init__(self, message, **kwargs):
-        super(ValidationException, self).__init__(
-            "ValidationException", message, **kwargs
-        )
+class ResourceNotFoundException(InvalidRequestException):
+    error_code = "ResourceNotFound"
 
 
-class ResourceNotFoundException(JsonRESTError):
-    def __init__(self, message, **kwargs):
-        super(ResourceNotFoundException, self).__init__(
-            "ResourceNotFoundException", message, **kwargs
-        )
+class InvalidCluster(InvalidRequestException):
+    error_code = "NoSuchCluster"
+
+    def __init__(self, cluster_id: str):
+        message = f"Cluster id '{cluster_id}' is not valid."
+        super().__init__(message)
+
+
+class ValidationException(ServiceException):
+    code = "ValidationException"

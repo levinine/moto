@@ -1,110 +1,146 @@
 import random
-
-import boto
-import boto3
-import boto.vpc
-
-import pytest
-import sure  # noqa # pylint: disable=unused-import
-from boto.exception import EC2ResponseError
-from botocore.exceptions import ClientError
-from moto import mock_ec2, mock_ec2_deprecated, settings
-from tests import EXAMPLE_AMI_ID
 from uuid import uuid4
-from unittest import SkipTest
+
+import boto3
+import pytest
+from botocore.exceptions import ClientError
+
+from moto import mock_aws, settings
+from tests import DEFAULT_ACCOUNT_ID, EXAMPLE_AMI_ID
+from tests.test_ec2 import ec2_aws_verified, wait_for_ipv6_cidr_block_associations
+
+from .helpers import assert_dryrun_error
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_subnets():
-    ec2 = boto.connect_ec2("the_key", "the_secret")
-    conn = boto.connect_vpc("the_key", "the_secret")
-    vpc = conn.create_vpc("10.0.0.0/16")
-    subnet = conn.create_subnet(vpc.id, "10.0.0.0/18")
-
-    all_subnets = conn.get_all_subnets()
-    all_subnets.should.have.length_of(1 + len(ec2.get_all_zones()))
-
-    conn.delete_subnet(subnet.id)
-
-    all_subnets = conn.get_all_subnets()
-    all_subnets.should.have.length_of(0 + len(ec2.get_all_zones()))
-
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.delete_subnet(subnet.id)
-    cm.value.code.should.equal("InvalidSubnetID.NotFound")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-
-@mock_ec2
-def test_subnets_boto3():
     ec2 = boto3.resource("ec2", region_name="us-east-1")
     client = boto3.client("ec2", region_name="us-east-1")
     vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
     subnet = ec2.create_subnet(VpcId=vpc.id, CidrBlock="10.0.0.0/18")
 
     ours = client.describe_subnets(SubnetIds=[subnet.id])["Subnets"]
-    ours.should.have.length_of(1)
+    assert len(ours) == 1
 
     client.delete_subnet(SubnetId=subnet.id)
 
     with pytest.raises(ClientError) as ex:
         client.describe_subnets(SubnetIds=[subnet.id])
     err = ex.value.response["Error"]
-    err["Code"].should.equal("InvalidSubnetID.NotFound")
+    assert err["Code"] == "InvalidSubnetID.NotFound"
 
     with pytest.raises(ClientError) as ex:
         client.delete_subnet(SubnetId=subnet.id)
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidSubnetID.NotFound")
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidSubnetID.NotFound"
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
+def test_create_default_subnet():
+    client = boto3.client("ec2", region_name="ap-northeast-1")
+
+    default_vpc = client.describe_vpcs(
+        Filters=[{"Name": "is-default", "Values": ["true"]}]
+    )["Vpcs"][0]
+
+    zones = [
+        z["ZoneName"] for z in client.describe_availability_zones()["AvailabilityZones"]
+    ]
+
+    # Ensure moto has default subnets by default
+    subnets = client.describe_subnets(
+        Filters=[{"Name": "default-for-az", "Values": ["true"]}]
+    )["Subnets"]
+    assert len(subnets) == len(zones)
+
+    default_subnets: dict[str, str] = {
+        subnet["AvailabilityZone"]: subnet["SubnetId"] for subnet in subnets
+    }
+
+    # Ensure that attempting to create a default subnet when it already exists raises
+    for zone in zones:
+        with pytest.raises(ClientError) as exc:
+            client.create_default_subnet(AvailabilityZone=zone)
+        assert (
+            exc.value.response["Error"]["Code"]
+            == "DefaultSubnetAlreadyExistsInAvailabilityZone"
+        )
+        assert (
+            exc.value.response["Error"]["Message"]
+            == f"'{default_subnets[zone]}' is already the default subnet in {zone}."
+        )
+
+    # Delete default subnets
+    for subnet in subnets:
+        client.delete_subnet(SubnetId=subnet["SubnetId"])
+    default_subnets.clear()
+
+    expected_cidr_blocks = [
+        "172.31.0.0/20",
+        "172.31.16.0/20",
+        "172.31.32.0/20",
+        "172.31.48.0/20",
+        "172.31.64.0/20",
+        "172.31.80.0/20",
+    ]
+
+    # Ensure default subnets can be created
+    for idx, zone in enumerate(zones):
+        response = client.create_default_subnet(AvailabilityZone=zone)["Subnet"]
+        assert response["OwnerId"] == DEFAULT_ACCOUNT_ID
+        assert response["VpcId"] == default_vpc["VpcId"]
+        assert response["State"] == "available"
+        assert response["CidrBlock"] == expected_cidr_blocks[idx]
+        assert response["AvailabilityZone"] == zone
+        assert response["DefaultForAz"] is True
+        subnet_id = default_subnets[zone] = response["SubnetId"]
+
+        response = client.describe_subnets(SubnetIds=[subnet_id])
+        assert len(response["Subnets"]) == 1
+        assert response["Subnets"][0]["SubnetId"] == subnet_id
+        assert response["Subnets"][0]["VpcId"] == default_vpc["VpcId"]
+        assert response["Subnets"][0]["DefaultForAz"] is True
+        assert response["Subnets"][0]["CidrBlock"] == expected_cidr_blocks[idx]
+        assert response["Subnets"][0]["AvailabilityZone"] == zone
+
+    # Delete default subnets and VPCs
+    for subnet_id in default_subnets.values():
+        client.delete_subnet(SubnetId=subnet_id)
+    client.delete_vpc(VpcId=default_vpc["VpcId"])
+
+    # Ensure attempting to create default subnet when there's no default VPC raises
+    for zone in zones:
+        with pytest.raises(ClientError) as exc:
+            client.create_default_subnet(AvailabilityZone=zone)
+
+        assert exc.value.response["Error"]["Code"] == "DefaultVpcDoesNotExist"
+        assert (
+            exc.value.response["Error"]["Message"]
+            == "No default VPC exists for this account in this region."
+        )
+
+    # Ensure creating a default VPC also creates default subnets
+    client.create_default_vpc()
+    subnets = client.describe_subnets(
+        Filters=[{"Name": "default-for-az", "Values": ["true"]}]
+    )["Subnets"]
+    assert len(subnets) == len(zones)
+
+
+@mock_aws
 def test_subnet_create_vpc_validation():
-    conn = boto.connect_vpc("the_key", "the_secret")
-
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.create_subnet("vpc-abcd1234", "10.0.0.0/18")
-    cm.value.code.should.equal("InvalidVpcID.NotFound")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-
-@mock_ec2
-def test_subnet_create_vpc_validation_boto3():
     ec2 = boto3.resource("ec2", region_name="us-east-1")
 
     with pytest.raises(ClientError) as ex:
         ec2.create_subnet(VpcId="vpc-abcd1234", CidrBlock="10.0.0.0/18")
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidVpcID.NotFound")
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidVpcID.NotFound"
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_subnet_tagging():
-    conn = boto.connect_vpc("the_key", "the_secret")
-    vpc = conn.create_vpc("10.0.0.0/16")
-    subnet = conn.create_subnet(vpc.id, "10.0.0.0/18")
-
-    subnet.add_tag("a key", "some value")
-
-    tag = conn.get_all_tags()[0]
-    tag.name.should.equal("a key")
-    tag.value.should.equal("some value")
-
-    # Refresh the subnet
-    subnet = conn.get_all_subnets(subnet_ids=[subnet.id])[0]
-    subnet.tags.should.have.length_of(1)
-    subnet.tags["a key"].should.equal("some value")
-
-
-@mock_ec2
-def test_subnet_tagging_boto3():
     ec2 = boto3.resource("ec2", region_name="us-east-1")
     client = boto3.client("ec2", region_name="us-east-1")
     vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
@@ -115,34 +151,25 @@ def test_subnet_tagging_boto3():
     tag = client.describe_tags(
         Filters=[{"Name": "resource-id", "Values": [subnet.id]}]
     )["Tags"][0]
-    tag["Key"].should.equal("a key")
-    tag["Value"].should.equal("some value")
+    assert tag["Key"] == "a key"
+    assert tag["Value"] == "some value"
 
     # Refresh the subnet
     subnet = client.describe_subnets(SubnetIds=[subnet.id])["Subnets"][0]
-    subnet["Tags"].should.equal([{"Key": "a key", "Value": "some value"}])
+    assert subnet["Tags"] == [{"Key": "a key", "Value": "some value"}]
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_subnet_should_have_proper_availability_zone_set():
-    conn = boto.vpc.connect_to_region("us-west-1")
-    vpcA = conn.create_vpc("10.0.0.0/16")
-    subnetA = conn.create_subnet(vpcA.id, "10.0.0.0/24", availability_zone="us-west-1b")
-    subnetA.availability_zone.should.equal("us-west-1b")
-
-
-@mock_ec2
-def test_subnet_should_have_proper_availability_zone_set_boto3():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
     vpcA = ec2.create_vpc(CidrBlock="10.0.0.0/16")
     subnetA = ec2.create_subnet(
         VpcId=vpcA.id, CidrBlock="10.0.0.0/24", AvailabilityZone="us-west-1b"
     )
-    subnetA.availability_zone.should.equal("us-west-1b")
+    assert subnetA.availability_zone == "us-west-1b"
 
 
-@mock_ec2
+@mock_aws
 def test_availability_zone_in_create_subnet():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
 
@@ -151,58 +178,43 @@ def test_availability_zone_in_create_subnet():
     subnet = ec2.create_subnet(
         VpcId=vpc.id, CidrBlock="172.31.48.0/20", AvailabilityZoneId="use1-az6"
     )
-    subnet.availability_zone_id.should.equal("use1-az6")
+    assert subnet.availability_zone_id == "use1-az6"
 
 
-@mock_ec2
+@mock_aws
+@pytest.mark.requires_clean_slate
 def test_default_subnet():
-    if settings.TEST_SERVER_MODE:
-        raise SkipTest("ServerMode will have conflicting CidrBlocks")
     ec2 = boto3.resource("ec2", region_name="us-west-1")
 
     default_vpc = list(ec2.vpcs.all())[0]
-    default_vpc.cidr_block.should.equal("172.31.0.0/16")
+    assert default_vpc.cidr_block == "172.31.0.0/16"
     default_vpc.reload()
-    default_vpc.is_default.should.be.ok
+    assert default_vpc.is_default is True
 
     subnet = ec2.create_subnet(
         VpcId=default_vpc.id, CidrBlock="172.31.48.0/20", AvailabilityZone="us-west-1a"
     )
     subnet.reload()
-    subnet.map_public_ip_on_launch.shouldnt.be.ok
+    assert subnet.map_public_ip_on_launch is False
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_non_default_subnet():
-    vpc_cli = boto.vpc.connect_to_region("us-west-1")
-
-    # Create the non default VPC
-    vpc = vpc_cli.create_vpc("10.0.0.0/16")
-    vpc.is_default.shouldnt.be.ok
-
-    subnet = vpc_cli.create_subnet(vpc.id, "10.0.0.0/24")
-    subnet = vpc_cli.get_all_subnets(subnet_ids=[subnet.id])[0]
-    subnet.mapPublicIpOnLaunch.should.equal("false")
-
-
-@mock_ec2
-def test_boto3_non_default_subnet():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
 
     # Create the non default VPC
     vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
     vpc.reload()
-    vpc.is_default.shouldnt.be.ok
+    assert vpc.is_default is False
 
     subnet = ec2.create_subnet(
         VpcId=vpc.id, CidrBlock="10.0.0.0/24", AvailabilityZone="us-west-1a"
     )
     subnet.reload()
-    subnet.map_public_ip_on_launch.shouldnt.be.ok
+    assert subnet.map_public_ip_on_launch is False
 
 
-@mock_ec2
+@mock_aws
 def test_modify_subnet_attribute_public_ip_on_launch():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
     client = boto3.client("ec2", region_name="us-west-1")
@@ -220,22 +232,22 @@ def test_modify_subnet_attribute_public_ip_on_launch():
     subnet.reload()
 
     # For non default subnet, attribute value should be 'False'
-    subnet.map_public_ip_on_launch.shouldnt.be.ok
+    assert subnet.map_public_ip_on_launch is False
 
     client.modify_subnet_attribute(
         SubnetId=subnet.id, MapPublicIpOnLaunch={"Value": False}
     )
     subnet.reload()
-    subnet.map_public_ip_on_launch.shouldnt.be.ok
+    assert subnet.map_public_ip_on_launch is False
 
     client.modify_subnet_attribute(
         SubnetId=subnet.id, MapPublicIpOnLaunch={"Value": True}
     )
     subnet.reload()
-    subnet.map_public_ip_on_launch.should.be.ok
+    assert subnet.map_public_ip_on_launch is True
 
 
-@mock_ec2
+@mock_aws
 def test_modify_subnet_attribute_assign_ipv6_address_on_creation():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
     client = boto3.client("ec2", region_name="us-west-1")
@@ -254,22 +266,22 @@ def test_modify_subnet_attribute_assign_ipv6_address_on_creation():
     client.describe_subnets()
 
     # For non default subnet, attribute value should be 'False'
-    subnet.assign_ipv6_address_on_creation.shouldnt.be.ok
+    assert subnet.assign_ipv6_address_on_creation is False
 
     client.modify_subnet_attribute(
         SubnetId=subnet.id, AssignIpv6AddressOnCreation={"Value": False}
     )
     subnet.reload()
-    subnet.assign_ipv6_address_on_creation.shouldnt.be.ok
+    assert subnet.assign_ipv6_address_on_creation is False
 
     client.modify_subnet_attribute(
         SubnetId=subnet.id, AssignIpv6AddressOnCreation={"Value": True}
     )
     subnet.reload()
-    subnet.assign_ipv6_address_on_creation.should.be.ok
+    assert subnet.assign_ipv6_address_on_creation is True
 
 
-@mock_ec2
+@mock_aws
 def test_modify_subnet_attribute_validation():
     # TODO: implement some actual logic
     ec2 = boto3.resource("ec2", region_name="us-west-1")
@@ -279,33 +291,8 @@ def test_modify_subnet_attribute_validation():
     )
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_subnet_get_by_id():
-    conn = boto.vpc.connect_to_region("us-west-1")
-    vpcA = conn.create_vpc("10.0.0.0/16")
-    subnetA = conn.create_subnet(vpcA.id, "10.0.0.0/24", availability_zone="us-west-1a")
-    vpcB = conn.create_vpc("10.0.0.0/16")
-    subnetB1 = conn.create_subnet(
-        vpcB.id, "10.0.0.0/24", availability_zone="us-west-1a"
-    )
-    conn.create_subnet(vpcB.id, "10.0.1.0/24", availability_zone="us-west-1b")
-
-    subnets_by_id = conn.get_all_subnets(subnet_ids=[subnetA.id, subnetB1.id])
-    subnets_by_id.should.have.length_of(2)
-    subnets_by_id = tuple(map(lambda s: s.id, subnets_by_id))
-    subnetA.id.should.be.within(subnets_by_id)
-    subnetB1.id.should.be.within(subnets_by_id)
-
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.get_all_subnets(subnet_ids=["subnet-does_not_exist"])
-    cm.value.code.should.equal("InvalidSubnetID.NotFound")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-
-@mock_ec2
-def test_subnet_get_by_id_boto3():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
     client = boto3.client("ec2", region_name="us-west-1")
     vpcA = ec2.create_vpc(CidrBlock="10.0.0.0/16")
@@ -323,96 +310,20 @@ def test_subnet_get_by_id_boto3():
     subnets_by_id = client.describe_subnets(SubnetIds=[subnetA.id, subnetB1.id])[
         "Subnets"
     ]
-    subnets_by_id.should.have.length_of(2)
-    subnets_by_id = tuple(map(lambda s: s["SubnetId"], subnets_by_id))
-    subnetA.id.should.be.within(subnets_by_id)
-    subnetB1.id.should.be.within(subnets_by_id)
+    assert len(subnets_by_id) == 2
+    subnets_by_id = tuple(s["SubnetId"] for s in subnets_by_id)
+    assert subnetA.id in subnets_by_id
+    assert subnetB1.id in subnets_by_id
 
     with pytest.raises(ClientError) as ex:
         client.describe_subnets(SubnetIds=["subnet-does_not_exist"])
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidSubnetID.NotFound")
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidSubnetID.NotFound"
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_get_subnets_filtering():
-    ec2 = boto.ec2.connect_to_region("us-west-1")
-    conn = boto.vpc.connect_to_region("us-west-1")
-    vpcA = conn.create_vpc("10.0.0.0/16")
-    subnetA = conn.create_subnet(vpcA.id, "10.0.0.0/24", availability_zone="us-west-1a")
-    vpcB = conn.create_vpc("10.0.0.0/16")
-    subnetB1 = conn.create_subnet(
-        vpcB.id, "10.0.0.0/24", availability_zone="us-west-1a"
-    )
-    subnetB2 = conn.create_subnet(
-        vpcB.id, "10.0.1.0/24", availability_zone="us-west-1b"
-    )
-
-    all_subnets = conn.get_all_subnets()
-    all_subnets.should.have.length_of(3 + len(ec2.get_all_zones()))
-
-    # Filter by VPC ID
-    subnets_by_vpc = conn.get_all_subnets(filters={"vpc-id": vpcB.id})
-    subnets_by_vpc.should.have.length_of(2)
-    set([subnet.id for subnet in subnets_by_vpc]).should.equal(
-        set([subnetB1.id, subnetB2.id])
-    )
-
-    # Filter by CIDR variations
-    subnets_by_cidr1 = conn.get_all_subnets(filters={"cidr": "10.0.0.0/24"})
-    subnets_by_cidr1.should.have.length_of(2)
-    set([subnet.id for subnet in subnets_by_cidr1]).should.equal(
-        set([subnetA.id, subnetB1.id])
-    )
-
-    subnets_by_cidr2 = conn.get_all_subnets(filters={"cidr-block": "10.0.0.0/24"})
-    subnets_by_cidr2.should.have.length_of(2)
-    set([subnet.id for subnet in subnets_by_cidr2]).should.equal(
-        set([subnetA.id, subnetB1.id])
-    )
-
-    subnets_by_cidr3 = conn.get_all_subnets(filters={"cidrBlock": "10.0.0.0/24"})
-    subnets_by_cidr3.should.have.length_of(2)
-    set([subnet.id for subnet in subnets_by_cidr3]).should.equal(
-        set([subnetA.id, subnetB1.id])
-    )
-
-    # Filter by VPC ID and CIDR
-    subnets_by_vpc_and_cidr = conn.get_all_subnets(
-        filters={"vpc-id": vpcB.id, "cidr": "10.0.0.0/24"}
-    )
-    subnets_by_vpc_and_cidr.should.have.length_of(1)
-    set([subnet.id for subnet in subnets_by_vpc_and_cidr]).should.equal(
-        set([subnetB1.id])
-    )
-
-    # Filter by subnet ID
-    subnets_by_id = conn.get_all_subnets(filters={"subnet-id": subnetA.id})
-    subnets_by_id.should.have.length_of(1)
-    set([subnet.id for subnet in subnets_by_id]).should.equal(set([subnetA.id]))
-
-    # Filter by availabilityZone
-    subnets_by_az = conn.get_all_subnets(
-        filters={"availabilityZone": "us-west-1a", "vpc-id": vpcB.id}
-    )
-    subnets_by_az.should.have.length_of(1)
-    set([subnet.id for subnet in subnets_by_az]).should.equal(set([subnetB1.id]))
-
-    # Filter by defaultForAz
-
-    subnets_by_az = conn.get_all_subnets(filters={"defaultForAz": "true"})
-    subnets_by_az.should.have.length_of(len(conn.get_all_zones()))
-
-    # Unsupported filter
-    conn.get_all_subnets.when.called_with(
-        filters={"not-implemented-filter": "foobar"}
-    ).should.throw(NotImplementedError)
-
-
-@mock_ec2
-def test_get_subnets_filtering_boto3():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
     client = boto3.client("ec2", region_name="us-west-1")
     vpcA = ec2.create_vpc(CidrBlock="10.0.0.0/16")
@@ -432,45 +343,46 @@ def test_get_subnets_filtering_boto3():
     if settings.TEST_SERVER_MODE:
         # ServerMode may have other tests running that are creating subnets
         all_subnet_ids = [s["SubnetId"] for s in all_subnets]
-        all_subnet_ids.should.contain(subnetA.id)
-        all_subnet_ids.should.contain(subnetB1.id)
-        all_subnet_ids.should.contain(subnetB2.id)
+        assert subnetA.id in all_subnet_ids
+        assert subnetB1.id in all_subnet_ids
+        assert subnetB2.id in all_subnet_ids
     else:
-        all_subnets.should.have.length_of(3 + nr_of_a_zones)
+        assert len(all_subnets) == 3 + nr_of_a_zones
 
     # Filter by VPC ID
     subnets_by_vpc = client.describe_subnets(
         Filters=[{"Name": "vpc-id", "Values": [vpcB.id]}]
     )["Subnets"]
-    subnets_by_vpc.should.have.length_of(2)
-    set([subnet["SubnetId"] for subnet in subnets_by_vpc]).should.equal(
-        set([subnetB1.id, subnetB2.id])
-    )
+    assert len(subnets_by_vpc) == 2
+    assert {subnet["SubnetId"] for subnet in subnets_by_vpc} == {
+        subnetB1.id,
+        subnetB2.id,
+    }
 
     # Filter by CIDR variations
     subnets_by_cidr1 = client.describe_subnets(
         Filters=[{"Name": "cidr", "Values": ["10.0.0.0/24"]}]
     )["Subnets"]
     subnets_by_cidr1 = [s["SubnetId"] for s in subnets_by_cidr1]
-    subnets_by_cidr1.should.contain(subnetA.id)
-    subnets_by_cidr1.should.contain(subnetB1.id)
-    subnets_by_cidr1.shouldnt.contain(subnetB2.id)
+    assert subnetA.id in subnets_by_cidr1
+    assert subnetB1.id in subnets_by_cidr1
+    assert subnetB2.id not in subnets_by_cidr1
 
     subnets_by_cidr2 = client.describe_subnets(
         Filters=[{"Name": "cidr-block", "Values": ["10.0.0.0/24"]}]
     )["Subnets"]
     subnets_by_cidr2 = [s["SubnetId"] for s in subnets_by_cidr2]
-    subnets_by_cidr2.should.contain(subnetA.id)
-    subnets_by_cidr2.should.contain(subnetB1.id)
-    subnets_by_cidr2.shouldnt.contain(subnetB2.id)
+    assert subnetA.id in subnets_by_cidr2
+    assert subnetB1.id in subnets_by_cidr2
+    assert subnetB2.id not in subnets_by_cidr2
 
     subnets_by_cidr3 = client.describe_subnets(
         Filters=[{"Name": "cidrBlock", "Values": ["10.0.0.0/24"]}]
     )["Subnets"]
     subnets_by_cidr3 = [s["SubnetId"] for s in subnets_by_cidr3]
-    subnets_by_cidr3.should.contain(subnetA.id)
-    subnets_by_cidr3.should.contain(subnetB1.id)
-    subnets_by_cidr3.shouldnt.contain(subnetB2.id)
+    assert subnetA.id in subnets_by_cidr3
+    assert subnetB1.id in subnets_by_cidr3
+    assert subnetB2.id not in subnets_by_cidr3
 
     # Filter by VPC ID and CIDR
     subnets_by_vpc_and_cidr = client.describe_subnets(
@@ -479,15 +391,15 @@ def test_get_subnets_filtering_boto3():
             {"Name": "cidr", "Values": ["10.0.0.0/24"]},
         ]
     )["Subnets"]
-    subnets_by_vpc_and_cidr.should.have.length_of(1)
-    subnets_by_vpc_and_cidr[0]["SubnetId"].should.equal(subnetB1.id)
+    assert len(subnets_by_vpc_and_cidr) == 1
+    assert subnets_by_vpc_and_cidr[0]["SubnetId"] == subnetB1.id
 
     # Filter by subnet ID
     subnets_by_id = client.describe_subnets(
         Filters=[{"Name": "subnet-id", "Values": [subnetA.id]}]
     )["Subnets"]
-    subnets_by_id.should.have.length_of(1)
-    subnets_by_id[0]["SubnetId"].should.equal(subnetA.id)
+    assert len(subnets_by_id) == 1
+    assert subnets_by_id[0]["SubnetId"] == subnetA.id
 
     # Filter by availabilityZone
     subnets_by_az = client.describe_subnets(
@@ -496,24 +408,33 @@ def test_get_subnets_filtering_boto3():
             {"Name": "vpc-id", "Values": [vpcB.id]},
         ]
     )["Subnets"]
-    subnets_by_az.should.have.length_of(1)
-    subnets_by_az[0]["SubnetId"].should.equal(subnetB1.id)
+    assert len(subnets_by_az) == 1
+    assert subnets_by_az[0]["SubnetId"] == subnetB1.id
 
     if not settings.TEST_SERVER_MODE:
         # Filter by defaultForAz
         subnets_by_az = client.describe_subnets(
             Filters=[{"Name": "defaultForAz", "Values": ["true"]}]
         )["Subnets"]
-        subnets_by_az.should.have.length_of(nr_of_a_zones)
+        assert len(subnets_by_az) == nr_of_a_zones
 
         # Unsupported filter
         filters = [{"Name": "not-implemented-filter", "Values": ["foobar"]}]
-        client.describe_subnets.when.called_with(Filters=filters).should.throw(
-            NotImplementedError
-        )
+        with pytest.raises(NotImplementedError):
+            client.describe_subnets(Filters=filters)
+
+    # Filter without a Value.
+    subnets_with_invalid_filter = client.describe_subnets(Filters=[{"Name": "vpc-id"}])[
+        "Subnets"
+    ]
+    assert len(subnets_with_invalid_filter) == 0
+    subnets_with_invalid_filter = client.describe_subnets(
+        Filters=[{"Name": "vpc-id", "Values": []}]
+    )["Subnets"]
+    assert len(subnets_with_invalid_filter) == 0
 
 
-@mock_ec2
+@mock_aws
 def test_create_subnet_response_fields():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
     client = boto3.client("ec2", region_name="us-west-1")
@@ -523,29 +444,26 @@ def test_create_subnet_response_fields():
         VpcId=vpc.id, CidrBlock="10.0.0.0/24", AvailabilityZone="us-west-1a"
     )["Subnet"]
 
-    subnet.should.have.key("AvailabilityZone")
-    subnet.should.have.key("AvailabilityZoneId")
-    subnet.should.have.key("AvailableIpAddressCount")
-    subnet.should.have.key("CidrBlock")
-    subnet.should.have.key("State")
-    subnet.should.have.key("SubnetId")
-    subnet.should.have.key("VpcId")
-    subnet.should.have.key("Tags")
-    subnet.should.have.key("DefaultForAz").which.should.equal(False)
-    subnet.should.have.key("MapPublicIpOnLaunch").which.should.equal(False)
-    subnet.should.have.key("OwnerId")
-    subnet.should.have.key("AssignIpv6AddressOnCreation").which.should.equal(False)
+    assert "AvailabilityZone" in subnet
+    assert "AvailabilityZoneId" in subnet
+    assert "AvailableIpAddressCount" in subnet
+    assert "CidrBlock" in subnet
+    assert "State" in subnet
+    assert "SubnetId" in subnet
+    assert "VpcId" in subnet
+    assert "Tags" in subnet
+    assert subnet["DefaultForAz"] is False
+    assert subnet["MapPublicIpOnLaunch"] is False
+    assert "OwnerId" in subnet
+    assert subnet["AssignIpv6AddressOnCreation"] is False
+    assert subnet["Ipv6Native"] is False
 
-    subnet_arn = "arn:aws:ec2:{region}:{owner_id}:subnet/{subnet_id}".format(
-        region=subnet["AvailabilityZone"][0:-1],
-        owner_id=subnet["OwnerId"],
-        subnet_id=subnet["SubnetId"],
-    )
-    subnet.should.have.key("SubnetArn").which.should.equal(subnet_arn)
-    subnet.should.have.key("Ipv6CidrBlockAssociationSet").which.should.equal([])
+    subnet_arn = f"arn:aws:ec2:{subnet['AvailabilityZone'][0:-1]}:{subnet['OwnerId']}:subnet/{subnet['SubnetId']}"
+    assert subnet["SubnetArn"] == subnet_arn
+    assert subnet["Ipv6CidrBlockAssociationSet"] == []
 
 
-@mock_ec2
+@mock_aws
 def test_describe_subnet_response_fields():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
     client = boto3.client("ec2", region_name="us-west-1")
@@ -556,32 +474,29 @@ def test_describe_subnet_response_fields():
     )
 
     subnets = client.describe_subnets(SubnetIds=[subnet_object.id])["Subnets"]
-    subnets.should.have.length_of(1)
+    assert len(subnets) == 1
     subnet = subnets[0]
 
-    subnet.should.have.key("AvailabilityZone")
-    subnet.should.have.key("AvailabilityZoneId")
-    subnet.should.have.key("AvailableIpAddressCount")
-    subnet.should.have.key("CidrBlock")
-    subnet.should.have.key("State")
-    subnet.should.have.key("SubnetId")
-    subnet.should.have.key("VpcId")
-    subnet.shouldnt.have.key("Tags")
-    subnet.should.have.key("DefaultForAz").which.should.equal(False)
-    subnet.should.have.key("MapPublicIpOnLaunch").which.should.equal(False)
-    subnet.should.have.key("OwnerId")
-    subnet.should.have.key("AssignIpv6AddressOnCreation").which.should.equal(False)
+    assert "AvailabilityZone" in subnet
+    assert "AvailabilityZoneId" in subnet
+    assert "AvailableIpAddressCount" in subnet
+    assert "CidrBlock" in subnet
+    assert "State" in subnet
+    assert "SubnetId" in subnet
+    assert "VpcId" in subnet
+    assert subnet["Tags"] == []
+    assert subnet["DefaultForAz"] is False
+    assert subnet["MapPublicIpOnLaunch"] is False
+    assert "OwnerId" in subnet
+    assert subnet["AssignIpv6AddressOnCreation"] is False
+    assert subnet["Ipv6Native"] is False
 
-    subnet_arn = "arn:aws:ec2:{region}:{owner_id}:subnet/{subnet_id}".format(
-        region=subnet["AvailabilityZone"][0:-1],
-        owner_id=subnet["OwnerId"],
-        subnet_id=subnet["SubnetId"],
-    )
-    subnet.should.have.key("SubnetArn").which.should.equal(subnet_arn)
-    subnet.should.have.key("Ipv6CidrBlockAssociationSet").which.should.equal([])
+    subnet_arn = f"arn:aws:ec2:{subnet['AvailabilityZone'][0:-1]}:{subnet['OwnerId']}:subnet/{subnet['SubnetId']}"
+    assert subnet["SubnetArn"] == subnet_arn
+    assert subnet["Ipv6CidrBlockAssociationSet"] == []
 
 
-@mock_ec2
+@mock_aws
 def test_create_subnet_with_invalid_availability_zone():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
     client = boto3.client("ec2", region_name="us-west-1")
@@ -597,67 +512,63 @@ def test_create_subnet_with_invalid_availability_zone():
         )
     assert str(ex.value).startswith(
         "An error occurred (InvalidParameterValue) when calling the CreateSubnet "
-        "operation: Value ({}) for parameter availabilityZone is invalid. Subnets can currently only be created in the following availability zones: ".format(
-            subnet_availability_zone
-        )
+        f"operation: Value ({subnet_availability_zone}) for parameter availabilityZone is invalid. Subnets can currently only be created in the following availability zones: "
     )
 
 
-@mock_ec2
+@mock_aws
 def test_create_subnet_with_invalid_cidr_range():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
 
     vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
     vpc.reload()
-    vpc.is_default.shouldnt.be.ok
+    assert vpc.is_default is False
 
     subnet_cidr_block = "10.1.0.0/20"
     with pytest.raises(ClientError) as ex:
         ec2.create_subnet(VpcId=vpc.id, CidrBlock=subnet_cidr_block)
-    str(ex.value).should.equal(
-        "An error occurred (InvalidSubnet.Range) when calling the CreateSubnet "
-        "operation: The CIDR '{}' is invalid.".format(subnet_cidr_block)
+    assert (
+        str(ex.value)
+        == f"An error occurred (InvalidSubnet.Range) when calling the CreateSubnet operation: The CIDR '{subnet_cidr_block}' is invalid."
     )
 
 
-@mock_ec2
+@mock_aws
 def test_create_subnet_with_invalid_cidr_range_multiple_vpc_cidr_blocks():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
 
     vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
     ec2.meta.client.associate_vpc_cidr_block(CidrBlock="10.1.0.0/16", VpcId=vpc.id)
     vpc.reload()
-    vpc.is_default.shouldnt.be.ok
+    assert vpc.is_default is False
 
     subnet_cidr_block = "10.2.0.0/20"
     with pytest.raises(ClientError) as ex:
         ec2.create_subnet(VpcId=vpc.id, CidrBlock=subnet_cidr_block)
-    str(ex.value).should.equal(
-        "An error occurred (InvalidSubnet.Range) when calling the CreateSubnet "
-        "operation: The CIDR '{}' is invalid.".format(subnet_cidr_block)
+    assert (
+        str(ex.value)
+        == f"An error occurred (InvalidSubnet.Range) when calling the CreateSubnet operation: The CIDR '{subnet_cidr_block}' is invalid."
     )
 
 
-@mock_ec2
+@mock_aws
 def test_create_subnet_with_invalid_cidr_block_parameter():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
 
     vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
     vpc.reload()
-    vpc.is_default.shouldnt.be.ok
+    assert vpc.is_default is False
 
     subnet_cidr_block = "1000.1.0.0/20"
     with pytest.raises(ClientError) as ex:
         ec2.create_subnet(VpcId=vpc.id, CidrBlock=subnet_cidr_block)
-    str(ex.value).should.equal(
-        "An error occurred (InvalidParameterValue) when calling the CreateSubnet "
-        "operation: Value ({}) for parameter cidrBlock is invalid. This is not a valid CIDR block.".format(
-            subnet_cidr_block
-        )
+    assert (
+        str(ex.value)
+        == f"An error occurred (InvalidParameterValue) when calling the CreateSubnet operation: Value ({subnet_cidr_block}) for parameter cidrBlock is invalid. This is not a valid CIDR block."
     )
 
 
-@mock_ec2
+@mock_aws
 def test_create_subnets_with_multiple_vpc_cidr_blocks():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
     client = boto3.client("ec2", region_name="us-west-1")
@@ -665,7 +576,7 @@ def test_create_subnets_with_multiple_vpc_cidr_blocks():
     vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
     ec2.meta.client.associate_vpc_cidr_block(CidrBlock="10.1.0.0/16", VpcId=vpc.id)
     vpc.reload()
-    vpc.is_default.shouldnt.be.ok
+    assert vpc.is_default is False
 
     subnet_cidr_block_primary = "10.0.0.0/24"
     subnet_primary = ec2.create_subnet(
@@ -680,44 +591,42 @@ def test_create_subnets_with_multiple_vpc_cidr_blocks():
     subnets = client.describe_subnets(
         SubnetIds=[subnet_primary.id, subnet_secondary.id]
     )["Subnets"]
-    subnets.should.have.length_of(2)
+    assert len(subnets) == 2
 
     for subnet in subnets:
-        subnet.should.have.key("AvailabilityZone")
-        subnet.should.have.key("AvailabilityZoneId")
-        subnet.should.have.key("AvailableIpAddressCount")
-        subnet.should.have.key("CidrBlock")
-        subnet.should.have.key("State")
-        subnet.should.have.key("SubnetId")
-        subnet.should.have.key("VpcId")
-        subnet.shouldnt.have.key("Tags")
-        subnet.should.have.key("DefaultForAz").which.should.equal(False)
-        subnet.should.have.key("MapPublicIpOnLaunch").which.should.equal(False)
-        subnet.should.have.key("OwnerId")
-        subnet.should.have.key("AssignIpv6AddressOnCreation").which.should.equal(False)
+        assert "AvailabilityZone" in subnet
+        assert "AvailabilityZoneId" in subnet
+        assert "AvailableIpAddressCount" in subnet
+        assert "CidrBlock" in subnet
+        assert "State" in subnet
+        assert "SubnetId" in subnet
+        assert "VpcId" in subnet
+        assert subnet["Tags"] == []
+        assert subnet["DefaultForAz"] is False
+        assert subnet["MapPublicIpOnLaunch"] is False
+        assert "OwnerId" in subnet
+        assert subnet["AssignIpv6AddressOnCreation"] is False
 
 
-@mock_ec2
+@mock_aws
 def test_create_subnets_with_overlapping_cidr_blocks():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
 
     vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
     vpc.reload()
-    vpc.is_default.shouldnt.be.ok
+    assert vpc.is_default is False
 
     subnet_cidr_block = "10.0.0.0/24"
     with pytest.raises(ClientError) as ex:
         ec2.create_subnet(VpcId=vpc.id, CidrBlock=subnet_cidr_block)
         ec2.create_subnet(VpcId=vpc.id, CidrBlock=subnet_cidr_block)
-    str(ex.value).should.equal(
-        "An error occurred (InvalidSubnet.Conflict) when calling the CreateSubnet "
-        "operation: The CIDR '{}' conflicts with another subnet".format(
-            subnet_cidr_block
-        )
+    assert (
+        str(ex.value)
+        == f"An error occurred (InvalidSubnet.Conflict) when calling the CreateSubnet operation: The CIDR '{subnet_cidr_block}' conflicts with another subnet"
     )
 
 
-@mock_ec2
+@mock_aws
 def test_create_subnet_with_tags():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
     vpc = ec2.create_vpc(CidrBlock="172.31.0.0/16")
@@ -739,12 +648,9 @@ def test_create_subnet_with_tags():
     assert subnet.tags == [{"Key": "name", "Value": "some-vpc"}]
 
 
-@mock_ec2
+@mock_aws
+@pytest.mark.requires_clean_slate
 def test_available_ip_addresses_in_subnet():
-    if settings.TEST_SERVER_MODE:
-        raise SkipTest(
-            "ServerMode is not guaranteed to be empty - other subnets will affect the count"
-        )
     ec2 = boto3.resource("ec2", region_name="us-west-1")
     client = boto3.client("ec2", region_name="us-west-1")
 
@@ -764,16 +670,13 @@ def test_available_ip_addresses_in_subnet():
         ("10.0.0.0/27", 27),
         ("10.0.0.0/28", 11),
     ]
-    for (cidr, expected_count) in cidr_range_addresses:
+    for cidr, expected_count in cidr_range_addresses:
         validate_subnet_details(client, vpc, cidr, expected_count)
 
 
-@mock_ec2
+@mock_aws
+@pytest.mark.requires_clean_slate
 def test_available_ip_addresses_in_subnet_with_enis():
-    if settings.TEST_SERVER_MODE:
-        raise SkipTest(
-            "ServerMode is not guaranteed to be empty - other ENI's will affect the count"
-        )
     ec2 = boto3.resource("ec2", region_name="us-west-1")
     client = boto3.client("ec2", region_name="us-west-1")
 
@@ -793,7 +696,7 @@ def test_available_ip_addresses_in_subnet_with_enis():
         ("10.0.0.0/25", 123),
         ("10.0.0.0/26", 59),
     ]
-    for (cidr, expected_count) in cidr_range_addresses:
+    for cidr, expected_count in cidr_range_addresses:
         validate_subnet_details_after_creating_eni(client, vpc, cidr, expected_count)
 
 
@@ -801,7 +704,7 @@ def validate_subnet_details(client, vpc, cidr, expected_ip_address_count):
     subnet = client.create_subnet(
         VpcId=vpc.id, CidrBlock=cidr, AvailabilityZone="us-west-1b"
     )["Subnet"]
-    subnet["AvailableIpAddressCount"].should.equal(expected_ip_address_count)
+    assert subnet["AvailableIpAddressCount"] == expected_ip_address_count
     client.delete_subnet(SubnetId=subnet["SubnetId"])
 
 
@@ -851,29 +754,20 @@ def validate_subnet_details_after_creating_eni(
         private_addresses.extend(
             [address["PrivateIpAddress"] for address in eni["PrivateIpAddresses"]]
         )
-    error_msg = (
-        "Nr of IP addresses for Subnet with CIDR {0} is incorrect. Expected: {1}, Actual: {2}. "
-        "Addresses: {3}"
-    )
-    with sure.ensure(
-        error_msg,
-        cidr,
-        str(expected_ip_address_count),
-        updated_subnet["AvailableIpAddressCount"],
-        str(private_addresses),
-    ):
-        updated_subnet["AvailableIpAddressCount"].should.equal(
-            expected_ip_address_count - ip_addresses_assigned
-        )
+    error_msg = f"Nr of IP addresses for Subnet with CIDR {cidr} is incorrect. Expected: {expected_ip_address_count}, Actual: {updated_subnet['AvailableIpAddressCount']}. Addresses: {private_addresses}"
+    assert (
+        updated_subnet["AvailableIpAddressCount"]
+        == expected_ip_address_count - ip_addresses_assigned
+    ), error_msg
     # Clean up, as we have to create a few more subnets that shouldn't interfere with each other
     for eni in enis_created:
         client.delete_network_interface(NetworkInterfaceId=eni["NetworkInterfaceId"])
     client.delete_subnet(SubnetId=subnet["SubnetId"])
 
 
-@mock_ec2
+@mock_aws
 def test_run_instances_should_attach_to_default_subnet():
-    # https://github.com/spulec/moto/issues/2877
+    # https://github.com/getmoto/moto/issues/2877
     ec2 = boto3.resource("ec2", region_name="sa-east-1")
     client = boto3.client("ec2", region_name="sa-east-1")
     sec_group_name = str(uuid4())[0:6]
@@ -882,7 +776,7 @@ def test_run_instances_should_attach_to_default_subnet():
     )
     # run_instances
     instances = client.run_instances(
-        ImageId=EXAMPLE_AMI_ID, MinCount=1, MaxCount=1, SecurityGroups=[sec_group_name],
+        ImageId=EXAMPLE_AMI_ID, MinCount=1, MaxCount=1, SecurityGroups=[sec_group_name]
     )
     # Assert subnet is created appropriately
     subnets = client.describe_subnets(
@@ -906,7 +800,7 @@ def test_run_instances_should_attach_to_default_subnet():
         )
 
 
-@mock_ec2
+@mock_aws
 def test_describe_subnets_by_vpc_id():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
     client = boto3.client("ec2", region_name="us-west-1")
@@ -923,29 +817,29 @@ def test_describe_subnets_by_vpc_id():
     subnets = client.describe_subnets(
         Filters=[{"Name": "vpc-id", "Values": [vpc1.id]}]
     ).get("Subnets", [])
-    subnets.should.have.length_of(1)
-    subnets[0]["SubnetId"].should.equal(subnet1.id)
+    assert len(subnets) == 1
+    assert subnets[0]["SubnetId"] == subnet1.id
 
     subnets = client.describe_subnets(
         Filters=[{"Name": "vpc-id", "Values": [vpc2.id]}]
     ).get("Subnets", [])
-    subnets.should.have.length_of(1)
-    subnets[0]["SubnetId"].should.equal(subnet2.id)
+    assert len(subnets) == 1
+    assert subnets[0]["SubnetId"] == subnet2.id
 
     # Specify multiple VPCs in Filter.
     subnets = client.describe_subnets(
         Filters=[{"Name": "vpc-id", "Values": [vpc1.id, vpc2.id]}]
     ).get("Subnets", [])
-    subnets.should.have.length_of(2)
+    assert len(subnets) == 2
 
     # Specify mismatched SubnetIds/Filters.
     subnets = client.describe_subnets(
         SubnetIds=[subnet1.id], Filters=[{"Name": "vpc-id", "Values": [vpc2.id]}]
     ).get("Subnets", [])
-    subnets.should.have.length_of(0)
+    assert len(subnets) == 0
 
 
-@mock_ec2
+@mock_aws
 def test_describe_subnets_by_state():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
     client = boto3.client("ec2", region_name="us-west-1")
@@ -959,10 +853,10 @@ def test_describe_subnets_by_state():
         Filters=[{"Name": "state", "Values": ["available"]}]
     ).get("Subnets", [])
     for subnet in subnets:
-        subnet["State"].should.equal("available")
+        assert subnet["State"] == "available"
 
 
-@mock_ec2
+@mock_aws
 def test_associate_subnet_cidr_block():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
     client = boto3.client("ec2", region_name="us-west-1")
@@ -974,27 +868,25 @@ def test_associate_subnet_cidr_block():
 
     subnets = client.describe_subnets(SubnetIds=[subnet_object.id])["Subnets"]
     association_set = subnets[0]["Ipv6CidrBlockAssociationSet"]
-    association_set.should.equal([])
+    assert association_set == []
 
     res = client.associate_subnet_cidr_block(
         Ipv6CidrBlock="1080::1:200C:417A/112", SubnetId=subnet_object.id
     )
-    res.should.have.key("Ipv6CidrBlockAssociation")
+    assert "Ipv6CidrBlockAssociation" in res
     association = res["Ipv6CidrBlockAssociation"]
-    association.should.have.key("AssociationId").match("subnet-cidr-assoc-[a-z0-9]+")
-    association.should.have.key("Ipv6CidrBlock").equals("1080::1:200C:417A/112")
-    association.should.have.key("Ipv6CidrBlockState").equals({"State": "associated"})
+    assert association["AssociationId"].startswith("subnet-cidr-assoc-")
+    assert association["Ipv6CidrBlock"] == "1080::1:200C:417A/112"
+    assert association["Ipv6CidrBlockState"] == {"State": "associated"}
 
     subnets = client.describe_subnets(SubnetIds=[subnet_object.id])["Subnets"]
     association_set = subnets[0]["Ipv6CidrBlockAssociationSet"]
-    association_set.should.have.length_of(1)
-    association_set[0].should.have.key("AssociationId").equal(
-        association["AssociationId"]
-    )
-    association_set[0].should.have.key("Ipv6CidrBlock").equals("1080::1:200C:417A/112")
+    assert len(association_set) == 1
+    assert association_set[0]["AssociationId"] == association["AssociationId"]
+    assert association_set[0]["Ipv6CidrBlock"] == "1080::1:200C:417A/112"
 
 
-@mock_ec2
+@mock_aws
 def test_disassociate_subnet_cidr_block():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
     client = boto3.client("ec2", region_name="us-west-1")
@@ -1013,24 +905,505 @@ def test_disassociate_subnet_cidr_block():
 
     subnets = client.describe_subnets(SubnetIds=[subnet_object.id])["Subnets"]
     association_set = subnets[0]["Ipv6CidrBlockAssociationSet"]
-    association_set.should.have.length_of(2)
+    assert len(association_set) == 2
 
     client.disassociate_subnet_cidr_block(AssociationId=association_id)
 
     subnets = client.describe_subnets(SubnetIds=[subnet_object.id])["Subnets"]
     association_set = subnets[0]["Ipv6CidrBlockAssociationSet"]
-    association_set.should.have.length_of(1)
-    association_set[0]["Ipv6CidrBlock"].should.equal("1080::1:200C:417A/111")
+    assert len(association_set) == 1
+    assert association_set[0]["Ipv6CidrBlock"] == "1080::1:200C:417A/111"
 
 
-@mock_ec2
+@mock_aws
 def test_describe_subnets_dryrun():
     client = boto3.client("ec2", region_name="us-east-1")
 
     with pytest.raises(ClientError) as ex:
         client.describe_subnets(DryRun=True)
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(412)
-    ex.value.response["Error"]["Code"].should.equal("DryRunOperation")
-    ex.value.response["Error"]["Message"].should.equal(
-        "An error occurred (DryRunOperation) when calling the DescribeSubnets operation: Request would have succeeded, but DryRun flag is set"
+    assert_dryrun_error(ex)
+
+
+@pytest.mark.aws_verified
+@ec2_aws_verified(create_vpc=True)
+def test_create_ipv6native_subnet_without_cidr(
+    account_id, ec2_client=None, vpc_id=None
+):
+    with pytest.raises(ClientError) as exc:
+        ec2_client.create_subnet(VpcId=vpc_id, Ipv6Native=True)
+    err = exc.value.response["Error"]
+    assert err["Code"] == "MissingParameter"
+    assert (
+        err["Message"]
+        == "Either 'ipv6CidrBlock' or 'ipv6IpamPoolId' should be provided."
     )
+
+
+@pytest.mark.aws_verified
+@ec2_aws_verified(create_vpc=True)
+def test_create_ipv6native_subnet_with_ipv4_cidr(
+    account_id, ec2_client=None, vpc_id=None
+):
+    with pytest.raises(ClientError) as exc:
+        ec2_client.create_subnet(VpcId=vpc_id, Ipv6Native=True, CidrBlock="10.0.0.0/24")
+    err = exc.value.response["Error"]
+    assert err["Code"] == "MissingParameter"
+    assert (
+        err["Message"]
+        == "Either 'ipv6CidrBlock' or 'ipv6IpamPoolId' should be provided."
+    )
+
+
+@pytest.mark.aws_verified
+@ec2_aws_verified(create_vpc=True)
+def test_create_ipv6native_subnet_with_ipv4_and_ipv6_cidr(
+    account_id, ec2_client=None, vpc_id=None
+):
+    with pytest.raises(ClientError) as exc:
+        ec2_client.create_subnet(
+            VpcId=vpc_id,
+            Ipv6Native=True,
+            CidrBlock="10.0.0.0/24",
+            Ipv6CidrBlock="1080::1:200C:417A/112",
+        )
+    err = exc.value.response["Error"]
+    assert err["Code"] == "InvalidParameterCombination"
+    assert (
+        err["Message"]
+        == "When specifying ipv4 parameters, cidrBlock or ipv4IpamPoolId, you cannot set ipv6Native to true."
+    )
+
+
+@pytest.mark.aws_verified
+@ec2_aws_verified(create_vpc=True)
+def test_create_ipv6native_subnet(account_id, ec2_client=None, vpc_id=None):
+    subnet = None
+    try:
+        ec2_client.associate_vpc_cidr_block(
+            VpcId=vpc_id, AmazonProvidedIpv6CidrBlock=True
+        )["Ipv6CidrBlockAssociation"]
+        assoc = wait_for_ipv6_cidr_block_associations(ec2_client, vpc_id=vpc_id)
+
+        subnet = ec2_client.create_subnet(
+            VpcId=vpc_id, Ipv6Native=True, Ipv6CidrBlock=assoc["Ipv6CidrBlock"]
+        )["Subnet"]
+        assert subnet["AssignIpv6AddressOnCreation"] is True
+        assert subnet["Ipv6Native"] is True
+        assert subnet["State"] == "available"
+        assert (
+            subnet["Ipv6CidrBlockAssociationSet"][0]["Ipv6CidrBlock"]
+            == assoc["Ipv6CidrBlock"]
+        )
+    finally:
+        if subnet:
+            ec2_client.delete_subnet(SubnetId=subnet["SubnetId"])
+
+
+@pytest.mark.aws_verified
+@ec2_aws_verified(create_vpc=True)
+def test_private_dns_name_options(ec2_client=None, vpc_id=None):
+    subnet = None
+    try:
+        subnet = ec2_client.create_subnet(
+            VpcId=vpc_id,
+            CidrBlock="10.0.0.0/24",
+        )["Subnet"]
+
+        assert "PrivateDnsNameOptionsOnLaunch" in subnet
+        assert subnet["PrivateDnsNameOptionsOnLaunch"]["HostnameType"] == "ip-name"
+        assert (
+            subnet["PrivateDnsNameOptionsOnLaunch"]["EnableResourceNameDnsARecord"]
+            is False
+        )
+        assert (
+            subnet["PrivateDnsNameOptionsOnLaunch"]["EnableResourceNameDnsAAAARecord"]
+            is False
+        )
+
+        ec2_client.modify_subnet_attribute(
+            SubnetId=subnet["SubnetId"],
+            EnableResourceNameDnsARecordOnLaunch={"Value": True},
+        )
+        subnet = ec2_client.describe_subnets(SubnetIds=[subnet["SubnetId"]])["Subnets"][
+            0
+        ]
+        assert (
+            subnet["PrivateDnsNameOptionsOnLaunch"]["EnableResourceNameDnsARecord"]
+            is True
+        )
+    finally:
+        if subnet:
+            ec2_client.delete_subnet(SubnetId=subnet["SubnetId"])
+
+
+@mock_aws
+def test_create_subnet_cidr_reservations() -> None:
+    ec2 = boto3.client("ec2", region_name="us-west-1")
+
+    vpc = ec2.create_vpc(
+        CidrBlock="10.0.0.0/16",
+        Ipv6CidrBlock="2602::/56",
+    )["Vpc"]
+
+    subnet = ec2.create_subnet(
+        VpcId=vpc["VpcId"],
+        CidrBlock="10.0.0.0/24",
+        Ipv6CidrBlock="2602::/64",
+    )["Subnet"]
+
+    ipv4_prefix_reservation_response = ec2.create_subnet_cidr_reservation(
+        SubnetId=subnet["SubnetId"],
+        ReservationType="prefix",
+        Cidr="10.0.0.0/31",
+    )
+
+    assert "SubnetCidrReservation" in ipv4_prefix_reservation_response
+    ipv4_prefix_reservation = ipv4_prefix_reservation_response["SubnetCidrReservation"]
+    assert "prefix" == ipv4_prefix_reservation["ReservationType"]
+    assert "10.0.0.0/31" == ipv4_prefix_reservation["Cidr"]
+    assert ipv4_prefix_reservation["SubnetCidrReservationId"].startswith("scr-")
+
+    ipv4_explicit_reservation_response = ec2.create_subnet_cidr_reservation(
+        SubnetId=subnet["SubnetId"],
+        ReservationType="explicit",
+        Cidr="10.0.0.2/32",
+    )
+    assert "SubnetCidrReservation" in ipv4_explicit_reservation_response
+    ipv4_explicit_reservation = ipv4_explicit_reservation_response[
+        "SubnetCidrReservation"
+    ]
+    assert "explicit" == ipv4_explicit_reservation["ReservationType"]
+    assert "10.0.0.2/32" == ipv4_explicit_reservation["Cidr"]
+    assert ipv4_explicit_reservation["SubnetCidrReservationId"].startswith("scr-")
+
+    ipv6_prefix_reservation_response = ec2.create_subnet_cidr_reservation(
+        SubnetId=subnet["SubnetId"],
+        ReservationType="prefix",
+        Cidr="2602::/127",
+    )
+    assert "SubnetCidrReservation" in ipv6_prefix_reservation_response
+    ipv6_prefix_reservation = ipv6_prefix_reservation_response["SubnetCidrReservation"]
+    assert "prefix" == ipv6_prefix_reservation["ReservationType"]
+    assert "2602::/127" == ipv6_prefix_reservation["Cidr"]
+    assert ipv6_prefix_reservation["SubnetCidrReservationId"].startswith("scr-")
+
+    ipv6_explicit_reservation_response = ec2.create_subnet_cidr_reservation(
+        SubnetId=subnet["SubnetId"],
+        ReservationType="explicit",
+        Cidr="2602::2/128",
+        TagSpecifications=[
+            {
+                "ResourceType": "capacity-reservation",
+            }
+        ],
+    )
+    assert "SubnetCidrReservation" in ipv6_explicit_reservation_response
+    ipv6_explicit_reservation = ipv6_explicit_reservation_response[
+        "SubnetCidrReservation"
+    ]
+    assert "explicit" == ipv6_explicit_reservation["ReservationType"]
+    assert "2602::2/128" == ipv6_explicit_reservation["Cidr"]
+    assert ipv6_explicit_reservation["SubnetCidrReservationId"].startswith("scr-")
+
+
+@mock_aws
+def test_create_subnet_cidr_reservations_err_outside_subnet() -> None:
+    ec2 = boto3.client("ec2", region_name="us-west-1")
+
+    vpc = ec2.create_vpc(
+        CidrBlock="10.0.0.0/16",
+        Ipv6CidrBlock="2602::/56",
+    )["Vpc"]
+
+    subnet = ec2.create_subnet(
+        VpcId=vpc["VpcId"],
+        CidrBlock="10.0.0.0/24",
+        Ipv6CidrBlock="2602::/64",
+    )["Subnet"]
+
+    with pytest.raises(ClientError) as exc:
+        ec2.create_subnet_cidr_reservation(
+            SubnetId=subnet["SubnetId"],
+            ReservationType="prefix",
+            Cidr="10.1.0.0/31",  # outside subnet cidr
+        )
+    err = exc.value.response["Error"]
+    assert err["Code"] == "InvalidParameterValue"
+    assert (
+        err["Message"]
+        == "Reservation CIDR should be within subnet CIDR block (10.0.0.0/24)"
+    )
+
+
+@mock_aws
+def test_create_subnet_cidr_reservations_err_overlap_existing() -> None:
+    ec2 = boto3.client("ec2", region_name="us-west-1")
+
+    vpc = ec2.create_vpc(
+        CidrBlock="10.0.0.0/16",
+        Ipv6CidrBlock="2602::/56",
+    )["Vpc"]
+
+    subnet = ec2.create_subnet(
+        VpcId=vpc["VpcId"],
+        CidrBlock="10.0.0.0/24",
+        Ipv6CidrBlock="2602::/64",
+    )["Subnet"]
+
+    ec2.create_subnet_cidr_reservation(
+        SubnetId=subnet["SubnetId"],
+        ReservationType="prefix",
+        Cidr="10.0.0.0/30",
+    )
+
+    with pytest.raises(ClientError) as exc:
+        ec2.create_subnet_cidr_reservation(
+            SubnetId=subnet["SubnetId"],
+            ReservationType="prefix",
+            Cidr="10.0.0.2/31",  # overlap existing
+        )
+    err = exc.value.response["Error"]
+    assert err["Code"] == "InvalidParameterValue"
+    assert (
+        err["Message"]
+        == "Reservation CIDR 10.0.0.2/31 has overlap with existing reserved CIDR block"
+    )
+
+
+@mock_aws
+def test_get_subnet_cidr_reservations_empty() -> None:
+    ec2 = boto3.client("ec2", region_name="us-west-1")
+
+    vpc = ec2.create_vpc(
+        CidrBlock="10.0.0.0/16",
+        Ipv6CidrBlock="2602::/56",
+    )["Vpc"]
+
+    subnet = ec2.create_subnet(
+        VpcId=vpc["VpcId"],
+        CidrBlock="10.0.0.0/24",
+        Ipv6CidrBlock="2602::/64",
+    )["Subnet"]
+
+    reservations = ec2.get_subnet_cidr_reservations(SubnetId=subnet["SubnetId"])
+
+    assert "SubnetIpv4CidrReservations" in reservations
+    assert reservations["SubnetIpv4CidrReservations"] == []
+    assert "SubnetIpv6CidrReservations" in reservations
+    assert reservations["SubnetIpv6CidrReservations"] == []
+
+
+@mock_aws
+def test_get_subnet_cidr_reservations_ipv4() -> None:
+    ec2 = boto3.client("ec2", region_name="us-west-1")
+
+    vpc = ec2.create_vpc(
+        CidrBlock="10.0.0.0/16",
+        Ipv6CidrBlock="2602::/56",
+    )["Vpc"]
+
+    subnet = ec2.create_subnet(
+        VpcId=vpc["VpcId"],
+        CidrBlock="10.0.0.0/24",
+        Ipv6CidrBlock="2602::/64",
+    )["Subnet"]
+
+    scr = ec2.create_subnet_cidr_reservation(
+        SubnetId=subnet["SubnetId"],
+        ReservationType="prefix",
+        Cidr="10.0.0.0/30",
+    )["SubnetCidrReservation"]
+
+    reservations = ec2.get_subnet_cidr_reservations(SubnetId=subnet["SubnetId"])
+
+    assert "SubnetIpv4CidrReservations" in reservations
+    assert len(reservations["SubnetIpv4CidrReservations"]) == 1
+    assert scr["SubnetCidrReservationId"] in [
+        r["SubnetCidrReservationId"] for r in reservations["SubnetIpv4CidrReservations"]
+    ]
+    assert "SubnetIpv6CidrReservations" in reservations
+    assert reservations["SubnetIpv6CidrReservations"] == []
+
+
+@mock_aws
+def test_get_subnet_cidr_reservations_ipv6() -> None:
+    ec2 = boto3.client("ec2", region_name="us-west-1")
+
+    vpc = ec2.create_vpc(
+        CidrBlock="10.0.0.0/16",
+        Ipv6CidrBlock="2602::/56",
+    )["Vpc"]
+
+    subnet = ec2.create_subnet(
+        VpcId=vpc["VpcId"],
+        CidrBlock="10.0.0.0/24",
+        Ipv6CidrBlock="2602::/64",
+    )["Subnet"]
+
+    scr = ec2.create_subnet_cidr_reservation(
+        SubnetId=subnet["SubnetId"],
+        ReservationType="prefix",
+        Cidr="2602::2/127",
+    )["SubnetCidrReservation"]
+
+    reservations = ec2.get_subnet_cidr_reservations(SubnetId=subnet["SubnetId"])
+
+    assert "SubnetIpv4CidrReservations" in reservations
+    assert reservations["SubnetIpv4CidrReservations"] == []
+
+    assert len(reservations["SubnetIpv6CidrReservations"]) == 1
+    assert scr["SubnetCidrReservationId"] in [
+        r["SubnetCidrReservationId"] for r in reservations["SubnetIpv6CidrReservations"]
+    ]
+
+
+@mock_aws
+def test_get_subnet_cidr_reservations_dual() -> None:
+    ec2 = boto3.client("ec2", region_name="us-west-1")
+
+    vpc = ec2.create_vpc(
+        CidrBlock="10.0.0.0/16",
+        Ipv6CidrBlock="2602::/56",
+    )["Vpc"]
+
+    subnet = ec2.create_subnet(
+        VpcId=vpc["VpcId"],
+        CidrBlock="10.0.0.0/24",
+        Ipv6CidrBlock="2602::/64",
+    )["Subnet"]
+
+    scr_v4 = ec2.create_subnet_cidr_reservation(
+        SubnetId=subnet["SubnetId"],
+        ReservationType="prefix",
+        Cidr="10.0.0.0/32",
+    )["SubnetCidrReservation"]
+
+    scr_v6 = ec2.create_subnet_cidr_reservation(
+        SubnetId=subnet["SubnetId"],
+        ReservationType="prefix",
+        Cidr="2602::2/127",
+    )["SubnetCidrReservation"]
+
+    reservations = ec2.get_subnet_cidr_reservations(SubnetId=subnet["SubnetId"])
+
+    assert len(reservations["SubnetIpv4CidrReservations"]) == 1
+    assert scr_v4["SubnetCidrReservationId"] in [
+        r["SubnetCidrReservationId"] for r in reservations["SubnetIpv4CidrReservations"]
+    ]
+
+    assert len(reservations["SubnetIpv6CidrReservations"]) == 1
+    assert scr_v6["SubnetCidrReservationId"] in [
+        r["SubnetCidrReservationId"] for r in reservations["SubnetIpv6CidrReservations"]
+    ]
+
+
+@mock_aws
+def test_get_subnet_cidr_reservations_type_filter() -> None:
+    ec2 = boto3.client("ec2", region_name="us-west-1")
+
+    vpc = ec2.create_vpc(
+        CidrBlock="10.0.0.0/16",
+        Ipv6CidrBlock="2602::/56",
+    )["Vpc"]
+
+    subnet = ec2.create_subnet(
+        VpcId=vpc["VpcId"],
+        CidrBlock="10.0.0.0/24",
+        Ipv6CidrBlock="2602::/64",
+    )["Subnet"]
+
+    scr_v4 = ec2.create_subnet_cidr_reservation(
+        SubnetId=subnet["SubnetId"],
+        ReservationType="prefix",
+        Cidr="10.0.0.0/32",
+    )["SubnetCidrReservation"]
+
+    reservations = ec2.get_subnet_cidr_reservations(
+        SubnetId=subnet["SubnetId"],
+        Filters=[
+            {
+                "Name": "reservationType",
+                "Values": ["prefix"],
+            }
+        ],
+    )
+
+    assert len(reservations["SubnetIpv4CidrReservations"]) == 1
+    assert scr_v4["SubnetCidrReservationId"] in [
+        r["SubnetCidrReservationId"] for r in reservations["SubnetIpv4CidrReservations"]
+    ]
+
+    assert len(reservations["SubnetIpv6CidrReservations"]) == 0
+
+    reservations_bad_type = ec2.get_subnet_cidr_reservations(
+        SubnetId=subnet["SubnetId"],
+        Filters=[
+            {
+                "Name": "reservationType",
+                "Values": ["should not match"],
+            }
+        ],
+    )
+
+    assert len(reservations_bad_type["SubnetIpv4CidrReservations"]) == 0
+    assert len(reservations_bad_type["SubnetIpv6CidrReservations"]) == 0
+
+
+@mock_aws
+def test_delete_subnet_cidr_reservation_not_exists() -> None:
+    ec2 = boto3.client("ec2", region_name="us-west-1")
+
+    vpc = ec2.create_vpc(
+        CidrBlock="10.0.0.0/16",
+    )["Vpc"]
+
+    subnet = ec2.create_subnet(
+        VpcId=vpc["VpcId"],
+        CidrBlock="10.0.0.0/24",
+    )["Subnet"]
+
+    ec2.create_subnet_cidr_reservation(
+        SubnetId=subnet["SubnetId"],
+        ReservationType="prefix",
+        Cidr="10.0.0.0/32",
+    )["SubnetCidrReservation"]
+
+    with pytest.raises(ClientError) as exc:
+        ec2.delete_subnet_cidr_reservation(SubnetCidrReservationId="scr-not-exists")
+
+    err = exc.value.response["Error"]
+    assert err["Code"] == "InvalidSubnetCidrReservationID.NotFound"
+    assert (
+        err["Message"]
+        == "The subnet-cidr-reservation ID 'scr-not-exists' does not exist"
+    )
+
+
+@mock_aws
+def test_delete_subnet_cidr_reservation() -> None:
+    ec2 = boto3.client("ec2", region_name="us-west-1")
+
+    vpc = ec2.create_vpc(
+        CidrBlock="10.0.0.0/16",
+    )["Vpc"]
+
+    subnet = ec2.create_subnet(
+        VpcId=vpc["VpcId"],
+        CidrBlock="10.0.0.0/24",
+    )["Subnet"]
+
+    scr_v4 = ec2.create_subnet_cidr_reservation(
+        SubnetId=subnet["SubnetId"],
+        ReservationType="prefix",
+        Cidr="10.0.0.0/32",
+    )["SubnetCidrReservation"]
+
+    ec2.delete_subnet_cidr_reservation(
+        SubnetCidrReservationId=scr_v4["SubnetCidrReservationId"]
+    )
+
+    reservations = ec2.get_subnet_cidr_reservations(
+        SubnetId=subnet["SubnetId"],
+    )
+    assert len(reservations["SubnetIpv4CidrReservations"]) == 0
+    assert len(reservations["SubnetIpv6CidrReservations"]) == 0

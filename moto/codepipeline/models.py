@@ -1,46 +1,57 @@
 import json
-from datetime import datetime
-
-from boto3 import Session
-from moto.core.utils import iso_8601_datetime_with_milliseconds
-
-from moto.iam.exceptions import IAMNotFoundException
-
-from moto.iam import iam_backends
+from typing import Any
 
 from moto.codepipeline.exceptions import (
     InvalidStructureException,
+    InvalidTagsException,
+    PipelineExecutionNotFoundException,
     PipelineNotFoundException,
     ResourceNotFoundException,
-    InvalidTagsException,
     TooManyTagsException,
 )
-from moto.core import ACCOUNT_ID, BaseBackend, BaseModel
+from moto.core.base_backend import BackendDict, BaseBackend
+from moto.core.common_models import BaseModel
+from moto.core.utils import utcnow
+from moto.iam.exceptions import NotFoundException as IAMNotFoundException
+from moto.iam.models import IAMBackend, iam_backends
+from moto.moto_api._internal import mock_random
+from moto.utilities.utils import get_partition
+
+
+class PipelineExecution(BaseModel):
+    def __init__(
+        self,
+        pipeline_name: str,
+        pipeline_version: int,
+        variables: list[dict[str, str]] | None,
+    ):
+        self.pipeline_execution_id = str(mock_random.uuid4())
+        self.pipeline_name = pipeline_name
+        self.pipeline_version = pipeline_version
+        self.variables = variables or []
+        self.start_time = utcnow()
+        self.last_update_time = self.start_time
+        # moto doesn't actually run any actions, so the execution is
+        # considered to have succeeded as soon as it's started
+        self.status = "Succeeded"
+        self.status_summary: str | None = None
 
 
 class CodePipeline(BaseModel):
-    def __init__(self, region, pipeline):
+    def __init__(self, account_id: str, region: str, pipeline: dict[str, Any]):
         # the version number for a new pipeline is always 1
         pipeline["version"] = 1
 
         self.pipeline = self.add_default_values(pipeline)
-        self.tags = {}
+        self.tags: dict[str, str] = {}
+        # keyed by pipelineExecutionId, insertion order == chronological order
+        self.executions: dict[str, PipelineExecution] = {}
 
-        self._arn = "arn:aws:codepipeline:{0}:{1}:{2}".format(
-            region, ACCOUNT_ID, pipeline["name"]
-        )
-        self._created = datetime.utcnow()
-        self._updated = datetime.utcnow()
+        self.arn = f"arn:{get_partition(region)}:codepipeline:{region}:{account_id}:{pipeline['name']}"
+        self.created = utcnow()
+        self.updated = utcnow()
 
-    @property
-    def metadata(self):
-        return {
-            "pipelineArn": self._arn,
-            "created": iso_8601_datetime_with_milliseconds(self._created),
-            "updated": iso_8601_datetime_with_milliseconds(self._updated),
-        }
-
-    def add_default_values(self, pipeline):
+    def add_default_values(self, pipeline: dict[str, Any]) -> dict[str, Any]:
         for stage in pipeline["stages"]:
             for action in stage["actions"]:
                 if "runOrder" not in action:
@@ -54,7 +65,7 @@ class CodePipeline(BaseModel):
 
         return pipeline
 
-    def validate_tags(self, tags):
+    def validate_tags(self, tags: list[dict[str, str]]) -> None:
         for tag in tags:
             if tag["key"].startswith("aws:"):
                 raise InvalidTagsException(
@@ -64,44 +75,49 @@ class CodePipeline(BaseModel):
                 )
 
         if (len(self.tags) + len(tags)) > 50:
-            raise TooManyTagsException(self._arn)
+            raise TooManyTagsException(self.arn)
 
 
 class CodePipelineBackend(BaseBackend):
-    def __init__(self):
-        self.pipelines = {}
+    def __init__(self, region_name: str, account_id: str):
+        super().__init__(region_name, account_id)
+        self.pipelines: dict[str, CodePipeline] = {}
 
     @staticmethod
-    def default_vpc_endpoint_service(service_region, zones):
+    def default_vpc_endpoint_service(
+        service_region: str, zones: list[str]
+    ) -> list[dict[str, str]]:
         """Default VPC endpoint service."""
         return BaseBackend.default_vpc_endpoint_service_factory(
             service_region, zones, "codepipeline", policy_supported=False
         )
 
     @property
-    def iam_backend(self):
-        return iam_backends["global"]
+    def iam_backend(self) -> IAMBackend:
+        return iam_backends[self.account_id][self.partition]
 
-    def create_pipeline(self, region, pipeline, tags):
-        if pipeline["name"] in self.pipelines:
+    def create_pipeline(
+        self, pipeline: dict[str, Any], tags: list[dict[str, str]]
+    ) -> tuple[dict[str, Any], list[dict[str, str]]]:
+        name = pipeline["name"]
+        if name in self.pipelines:
             raise InvalidStructureException(
-                "A pipeline with the name '{0}' already exists in account '{1}'".format(
-                    pipeline["name"], ACCOUNT_ID
-                )
+                f"A pipeline with the name '{name}' already exists in account '{self.account_id}'"
             )
 
         try:
             role = self.iam_backend.get_role_by_arn(pipeline["roleArn"])
-            service_principal = json.loads(role.assume_role_policy_document)[
+            trust_policy_statements = json.loads(role.assume_role_policy_document)[
                 "Statement"
-            ][0]["Principal"]["Service"]
-            if "codepipeline.amazonaws.com" not in service_principal:
+            ]
+            trusted_service_principals = [
+                i["Principal"]["Service"] for i in trust_policy_statements
+            ]
+            if "codepipeline.amazonaws.com" not in trusted_service_principals:
                 raise IAMNotFoundException("")
         except IAMNotFoundException:
             raise InvalidStructureException(
-                "CodePipeline is not authorized to perform AssumeRole on role {}".format(
-                    pipeline["roleArn"]
-                )
+                f"CodePipeline is not authorized to perform AssumeRole on role {pipeline['roleArn']}"
             )
 
         if len(pipeline["stages"]) < 2:
@@ -109,87 +125,126 @@ class CodePipelineBackend(BaseBackend):
                 "Pipeline has only 1 stage(s). There should be a minimum of 2 stages in a pipeline"
             )
 
-        self.pipelines[pipeline["name"]] = CodePipeline(region, pipeline)
+        self.pipelines[pipeline["name"]] = CodePipeline(
+            self.account_id, self.region_name, pipeline
+        )
 
-        if tags:
+        if tags is not None:
             self.pipelines[pipeline["name"]].validate_tags(tags)
 
             new_tags = {tag["key"]: tag["value"] for tag in tags}
             self.pipelines[pipeline["name"]].tags.update(new_tags)
+        else:
+            tags = []
 
         return pipeline, sorted(tags, key=lambda i: i["key"])
 
-    def get_pipeline(self, name):
+    def get_pipeline(self, name: str) -> CodePipeline:
         codepipeline = self.pipelines.get(name)
 
         if not codepipeline:
             raise PipelineNotFoundException(
-                "Account '{0}' does not have a pipeline with name '{1}'".format(
-                    ACCOUNT_ID, name
-                )
+                f"Account '{self.account_id}' does not have a pipeline with name '{name}'"
             )
 
-        return codepipeline.pipeline, codepipeline.metadata
+        return codepipeline
 
-    def update_pipeline(self, pipeline):
+    def start_pipeline_execution(
+        self, name: str, variables: list[dict[str, str]] | None
+    ) -> str:
+        codepipeline = self.pipelines.get(name)
+
+        if not codepipeline:
+            raise PipelineNotFoundException(
+                f"Account '{self.account_id}' does not have a pipeline with name '{name}'"
+            )
+
+        execution = PipelineExecution(
+            pipeline_name=name,
+            pipeline_version=codepipeline.pipeline["version"],
+            variables=variables,
+        )
+        codepipeline.executions[execution.pipeline_execution_id] = execution
+
+        return execution.pipeline_execution_id
+
+    def get_pipeline_execution(
+        self, pipeline_name: str, pipeline_execution_id: str
+    ) -> PipelineExecution:
+        codepipeline = self.pipelines.get(pipeline_name)
+
+        if not codepipeline:
+            raise PipelineNotFoundException(
+                f"Account '{self.account_id}' does not have a pipeline with name '{pipeline_name}'"
+            )
+
+        execution = codepipeline.executions.get(pipeline_execution_id)
+        if not execution:
+            raise PipelineExecutionNotFoundException(
+                f"Account '{self.account_id}' does not have an execution with id "
+                f"'{pipeline_execution_id}' for pipeline '{pipeline_name}'"
+            )
+
+        return execution
+
+    def list_pipeline_executions(
+        self, pipeline_name: str, max_results: int | None
+    ) -> list[PipelineExecution]:
+        codepipeline = self.pipelines.get(pipeline_name)
+
+        if not codepipeline:
+            raise PipelineNotFoundException(
+                f"Account '{self.account_id}' does not have a pipeline with name '{pipeline_name}'"
+            )
+
+        # most recent execution first
+        executions = list(reversed(codepipeline.executions.values()))
+        if max_results:
+            executions = executions[:max_results]
+
+        return executions
+
+    def update_pipeline(self, pipeline: dict[str, Any]) -> dict[str, Any]:
         codepipeline = self.pipelines.get(pipeline["name"])
 
         if not codepipeline:
             raise ResourceNotFoundException(
-                "The account with id '{0}' does not include a pipeline with the name '{1}'".format(
-                    ACCOUNT_ID, pipeline["name"]
-                )
+                f"The account with id '{self.account_id}' does not include a pipeline with the name '{pipeline['name']}'"
             )
 
         # version number is auto incremented
         pipeline["version"] = codepipeline.pipeline["version"] + 1
-        codepipeline._updated = datetime.utcnow()
+        codepipeline.updated = utcnow()
         codepipeline.pipeline = codepipeline.add_default_values(pipeline)
 
         return codepipeline.pipeline
 
-    def list_pipelines(self):
-        pipelines = []
+    def list_pipelines(self) -> list[CodePipeline]:
+        return sorted(self.pipelines.values(), key=lambda i: i.pipeline["name"])
 
-        for name, codepipeline in self.pipelines.items():
-            pipelines.append(
-                {
-                    "name": name,
-                    "version": codepipeline.pipeline["version"],
-                    "created": codepipeline.metadata["created"],
-                    "updated": codepipeline.metadata["updated"],
-                }
-            )
-
-        return sorted(pipelines, key=lambda i: i["name"])
-
-    def delete_pipeline(self, name):
+    def delete_pipeline(self, name: str) -> None:
         self.pipelines.pop(name, None)
 
-    def list_tags_for_resource(self, arn):
+    def list_tags_for_resource(self, arn: str) -> list[dict[str, str]]:
         name = arn.split(":")[-1]
         pipeline = self.pipelines.get(name)
 
         if not pipeline:
             raise ResourceNotFoundException(
-                "The account with id '{0}' does not include a pipeline with the name '{1}'".format(
-                    ACCOUNT_ID, name
-                )
+                f"The account with id '{self.account_id}' does not include a pipeline with the name '{name}'"
             )
 
         tags = [{"key": key, "value": value} for key, value in pipeline.tags.items()]
 
         return sorted(tags, key=lambda i: i["key"])
 
-    def tag_resource(self, arn, tags):
+    def tag_resource(self, arn: str, tags: list[dict[str, str]]) -> None:
         name = arn.split(":")[-1]
         pipeline = self.pipelines.get(name)
 
         if not pipeline:
             raise ResourceNotFoundException(
-                "The account with id '{0}' does not include a pipeline with the name '{1}'".format(
-                    ACCOUNT_ID, name
-                )
+                f"The account with id '{self.account_id}' does not include a pipeline with the name '{name}'"
             )
 
         pipeline.validate_tags(tags)
@@ -197,27 +252,17 @@ class CodePipelineBackend(BaseBackend):
         for tag in tags:
             pipeline.tags.update({tag["key"]: tag["value"]})
 
-    def untag_resource(self, arn, tag_keys):
+    def untag_resource(self, arn: str, tag_keys: list[str]) -> None:
         name = arn.split(":")[-1]
         pipeline = self.pipelines.get(name)
 
         if not pipeline:
             raise ResourceNotFoundException(
-                "The account with id '{0}' does not include a pipeline with the name '{1}'".format(
-                    ACCOUNT_ID, name
-                )
+                f"The account with id '{self.account_id}' does not include a pipeline with the name '{name}'"
             )
 
         for key in tag_keys:
             pipeline.tags.pop(key, None)
 
 
-codepipeline_backends = {}
-for region in Session().get_available_regions("codepipeline"):
-    codepipeline_backends[region] = CodePipelineBackend()
-for region in Session().get_available_regions(
-    "codepipeline", partition_name="aws-us-gov"
-):
-    codepipeline_backends[region] = CodePipelineBackend()
-for region in Session().get_available_regions("codepipeline", partition_name="aws-cn"):
-    codepipeline_backends[region] = CodePipelineBackend()
+codepipeline_backends = BackendDict(CodePipelineBackend, "codepipeline")

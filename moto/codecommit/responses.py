@@ -2,11 +2,12 @@ import json
 import re
 
 from moto.core.responses import BaseResponse
-from .models import codecommit_backends
+
 from .exceptions import InvalidRepositoryNameException
+from .models import CodeCommitBackend, codecommit_backends
 
 
-def _is_repository_name_valid(repository_name):
+def _is_repository_name_valid(repository_name: str) -> bool:
     name_regex = re.compile(r"[\w\.-]+")
     result = name_regex.split(repository_name)
     if len(result) > 0:
@@ -17,23 +18,25 @@ def _is_repository_name_valid(repository_name):
 
 
 class CodeCommitResponse(BaseResponse):
-    @property
-    def codecommit_backend(self):
-        return codecommit_backends[self.region]
+    def __init__(self) -> None:
+        super().__init__(service_name="codecommit")
 
-    def create_repository(self):
+    @property
+    def codecommit_backend(self) -> CodeCommitBackend:
+        return codecommit_backends[self.current_account][self.region]
+
+    def create_repository(self) -> str:
         if not _is_repository_name_valid(self._get_param("repositoryName")):
             raise InvalidRepositoryNameException()
 
         repository_metadata = self.codecommit_backend.create_repository(
-            self.region,
             self._get_param("repositoryName"),
             self._get_param("repositoryDescription"),
         )
 
         return json.dumps({"repositoryMetadata": repository_metadata})
 
-    def get_repository(self):
+    def get_repository(self) -> str:
         if not _is_repository_name_valid(self._get_param("repositoryName")):
             raise InvalidRepositoryNameException()
 
@@ -43,7 +46,7 @@ class CodeCommitResponse(BaseResponse):
 
         return json.dumps({"repositoryMetadata": repository_metadata})
 
-    def delete_repository(self):
+    def delete_repository(self) -> str:
         if not _is_repository_name_valid(self._get_param("repositoryName")):
             raise InvalidRepositoryNameException()
 

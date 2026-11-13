@@ -3,7 +3,7 @@ from .generic_type import GenericType
 
 class WorkflowType(GenericType):
     @property
-    def _configuration_keys(self):
+    def _configuration_keys(self) -> list[str]:
         return [
             "defaultChildPolicy",
             "defaultExecutionStartToCloseTimeout",
@@ -13,5 +13,5 @@ class WorkflowType(GenericType):
         ]
 
     @property
-    def kind(self):
+    def kind(self) -> str:
         return "workflow"

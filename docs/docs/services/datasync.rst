@@ -12,22 +12,15 @@
 datasync
 ========
 
-|start-h3| Example usage |end-h3|
-
-.. sourcecode:: python
-
-            @mock_datasync
-            def test_datasync_behaviour:
-                boto3.client("datasync")
-                ...
-
-
-
 |start-h3| Implemented features for this service |end-h3|
 
 - [X] cancel_task_execution
 - [ ] create_agent
+- [ ] create_location_azure_blob
 - [ ] create_location_efs
+- [ ] create_location_fsx_lustre
+- [ ] create_location_fsx_ontap
+- [ ] create_location_fsx_open_zfs
 - [ ] create_location_fsx_windows
 - [ ] create_location_hdfs
 - [ ] create_location_nfs
@@ -39,7 +32,11 @@ datasync
 - [X] delete_location
 - [X] delete_task
 - [ ] describe_agent
+- [ ] describe_location_azure_blob
 - [ ] describe_location_efs
+- [ ] describe_location_fsx_lustre
+- [ ] describe_location_fsx_ontap
+- [ ] describe_location_fsx_open_zfs
 - [ ] describe_location_fsx_windows
 - [ ] describe_location_hdfs
 - [ ] describe_location_nfs
@@ -57,9 +54,16 @@ datasync
 - [ ] tag_resource
 - [ ] untag_resource
 - [ ] update_agent
+- [ ] update_location_azure_blob
+- [ ] update_location_efs
+- [ ] update_location_fsx_lustre
+- [ ] update_location_fsx_ontap
+- [ ] update_location_fsx_open_zfs
+- [ ] update_location_fsx_windows
 - [ ] update_location_hdfs
 - [ ] update_location_nfs
 - [ ] update_location_object_storage
+- [ ] update_location_s3
 - [ ] update_location_smb
 - [X] update_task
 - [ ] update_task_execution

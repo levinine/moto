@@ -1,206 +1,182 @@
-from moto.core.responses import BaseResponse
-from moto.ec2.utils import filters_from_querystring
+from moto.core.responses import ActionResult, EmptyResult
+
+from ..exceptions import AuthFailureRestricted, InvalidRequest
+from ._base_response import EC2BaseResponse
 
 
-class AmisResponse(BaseResponse):
-    def create_image(self):
-        name = self.querystring.get("Name")[0]
-        description = self._get_param("Description", if_none="")
+class AmisResponse(EC2BaseResponse):
+    def create_image(self) -> ActionResult:
+        name = self._get_param("Name")
+        description = self._get_param("Description", "")
         instance_id = self._get_param("InstanceId")
-        tag_specifications = self._get_multi_param("TagSpecification")
-        if self.is_not_dryrun("CreateImage"):
-            image = self.ec2_backend.create_image(
-                instance_id,
-                name,
-                description,
-                context=self,
-                tag_specifications=tag_specifications,
-            )
-            template = self.response_template(CREATE_IMAGE_RESPONSE)
-            return template.render(image=image)
+        tag_specifications = self._get_param("TagSpecifications", [])
 
-    def copy_image(self):
+        self.error_on_dryrun()
+
+        image = self.ec2_backend.create_image(
+            instance_id,
+            name,
+            description,
+            tag_specifications=tag_specifications,
+        )
+        result = {"ImageId": image.id}
+        return ActionResult(result)
+
+    def copy_image(self) -> ActionResult:
         source_image_id = self._get_param("SourceImageId")
         source_region = self._get_param("SourceRegion")
         name = self._get_param("Name")
         description = self._get_param("Description")
-        if self.is_not_dryrun("CopyImage"):
-            image = self.ec2_backend.copy_image(
-                source_image_id, source_region, name, description
-            )
-            template = self.response_template(COPY_IMAGE_RESPONSE)
-            return template.render(image=image)
 
-    def deregister_image(self):
-        ami_id = self._get_param("ImageId")
-        if self.is_not_dryrun("DeregisterImage"):
-            success = self.ec2_backend.deregister_image(ami_id)
-            template = self.response_template(DEREGISTER_IMAGE_RESPONSE)
-            return template.render(success=str(success).lower())
-
-    def describe_images(self):
         self.error_on_dryrun()
-        ami_ids = self._get_multi_param("ImageId")
-        filters = filters_from_querystring(self.querystring)
-        owners = self._get_multi_param("Owner")
-        exec_users = self._get_multi_param("ExecutableBy")
-        images = self.ec2_backend.describe_images(
-            ami_ids=ami_ids,
-            filters=filters,
-            exec_users=exec_users,
-            owners=owners,
-            context=self,
+
+        image = self.ec2_backend.copy_image(
+            source_image_id, source_region, name, description
         )
-        template = self.response_template(DESCRIBE_IMAGES_RESPONSE)
-        return template.render(images=images)
+        result = {"ImageId": image.id}
+        return ActionResult(result)
 
-    def describe_image_attribute(self):
+    def deregister_image(self) -> ActionResult:
         ami_id = self._get_param("ImageId")
-        groups = self.ec2_backend.get_launch_permission_groups(ami_id)
-        users = self.ec2_backend.get_launch_permission_users(ami_id)
-        template = self.response_template(DESCRIBE_IMAGE_ATTRIBUTES_RESPONSE)
-        return template.render(ami_id=ami_id, groups=groups, users=users)
 
-    def modify_image_attribute(self):
+        self.error_on_dryrun()
+
+        self.ec2_backend.deregister_image(ami_id)
+        result = {"Return": True}
+        return ActionResult(result)
+
+    def describe_images(self) -> ActionResult:
+        self.error_on_dryrun()
+        ami_ids = self._get_param("ImageIds", [])
+        filters = self._filters_from_querystring()
+        owners = self._get_param("Owners", [])
+        exec_users = self._get_param("ExecutableUsers", [])
+        images = self.ec2_backend.describe_images(
+            ami_ids=ami_ids, filters=filters, exec_users=exec_users, owners=owners
+        )
+        result = {"Images": images}
+        return ActionResult(result)
+
+    def describe_image_attribute(self) -> ActionResult:
         ami_id = self._get_param("ImageId")
-        operation_type = self._get_param("OperationType")
-        group = self._get_param("UserGroup.1")
-        user_ids = self._get_multi_param("UserId")
-        if self.is_not_dryrun("ModifyImageAttribute"):
-            if operation_type == "add":
-                self.ec2_backend.add_launch_permission(
-                    ami_id, user_ids=user_ids, group=group
-                )
-            elif operation_type == "remove":
-                self.ec2_backend.remove_launch_permission(
-                    ami_id, user_ids=user_ids, group=group
-                )
-            return MODIFY_IMAGE_ATTRIBUTE_RESPONSE
+        attribute_name = self._get_param("Attribute")
 
-    def register_image(self):
-        name = self.querystring.get("Name")[0]
-        description = self._get_param("Description", if_none="")
-        if self.is_not_dryrun("RegisterImage"):
-            image = self.ec2_backend.register_image(name, description)
-            template = self.response_template(REGISTER_IMAGE_RESPONSE)
-            return template.render(image=image)
+        # only valid attributes as per
+        # https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/ec2/client/describe_image_attribute.html
+        valid_attributes_list = {
+            "description": "description",
+            "kernel": "kernel_id",
+            "ramdisk": "ramdisk",
+            "launchPermission": "launch_permissions",
+            "productCodes": "product_codes",
+            "blockDeviceMapping": "bdm",
+            "sriovNetSupport": "sriov",
+            "bootMode": "boot_mode",
+            "tpmSupport": "tmp",
+            "uefiData": "uefi",
+            "lastLaunchedTime": "lld",
+            "imdsSupport": "imds",
+        }
+        if attribute_name not in valid_attributes_list:
+            raise InvalidRequest
+        elif attribute_name == "blockDeviceMapping":
+            # replicate real aws behaviour and throw and error
+            # https://github.com/aws/aws-cli/issues/1083
+            raise AuthFailureRestricted
 
-    def reset_image_attribute(self):
-        if self.is_not_dryrun("ResetImageAttribute"):
-            raise NotImplementedError(
-                "AMIs.reset_image_attribute is not yet implemented"
+        attribute_value = None
+        launch_permissions = None
+        if attribute_name == "launchPermission":
+            launch_permissions = self.ec2_backend.describe_image_attribute(
+                ami_id, valid_attributes_list[attribute_name]
+            )
+        else:
+            attribute_value = self.ec2_backend.describe_image_attribute(
+                ami_id, valid_attributes_list[attribute_name]
             )
 
+        result = {"ImageId": ami_id}
+        if attribute_name == "productCodes":
+            result["ProductCodes"] = [
+                {"ProductCodeId": code, "ProductCodeType": "marketplace"}
+                for code in attribute_value  # type: ignore[union-attr]
+            ]
+        elif attribute_name == "launchPermission":
+            result["LaunchPermissions"] = launch_permissions
+        else:
+            result[attribute_name] = {"Value": attribute_value}
 
-CREATE_IMAGE_RESPONSE = """<CreateImageResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-   <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-   <imageId>{{ image.id }}</imageId>
-</CreateImageResponse>"""
+        return ActionResult(result)
 
-COPY_IMAGE_RESPONSE = """<CopyImageResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-   <requestId>60bc441d-fa2c-494d-b155-5d6a3EXAMPLE</requestId>
-   <imageId>{{ image.id }}</imageId>
-</CopyImageResponse>"""
+    def modify_image_attribute(self) -> ActionResult:
+        ami_id = self._get_param("ImageId")
+        launch_permissions_to_add = self._get_param("LaunchPermission", {}).get(
+            "Add", []
+        )
+        launch_permissions_to_remove = self._get_param("LaunchPermission", {}).get(
+            "Remove", []
+        )
+        # If only one OperationType is added, the other attributes are submitted as different variables
+        operation_type = self._get_param("OperationType")
+        if operation_type in ["add", "remove"]:
+            group = self._get_param("UserGroups", [])
+            lp = (
+                launch_permissions_to_add
+                if operation_type == "add"
+                else launch_permissions_to_remove
+            )
+            if group:
+                lp.append({"Group": group[0]})
 
-# TODO almost all of these params should actually be templated based on
-# the ec2 image
-DESCRIBE_IMAGES_RESPONSE = """<DescribeImagesResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-  <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-  <imagesSet>
-    {% for image in images %}
-        <item>
-          <imageId>{{ image.id }}</imageId>
-          <imageLocation>{{ image.image_location }}</imageLocation>
-          <imageState>{{ image.state }}</imageState>
-          <imageOwnerId>{{ image.owner_id }}</imageOwnerId>
-          <isPublic>{{ image.is_public_string }}</isPublic>
-          <architecture>{{ image.architecture }}</architecture>
-          <imageType>{{ image.image_type }}</imageType>
-          <kernelId>{{ image.kernel_id }}</kernelId>
-          <ramdiskId>ari-1a2b3c4d</ramdiskId>
-          <imageOwnerAlias>amazon</imageOwnerAlias>
-          <creationDate>{{ image.creation_date }}</creationDate>
-          <name>{{ image.name }}</name>
-          {% if image.platform %}
-             <platform>{{ image.platform }}</platform>
-          {% endif %}
-          <description>{{ image.description }}</description>
-          <rootDeviceType>{{ image.root_device_type }}</rootDeviceType>
-          <rootDeviceName>{{ image.root_device_name }}</rootDeviceName>
-          <blockDeviceMapping>
-            <item>
-              <deviceName>{{ image.root_device_name }}</deviceName>
-              <ebs>
-                <snapshotId>{{ image.ebs_snapshot.id }}</snapshotId>
-                <volumeSize>15</volumeSize>
-                <deleteOnTermination>false</deleteOnTermination>
-                <volumeType>standard</volumeType>
-              </ebs>
-            </item>
-          </blockDeviceMapping>
-          <virtualizationType>{{ image.virtualization_type }}</virtualizationType>
-          <tagSet>
-            {% for tag in image.get_tags() %}
-              <item>
-                <resourceId>{{ tag.resource_id }}</resourceId>
-                <resourceType>{{ tag.resource_type }}</resourceType>
-                <key>{{ tag.key }}</key>
-                <value>{{ tag.value }}</value>
-              </item>
-            {% endfor %}
-          </tagSet>
-          <hypervisor>xen</hypervisor>
-        </item>
-    {% endfor %}
-  </imagesSet>
-</DescribeImagesResponse>"""
+            for user_id in self._get_param("UserIds", []):
+                lp.append({"UserId": user_id})
 
-DESCRIBE_IMAGE_RESPONSE = """<DescribeImageAttributeResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-   <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-   <imageId>{{ image.id }}</imageId>
-   <{{ key }}>
-     <value>{{ value }}</value>
-   </{{key }}>
-</DescribeImageAttributeResponse>"""
+            org_arn = self._get_param("OrganizationArns", [])
+            if org_arn:
+                lp.append({"OrganizationArn": org_arn[0]})
 
-DEREGISTER_IMAGE_RESPONSE = """<DeregisterImageResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-  <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-  <return>{{ success }}</return>
-</DeregisterImageResponse>"""
+            ou_arn = self._get_param("OrganizationalUnitArns", [])
+            if ou_arn:
+                lp.append({"OrganizationalUnitArn": ou_arn[0]})
 
-DESCRIBE_IMAGE_ATTRIBUTES_RESPONSE = """
-<DescribeImageAttributeResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-   <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-   <imageId>{{ ami_id }}</imageId>
-   {% if not groups and not users %}
-      <launchPermission/>
-   {% else %}
-      <launchPermission>
-         {% if groups %}
-            {% for group in groups %}
-               <item>
-                  <group>{{ group }}</group>
-               </item>
-            {% endfor %}
-         {% endif %}
-         {% if users %}
-            {% for user in users %}
-               <item>
-                  <userId>{{ user }}</userId>
-               </item>
-            {% endfor %}
-         {% endif %}
-      </launchPermission>
-   {% endif %}
-</DescribeImageAttributeResponse>"""
+        self.error_on_dryrun()
 
-MODIFY_IMAGE_ATTRIBUTE_RESPONSE = """
-<ModifyImageAttributeResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-   <return>true</return>
-</ModifyImageAttributeResponse>
-"""
+        self.ec2_backend.modify_image_attribute(
+            ami_id=ami_id,
+            launch_permissions_to_add=launch_permissions_to_add,
+            launch_permissions_to_remove=launch_permissions_to_remove,
+        )
+        return EmptyResult()
 
-REGISTER_IMAGE_RESPONSE = """<RegisterImageResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-   <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-   <imageId>{{ image.id }}</imageId>
-</RegisterImageResponse>"""
+    def register_image(self) -> ActionResult:
+        name = self._get_param("Name")
+        description = self._get_param("Description", "")
+
+        self.error_on_dryrun()
+
+        image = self.ec2_backend.register_image(name, description)
+        result = {"ImageId": image.id}
+        return ActionResult(result)
+
+    def reset_image_attribute(self) -> str:
+        self.error_on_dryrun()
+
+        raise NotImplementedError("AMIs.reset_image_attribute is not yet implemented")
+
+    def disable_image(self) -> ActionResult:
+        ami_id = self._get_param("ImageId")
+
+        self.error_on_dryrun()
+
+        self.ec2_backend.disable_image(ami_id)
+        result = {"Return": True}
+        return ActionResult(result)
+
+    def enable_image(self) -> ActionResult:
+        ami_id = self._get_param("ImageId")
+
+        self.error_on_dryrun()
+
+        self.ec2_backend.enable_image(ami_id)
+        result = {"Return": True}
+        return ActionResult(result)

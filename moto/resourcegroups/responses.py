@@ -1,22 +1,21 @@
 import json
-
-try:
-    from urllib import unquote
-except ImportError:
-    from urllib.parse import unquote
+import re
+from urllib.parse import unquote
 
 from moto.core.responses import BaseResponse
-from .models import resourcegroups_backends
+
+from .models import ResourceGroupsBackend, resourcegroups_backends
 
 
 class ResourceGroupsResponse(BaseResponse):
-    SERVICE_NAME = "resource-groups"
+    def __init__(self) -> None:
+        super().__init__(service_name="resource-groups")
 
     @property
-    def resourcegroups_backend(self):
-        return resourcegroups_backends[self.region]
+    def resourcegroups_backend(self) -> ResourceGroupsBackend:
+        return resourcegroups_backends[self.current_account][self.region]
 
-    def create_group(self):
+    def create_group(self) -> str:
         name = self._get_param("Name")
         description = self._get_param("Description")
         resource_query = self._get_param("ResourceQuery")
@@ -42,7 +41,7 @@ class ResourceGroupsResponse(BaseResponse):
             }
         )
 
-    def delete_group(self):
+    def delete_group(self) -> str:
         group_name = self._get_param("GroupName") or self._get_param("Group")
         group = self.resourcegroups_backend.delete_group(group_name=group_name)
         return json.dumps(
@@ -55,7 +54,7 @@ class ResourceGroupsResponse(BaseResponse):
             }
         )
 
-    def get_group(self):
+    def get_group(self) -> str:
         group_name = self._get_param("GroupName")
         group = self.resourcegroups_backend.get_group(group_name=group_name)
         return json.dumps(
@@ -68,11 +67,11 @@ class ResourceGroupsResponse(BaseResponse):
             }
         )
 
-    def get_group_query(self):
+    def get_group_query(self) -> str:
         group_name = self._get_param("GroupName")
         group_arn = self._get_param("Group")
         if group_arn and not group_name:
-            group_name = group_arn.split(":")[-1]
+            group_name = re.split(r":[0-9]{12}:group/", group_arn)[-1]
         group = self.resourcegroups_backend.get_group(group_name=group_name)
         return json.dumps(
             {
@@ -83,28 +82,19 @@ class ResourceGroupsResponse(BaseResponse):
             }
         )
 
-    def get_tags(self):
+    def get_tags(self) -> str:
         arn = unquote(self._get_param("Arn"))
         return json.dumps(
             {"Arn": arn, "Tags": self.resourcegroups_backend.get_tags(arn=arn)}
         )
 
-    def list_group_resources(self):
+    def list_group_resources(self) -> None:
         raise NotImplementedError(
             "ResourceGroups.list_group_resources is not yet implemented"
         )
 
-    def list_groups(self):
-        filters = self._get_param("Filters")
-        if filters:
-            raise NotImplementedError(
-                "ResourceGroups.list_groups with filter parameter is not yet implemented"
-            )
-        max_results = self._get_int_param("MaxResults", 50)
-        next_token = self._get_param("NextToken")
-        groups = self.resourcegroups_backend.list_groups(
-            filters=filters, max_results=max_results, next_token=next_token
-        )
+    def list_groups(self) -> str:
+        groups = self.resourcegroups_backend.list_groups()
         return json.dumps(
             {
                 "GroupIdentifiers": [
@@ -119,16 +109,16 @@ class ResourceGroupsResponse(BaseResponse):
                     }
                     for group in groups.values()
                 ],
-                "NextToken": next_token,
+                "NextToken": None,
             }
         )
 
-    def search_resources(self):
+    def search_resources(self) -> None:
         raise NotImplementedError(
             "ResourceGroups.search_resources is not yet implemented"
         )
 
-    def tag(self):
+    def tag(self) -> str:
         arn = unquote(self._get_param("Arn"))
         tags = self._get_param("Tags")
         if arn not in self.resourcegroups_backend.groups.by_arn:
@@ -138,7 +128,7 @@ class ResourceGroupsResponse(BaseResponse):
         self.resourcegroups_backend.tag(arn=arn, tags=tags)
         return json.dumps({"Arn": arn, "Tags": tags})
 
-    def untag(self):
+    def untag(self) -> str:
         arn = unquote(self._get_param("Arn"))
         keys = self._get_param("Keys")
         if arn not in self.resourcegroups_backend.groups.by_arn:
@@ -148,7 +138,7 @@ class ResourceGroupsResponse(BaseResponse):
         self.resourcegroups_backend.untag(arn=arn, keys=keys)
         return json.dumps({"Arn": arn, "Keys": keys})
 
-    def update_group(self):
+    def update_group(self) -> str:
         group_name = self._get_param("GroupName")
         description = self._get_param("Description", "")
         group = self.resourcegroups_backend.update_group(
@@ -164,12 +154,12 @@ class ResourceGroupsResponse(BaseResponse):
             }
         )
 
-    def update_group_query(self):
+    def update_group_query(self) -> str:
         group_name = self._get_param("GroupName")
         resource_query = self._get_param("ResourceQuery")
         group_arn = self._get_param("Group")
         if group_arn and not group_name:
-            group_name = group_arn.split(":")[-1]
+            group_name = re.split(r":[0-9]{12}:group/", group_arn)[-1]
         group = self.resourcegroups_backend.update_group_query(
             group_name=group_name, resource_query=resource_query
         )
@@ -177,17 +167,53 @@ class ResourceGroupsResponse(BaseResponse):
             {"GroupQuery": {"GroupName": group.name, "ResourceQuery": resource_query}}
         )
 
-    def get_group_configuration(self):
+    def get_group_configuration(self) -> str:
         group_name = self._get_param("Group")
         configuration = self.resourcegroups_backend.get_group_configuration(
             group_name=group_name
         )
         return json.dumps({"GroupConfiguration": {"Configuration": configuration}})
 
-    def put_group_configuration(self):
+    def put_group_configuration(self) -> str:
         group_name = self._get_param("Group")
         configuration = self._get_param("Configuration")
         self.resourcegroups_backend.put_group_configuration(
             group_name=group_name, configuration=configuration
         )
         return json.dumps({"GroupConfiguration": {"Configuration": configuration}})
+
+    def get_tag_sync_task(self) -> str:
+        task_arn = self._get_param("TaskArn")
+        tag_sync_task = self.resourcegroups_backend.get_tag_sync_task(
+            task_arn=task_arn,
+        )
+        return json.dumps(tag_sync_task, default=str)
+
+    def cancel_tag_sync_task(self) -> None:
+        task_arn = self._get_param("TaskArn")
+        self.resourcegroups_backend.cancel_tag_sync_task(
+            task_arn=task_arn,
+        )
+
+    def list_tag_sync_tasks(self) -> str:
+        filters = self._get_param("Filters")
+        max_results = self._get_param("MaxResults")
+        tag_sync_tasks = self.resourcegroups_backend.list_tag_sync_tasks(
+            filters=filters, max_results=max_results
+        )
+        return json.dumps({"TagSyncTasks": tag_sync_tasks}, default=str)
+
+    def start_tag_sync_task(self) -> str:
+        group = self._get_param("Group")
+        tag_key = self._get_param("TagKey")
+        tag_value = self._get_param("TagValue")
+        resource_query = self._get_param("ResourceQuery")
+        role_arn = self._get_param("RoleArn")
+        tag_sync_task = self.resourcegroups_backend.start_tag_sync_task(
+            group=group,
+            tag_key=tag_key,
+            tag_value=tag_value,
+            resource_query=resource_query,
+            role_arn=role_arn,
+        )
+        return json.dumps(tag_sync_task)

@@ -1,13 +1,17 @@
-import json
-
-from werkzeug.exceptions import HTTPException
+from moto.core.exceptions import JsonRESTError
 
 
-class BadRequestException(HTTPException):
+class BadRequestException(JsonRESTError):
     code = 400
 
-    def __init__(self, message, **kwargs):
-        super(BadRequestException, self).__init__(
-            description=json.dumps({"Message": message, "Code": "BadRequestException"}),
-            **kwargs
-        )
+    def __init__(self, message: str):
+        super().__init__(error_type="BadRequestException", message=message)
+
+
+class NotFoundException(JsonRESTError):
+    code = 404
+
+    def __init__(
+        self, message: str = "One or more of the specified resources don't exist."
+    ):
+        super().__init__(error_type="NotFoundException", message=message)

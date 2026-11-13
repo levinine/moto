@@ -12,16 +12,7 @@
 ssm
 ===
 
-|start-h3| Example usage |end-h3|
-
-.. sourcecode:: python
-
-            @mock_ssm
-            def test_ssm_behaviour:
-                boto3.client("ssm")
-                ...
-
-
+.. autoclass:: moto.ssm.models.SimpleSystemManagerBackend
 
 |start-h3| Implemented features for this service |end-h3|
 
@@ -32,34 +23,52 @@ ssm
 - [ ] create_activation
 - [ ] create_association
 - [ ] create_association_batch
+- [ ] create_cloud_connector
 - [X] create_document
 - [X] create_maintenance_window
   
-        Creates a maintenance window. No error handling or input validation has been implemented yet.
-        
+Creates a maintenance window. No error handling or input validation has been implemented yet.
+
 
 - [ ] create_ops_item
 - [ ] create_ops_metadata
-- [ ] create_patch_baseline
+- [X] create_patch_baseline
+  
+Registers a patch baseline. No error handling or input validation has been implemented yet.
+
+
 - [ ] create_resource_data_sync
 - [ ] delete_activation
 - [ ] delete_association
+- [ ] delete_cloud_connector
 - [X] delete_document
 - [ ] delete_inventory
 - [X] delete_maintenance_window
   
-        Assumes the provided WindowId exists. No error handling has been implemented yet.
-        
+Delete a maintenance window.
 
+
+- [ ] delete_ops_item
 - [ ] delete_ops_metadata
 - [X] delete_parameter
 - [X] delete_parameters
-- [ ] delete_patch_baseline
+- [X] delete_patch_baseline
+  
+Assumes the provided BaselineId exists. No error handling has been implemented yet.
+
+
 - [ ] delete_resource_data_sync
+- [ ] delete_resource_policy
 - [ ] deregister_managed_instance
-- [ ] deregister_patch_baseline_for_patch_group
-- [ ] deregister_target_from_maintenance_window
-- [ ] deregister_task_from_maintenance_window
+- [X] deregister_patch_baseline_for_patch_group
+  deregister a patch baseline for os on patch group, set default
+
+- [X] deregister_target_from_maintenance_window
+  
+Deregisters a target from a maintenance window. No error handling has been implemented yet.
+
+
+- [X] deregister_task_from_maintenance_window
 - [ ] describe_activations
 - [ ] describe_association
 - [ ] describe_association_execution_targets
@@ -69,6 +78,10 @@ ssm
 - [ ] describe_available_patches
 - [X] describe_document
 - [X] describe_document_permission
+  
+Parameters max_results, permission_type, and next_token not yet implemented
+
+
 - [ ] describe_effective_instance_associations
 - [ ] describe_effective_patches_for_patch_baseline
 - [ ] describe_instance_associations_status
@@ -76,47 +89,54 @@ ssm
 - [ ] describe_instance_patch_states
 - [ ] describe_instance_patch_states_for_patch_group
 - [ ] describe_instance_patches
+- [ ] describe_instance_properties
 - [ ] describe_inventory_deletions
 - [ ] describe_maintenance_window_execution_task_invocations
 - [ ] describe_maintenance_window_execution_tasks
 - [ ] describe_maintenance_window_executions
 - [ ] describe_maintenance_window_schedule
-- [ ] describe_maintenance_window_targets
-- [ ] describe_maintenance_window_tasks
+- [X] describe_maintenance_window_targets
+  
+Describes all targets for a maintenance window. No error handling has been implemented yet.
+
+
+- [X] describe_maintenance_window_tasks
 - [X] describe_maintenance_windows
   
-        Returns all windows. No pagination has been implemented yet. Only filtering for Name is supported.
-        The NextExecutionTime-field is not returned.
+Returns all windows. No pagination has been implemented yet. Only filtering for Name is supported.
+The NextExecutionTime-field is not returned.
 
-        
+
 
 - [ ] describe_maintenance_windows_for_target
 - [ ] describe_ops_items
 - [X] describe_parameters
-- [ ] describe_patch_baselines
+- [X] describe_patch_baselines
+  
+Returns all baselines. No pagination has been implemented yet.
+
+
 - [ ] describe_patch_group_state
 - [ ] describe_patch_groups
 - [ ] describe_patch_properties
 - [ ] describe_sessions
 - [ ] disassociate_ops_item_related_item
+- [ ] get_access_token
 - [ ] get_automation_execution
 - [ ] get_calendar_state
+- [ ] get_cloud_connector
 - [X] get_command_invocation
-  
-        https://docs.aws.amazon.com/systems-manager/latest/APIReference/API_GetCommandInvocation.html
-        
-
 - [ ] get_connection_status
 - [ ] get_default_patch_baseline
 - [ ] get_deployable_patch_snapshot_for_instance
 - [X] get_document
+- [ ] get_execution_preview
 - [ ] get_inventory
 - [ ] get_inventory_schema
 - [X] get_maintenance_window
   
-        The window is assumed to exist - no error handling has been implemented yet.
-        The NextExecutionTime-field is not returned.
-        
+The NextExecutionTime-field is not returned.
+
 
 - [ ] get_maintenance_window_execution
 - [ ] get_maintenance_window_execution_task
@@ -132,16 +152,20 @@ ssm
   Implement the get-parameters-by-path-API in the backend.
 
 - [ ] get_patch_baseline
-- [ ] get_patch_baseline_for_patch_group
+- [X] get_patch_baseline_for_patch_group
+  get baselineid for patch group for operating system
+
+- [ ] get_resource_policies
 - [ ] get_service_setting
 - [X] label_parameter_version
 - [ ] list_association_versions
 - [ ] list_associations
+- [ ] list_cloud_connectors
 - [ ] list_command_invocations
 - [X] list_commands
   
-        https://docs.aws.amazon.com/systems-manager/latest/APIReference/API_ListCommands.html
-        
+Pagination and the Filters-parameter is not yet implemented
+
 
 - [ ] list_compliance_items
 - [ ] list_compliance_summaries
@@ -149,6 +173,8 @@ ssm
 - [ ] list_document_versions
 - [X] list_documents
 - [ ] list_inventory_entries
+- [ ] list_nodes
+- [ ] list_nodes_summary
 - [ ] list_ops_item_events
 - [ ] list_ops_item_related_items
 - [ ] list_ops_metadata
@@ -159,24 +185,34 @@ ssm
 - [ ] put_compliance_items
 - [ ] put_inventory
 - [X] put_parameter
+- [ ] put_resource_policy
 - [ ] register_default_patch_baseline
-- [ ] register_patch_baseline_for_patch_group
-- [ ] register_target_with_maintenance_window
-- [ ] register_task_with_maintenance_window
+- [X] register_patch_baseline_for_patch_group
+  register a patch group in ssm backend
+
+- [X] register_target_with_maintenance_window
+  
+Registers a target with a maintenance window. No error handling has been implemented yet.
+
+
+- [X] register_task_with_maintenance_window
 - [X] remove_tags_from_resource
 - [ ] reset_service_setting
 - [ ] resume_session
 - [ ] send_automation_signal
 - [X] send_command
+- [ ] start_access_request
 - [ ] start_associations_once
 - [ ] start_automation_execution
 - [ ] start_change_request_execution
+- [ ] start_execution_preview
 - [ ] start_session
 - [ ] stop_automation_execution
 - [ ] terminate_session
-- [ ] unlabel_parameter_version
+- [X] unlabel_parameter_version
 - [ ] update_association
 - [ ] update_association_status
+- [ ] update_cloud_connector
 - [X] update_document
 - [X] update_document_default_version
 - [ ] update_document_metadata
@@ -189,4 +225,5 @@ ssm
 - [ ] update_patch_baseline
 - [ ] update_resource_data_sync
 - [ ] update_service_setting
+- [ ] validate_cloud_connector
 

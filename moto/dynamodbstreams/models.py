@@ -1,16 +1,22 @@
-import os
-import json
+from __future__ import annotations
+
 import base64
+import os
+from typing import Any
 
-from boto3 import Session
-
-from moto.core import BaseBackend, BaseModel
-from moto.dynamodb2.models import dynamodb_backends, DynamoJsonEncoder
+from moto.core.base_backend import BackendDict, BaseBackend
+from moto.core.common_models import BaseModel
+from moto.dynamodb.models import DynamoDBBackend, dynamodb_backends
+from moto.dynamodb.models.table import StreamShard, Table
 
 
 class ShardIterator(BaseModel):
     def __init__(
-        self, streams_backend, stream_shard, shard_iterator_type, sequence_number=None
+        self,
+        streams_backend: DynamoDBStreamsBackend,
+        stream_shard: StreamShard,
+        shard_iterator_type: str,
+        sequence_number: int | None = None,
     ):
         self.id = base64.b64encode(os.urandom(472)).decode("utf-8")
         self.streams_backend = streams_backend
@@ -23,22 +29,15 @@ class ShardIterator(BaseModel):
                 stream_shard.items
             )
         elif shard_iterator_type == "AT_SEQUENCE_NUMBER":
-            self.sequence_number = sequence_number
+            self.sequence_number = sequence_number  # type: ignore[assignment]
         elif shard_iterator_type == "AFTER_SEQUENCE_NUMBER":
-            self.sequence_number = sequence_number + 1
+            self.sequence_number = sequence_number + 1  # type: ignore[operator]
 
     @property
-    def arn(self):
-        return "{}/stream/{}|1|{}".format(
-            self.stream_shard.table.table_arn,
-            self.stream_shard.table.latest_stream_label,
-            self.id,
-        )
+    def arn(self) -> str:
+        return f"{self.stream_shard.table.table_arn}/stream/{self.stream_shard.table.latest_stream_label}|1|{self.id}"
 
-    def to_json(self):
-        return {"ShardIterator": self.arn}
-
-    def get(self, limit=1000):
+    def get(self, limit: int = 1000) -> dict[str, Any]:
         items = self.stream_shard.get(self.sequence_number, limit)
         try:
             last_sequence_number = max(
@@ -57,53 +56,40 @@ class ShardIterator(BaseModel):
                 "AT_SEQUENCE_NUMBER",
                 self.sequence_number,
             )
-
-        self.streams_backend.shard_iterators[
-            new_shard_iterator.arn
-        ] = new_shard_iterator
+        self.streams_backend.shard_iterators[new_shard_iterator.arn] = (
+            new_shard_iterator
+        )
         return {"NextShardIterator": new_shard_iterator.arn, "Records": items}
 
 
 class DynamoDBStreamsBackend(BaseBackend):
-    def __init__(self, region):
-        self.region = region
-        self.shard_iterators = {}
-
-    def reset(self):
-        region = self.region
-        self.__dict__ = {}
-        self.__init__(region)
+    def __init__(self, region_name: str, account_id: str):
+        super().__init__(region_name, account_id)
+        self.shard_iterators: dict[str, ShardIterator] = {}
 
     @property
-    def dynamodb(self):
-        return dynamodb_backends[self.region]
+    def dynamodb(self) -> DynamoDBBackend:
+        return dynamodb_backends[self.account_id][self.region_name]
 
-    def _get_table_from_arn(self, arn):
+    def _get_table_from_arn(self, arn: str) -> Table:
         table_name = arn.split(":", 6)[5].split("/")[1]
         return self.dynamodb.get_table(table_name)
 
-    def describe_stream(self, arn):
+    def describe_stream(self, arn: str) -> dict[str, Any]:
         table = self._get_table_from_arn(arn)
-        resp = {
-            "StreamDescription": {
-                "StreamArn": arn,
-                "StreamLabel": table.latest_stream_label,
-                "StreamStatus": (
-                    "ENABLED" if table.latest_stream_label else "DISABLED"
-                ),
-                "StreamViewType": table.stream_specification["StreamViewType"],
-                "CreationRequestDateTime": table.stream_shard.created_on.isoformat(),
-                "TableName": table.name,
-                "KeySchema": table.schema,
-                "Shards": (
-                    [table.stream_shard.to_json()] if table.stream_shard else []
-                ),
-            }
+        stream = {
+            "StreamArn": arn,
+            "StreamLabel": table.latest_stream_label,
+            "StreamStatus": ("ENABLED" if table.latest_stream_label else "DISABLED"),
+            "StreamViewType": table.stream_specification["StreamViewType"],  # type: ignore[index]
+            "CreationRequestDateTime": table.stream_shard.created_on,  # type: ignore[union-attr]
+            "TableName": table.name,
+            "KeySchema": table.schema,
+            "Shards": ([table.stream_shard.to_json()] if table.stream_shard else []),
         }
+        return stream
 
-        return json.dumps(resp)
-
-    def list_streams(self, table_name=None):
+    def list_streams(self, table_name: str | None = None) -> list[dict[str, Any]]:
         streams = []
         for table in self.dynamodb.tables.values():
             if table_name is not None and table.name != table_name:
@@ -117,35 +103,31 @@ class DynamoDBStreamsBackend(BaseBackend):
                         "StreamLabel": d["Table"]["LatestStreamLabel"],
                     }
                 )
-
-        return json.dumps({"Streams": streams})
+        return streams
 
     def get_shard_iterator(
-        self, arn, shard_id, shard_iterator_type, sequence_number=None
-    ):
+        self,
+        arn: str,
+        shard_id: str,
+        shard_iterator_type: str,
+        sequence_number: str | None = None,
+    ) -> ShardIterator:
         table = self._get_table_from_arn(arn)
-        assert table.stream_shard.id == shard_id
+        assert table.stream_shard.id == shard_id  # type: ignore[union-attr]
 
         shard_iterator = ShardIterator(
-            self, table.stream_shard, shard_iterator_type, sequence_number
+            self,
+            table.stream_shard,  # type: ignore[arg-type]
+            shard_iterator_type,
+            sequence_number,  # type: ignore[arg-type]
         )
         self.shard_iterators[shard_iterator.arn] = shard_iterator
 
-        return json.dumps(shard_iterator.to_json())
+        return shard_iterator
 
-    def get_records(self, iterator_arn, limit):
+    def get_records(self, iterator_arn: str, limit: int) -> dict[str, Any]:
         shard_iterator = self.shard_iterators[iterator_arn]
-        return json.dumps(shard_iterator.get(limit), cls=DynamoJsonEncoder)
+        return shard_iterator.get(limit)
 
 
-dynamodbstreams_backends = {}
-for region in Session().get_available_regions("dynamodbstreams"):
-    dynamodbstreams_backends[region] = DynamoDBStreamsBackend(region)
-for region in Session().get_available_regions(
-    "dynamodbstreams", partition_name="aws-us-gov"
-):
-    dynamodbstreams_backends[region] = DynamoDBStreamsBackend(region)
-for region in Session().get_available_regions(
-    "dynamodbstreams", partition_name="aws-cn"
-):
-    dynamodbstreams_backends[region] = DynamoDBStreamsBackend(region)
+dynamodbstreams_backends = BackendDict(DynamoDBStreamsBackend, "dynamodbstreams")

@@ -1,7 +1,6 @@
 import json
 
 import pytest
-import sure  # noqa # pylint: disable=unused-import
 
 from moto.ecr.exceptions import InvalidParameterException
 from moto.ecr.policy_validation import EcrLifecyclePolicyValidator
@@ -26,6 +25,7 @@ def test_validate():
                 "description": "test policy",
                 "selection": {
                     "tagStatus": "tagged",
+                    "tagPatternList": ["tagx"],
                     "tagPrefixList": ["3.9"],
                     "countType": "sinceImagePushed",
                     "countUnit": "days",
@@ -70,12 +70,10 @@ def test_validate_error_parse(policy):
 
     # then
     ex = e.value
-    ex.code.should.equal(400)
-    ex.error_type.should.equal("InvalidParameterException")
-    ex.message.should.equal(
-        "Invalid parameter at 'LifecyclePolicyText' failed to satisfy constraint: "
-        "'Lifecycle policy validation failure: "
-        "Could not map policyString into LifecyclePolicy.'"
+    assert ex.code == "InvalidParameterException"
+    assert (
+        ex.message
+        == "Invalid parameter at 'LifecyclePolicyText' failed to satisfy constraint: 'Lifecycle policy validation failure: Could not map policyString into LifecyclePolicy.'"
     )
 
 
@@ -108,19 +106,15 @@ def test_validate_error_extract_rules(policy):
 
     # then
     ex = e.value
-    ex.code.should.equal(400)
-    ex.error_type.should.equal("InvalidParameterException")
-    ex.message.should.equal(
-        "Invalid parameter at 'LifecyclePolicyText' failed to satisfy constraint: "
-        "'Lifecycle policy validation failure: "
-        'object has missing required properties (["rules"])\''
+    assert ex.code == "InvalidParameterException"
+    assert (
+        ex.message
+        == "Invalid parameter at 'LifecyclePolicyText' failed to satisfy constraint: 'Lifecycle policy validation failure: object has missing required properties ([\"rules\"])'"
     )
 
 
-@pytest.mark.parametrize(
-    ["rule", "rule_type"], [["not_dict", "string"]], ids=["not_dict"],
-)
-def test_validate_error_rule_type(rule, rule_type):
+@pytest.mark.parametrize("rule", ["not_dict"], ids=["not_dict"])
+def test_validate_error_rule_type(rule):
     # given
 
     # when
@@ -130,9 +124,8 @@ def test_validate_error_rule_type(rule, rule_type):
 
     # then
     ex = e.value
-    ex.code.should.equal(400)
-    ex.error_type.should.equal("InvalidParameterException")
-    ex.message.should.equal(
+    assert ex.code == "InvalidParameterException"
+    assert ex.message == (
         "Invalid parameter at 'LifecyclePolicyText' failed to satisfy constraint: "
         "'Lifecycle policy validation failure: "
         f'instance type ({type(rule)}) does not match any allowed primitive type (allowed: ["object"])\''
@@ -200,23 +193,17 @@ def test_validate_error_rule_properties(rule, error_msg):
 
     # then
     ex = e.value
-    ex.code.should.equal(400)
-    ex.error_type.should.equal("InvalidParameterException")
-    ex.message.should.equal(
-        "".join(
-            [
-                "Invalid parameter at 'LifecyclePolicyText' failed to satisfy constraint: "
-                "'Lifecycle policy validation failure: ",
-                error_msg,
-            ]
-        )
+    assert ex.code == "InvalidParameterException"
+    assert (
+        ex.message
+        == f"Invalid parameter at 'LifecyclePolicyText' failed to satisfy constraint: 'Lifecycle policy validation failure: {error_msg}"
     )
 
 
 @pytest.mark.parametrize(
     ["action", "error_msg"],
     [
-        [{}, 'object has missing required properties (["type"])\'',],
+        [{}, 'object has missing required properties (["type"])\''],
         [
             {"type": "expire", "unknown": 123},
             (
@@ -260,16 +247,10 @@ def test_validate_error_action_properties(action, error_msg):
 
     # then
     ex = e.value
-    ex.code.should.equal(400)
-    ex.error_type.should.equal("InvalidParameterException")
-    ex.message.should.equal(
-        "".join(
-            [
-                "Invalid parameter at 'LifecyclePolicyText' failed to satisfy constraint: "
-                "'Lifecycle policy validation failure: ",
-                error_msg,
-            ]
-        )
+    assert ex.code == "InvalidParameterException"
+    assert (
+        ex.message
+        == f"Invalid parameter at 'LifecyclePolicyText' failed to satisfy constraint: 'Lifecycle policy validation failure: {error_msg}"
     )
 
 
@@ -277,15 +258,15 @@ def test_validate_error_action_properties(action, error_msg):
     ["selection", "error_msg"],
     [
         [
-            {"countType": "imageCountMoreThan", "countNumber": 30,},
+            {"countType": "imageCountMoreThan", "countNumber": 30},
             'object has missing required properties (["tagStatus"])\'',
         ],
         [
-            {"tagStatus": "untagged", "countNumber": 30,},
+            {"tagStatus": "untagged", "countNumber": 30},
             'object has missing required properties (["countType"])\'',
         ],
         [
-            {"tagStatus": "untagged", "countType": "imageCountMoreThan",},
+            {"tagStatus": "untagged", "countType": "imageCountMoreThan"},
             'object has missing required properties (["countNumber"])\'',
         ],
         [
@@ -335,7 +316,7 @@ def test_validate_error_action_properties(action, error_msg):
             },
             (
                 "numeric instance is lower than the required minimum "
-                f"(minimum: 1, found: 0)"
+                "(minimum: 1, found: 0)"
             ),
         ],
         [
@@ -346,7 +327,7 @@ def test_validate_error_action_properties(action, error_msg):
             },
             (
                 "numeric instance is lower than the required minimum "
-                f"(minimum: 1, found: -1)"
+                "(minimum: 1, found: -1)"
             ),
         ],
     ],
@@ -384,14 +365,8 @@ def test_validate_error_selection_properties(selection, error_msg):
 
     # then
     ex = e.value
-    ex.code.should.equal(400)
-    ex.error_type.should.equal("InvalidParameterException")
-    ex.message.should.equal(
-        "".join(
-            [
-                "Invalid parameter at 'LifecyclePolicyText' failed to satisfy constraint: "
-                "'Lifecycle policy validation failure: ",
-                error_msg,
-            ]
-        )
+    assert ex.code == "InvalidParameterException"
+    assert (
+        ex.message
+        == f"Invalid parameter at 'LifecyclePolicyText' failed to satisfy constraint: 'Lifecycle policy validation failure: {error_msg}"
     )

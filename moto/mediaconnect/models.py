@@ -1,13 +1,17 @@
 from collections import OrderedDict
-from uuid import uuid4
+from typing import Any
 
-from boto3 import Session
-from moto.core import BaseBackend, BaseModel
+from moto.core.base_backend import BackendDict, BaseBackend
+from moto.core.common_models import BaseModel
 from moto.mediaconnect.exceptions import NotFoundException
+from moto.moto_api._internal import mock_random as random
+from moto.utilities.tagging_service import TaggingService
+from moto.utilities.utils import get_partition
 
 
 class Flow(BaseModel):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, account_id: str, region_name: str, **kwargs: Any):
+        self.id = random.uuid4().hex
         self.availability_zone = kwargs.get("availability_zone")
         self.entitlements = kwargs.get("entitlements", [])
         self.name = kwargs.get("name")
@@ -16,17 +20,20 @@ class Flow(BaseModel):
         self.source_failover_config = kwargs.get("source_failover_config", {})
         self.sources = kwargs.get("sources", [])
         self.vpc_interfaces = kwargs.get("vpc_interfaces", [])
-        self.status = "STANDBY"  # one of 'STANDBY'|'ACTIVE'|'UPDATING'|'DELETING'|'STARTING'|'STOPPING'|'ERROR'
-        self._previous_status = None
-        self.description = None
-        self.flow_arn = None
-        self.egress_ip = None
+        self.status: str | None = (
+            "STANDBY"  # one of 'STANDBY'|'ACTIVE'|'UPDATING'|'DELETING'|'STARTING'|'STOPPING'|'ERROR'
+        )
+        self._previous_status: str | None = None
+        self.description = "A Moto test flow"
+        self.flow_arn = f"arn:{get_partition(region_name)}:mediaconnect:{region_name}:{account_id}:flow:{self.id}:{self.name}"
+        self.egress_ip = "127.0.0.1"
+        self.maintenance = kwargs.get("maintenance", {})
         if self.source and not self.sources:
             self.sources = [
                 self.source,
             ]
 
-    def to_dict(self, include=None):
+    def to_dict(self, include: list[str] | None = None) -> dict[str, Any]:
         data = {
             "availabilityZone": self.availability_zone,
             "description": self.description,
@@ -41,6 +48,10 @@ class Flow(BaseModel):
             "status": self.status,
             "vpcInterfaces": self.vpc_interfaces,
         }
+
+        if self.maintenance:
+            data["maintenance"] = self.maintenance
+
         if include:
             new_data = {k: v for k, v in data.items() if k in include}
             if "sourceType" in include:
@@ -48,7 +59,7 @@ class Flow(BaseModel):
             return new_data
         return data
 
-    def resolve_transient_states(self):
+    def resolve_transient_states(self) -> None:
         if self.status in ["STARTING"]:
             self.status = "ACTIVE"
         if self.status in ["STOPPING"]:
@@ -58,47 +69,69 @@ class Flow(BaseModel):
             self._previous_status = None
 
 
-class Resource(BaseModel):
-    def __init__(self, *args, **kwargs):
-        self.resource_arn = kwargs.get("resource_arn")
-        self.tags = OrderedDict()
-
-    def to_dict(self):
-        data = {
-            "resourceArn": self.resource_arn,
-            "tags": self.tags,
-        }
-        return data
-
-
 class MediaConnectBackend(BaseBackend):
-    def __init__(self, region_name=None):
-        super(MediaConnectBackend, self).__init__()
-        self.region_name = region_name
-        self._flows = OrderedDict()
-        self._resources = OrderedDict()
+    def __init__(self, region_name: str, account_id: str):
+        super().__init__(region_name, account_id)
+        self._flows: dict[str, Flow] = OrderedDict()
+        self.tagger = TaggingService()
 
-    def reset(self):
-        region_name = self.region_name
-        self.__dict__ = {}
-        self.__init__(region_name)
+    def _add_source_details(
+        self,
+        source: dict[str, Any] | None,
+        flow_id: str,
+        ingest_ip: str = "127.0.0.1",
+    ) -> None:
+        if source:
+            source["sourceArn"] = (
+                f"arn:{get_partition(self.region_name)}:mediaconnect:{self.region_name}:{self.account_id}:source"
+                f":{flow_id}:{source['name']}"
+            )
+            if not source.get("entitlementArn"):
+                source["ingestIp"] = ingest_ip
+
+    def _add_entitlement_details(
+        self, entitlement: dict[str, Any] | None, entitlement_id: str
+    ) -> None:
+        if entitlement:
+            entitlement["entitlementArn"] = (
+                f"arn:{get_partition(self.region_name)}:mediaconnect:{self.region_name}"
+                f":{self.account_id}:entitlement:{entitlement_id}"
+                f":{entitlement['name']}"
+            )
+
+    def _create_flow_add_details(self, flow: Flow) -> None:
+        for index, _source in enumerate(flow.sources):
+            self._add_source_details(_source, flow.id, f"127.0.0.{index}")
+
+        for index, output in enumerate(flow.outputs or []):
+            if output.get("protocol") in ["srt-listener", "zixi-pull"]:
+                output["listenerAddress"] = f"{index}.0.0.0"
+            output_id = random.uuid4().hex
+            arn = (
+                f"arn:{get_partition(self.region_name)}:mediaconnect:{self.region_name}"
+                f":{self.account_id}:output:{output_id}:{output['name']}"
+            )
+            output["outputArn"] = arn
+
+        for _, entitlement in enumerate(flow.entitlements):
+            entitlement_id = random.uuid4().hex
+            self._add_entitlement_details(entitlement, entitlement_id)
 
     def create_flow(
         self,
-        availability_zone,
-        entitlements,
-        name,
-        outputs,
-        source,
-        source_failover_config,
-        sources,
-        vpc_interfaces,
-    ):
-        if isinstance(source, dict) and source.get("name"):
-            source["sourceArn"] = "arn:aws:mediaconnect:source:{}".format(
-                source["name"]
-            )
+        availability_zone: str,
+        entitlements: list[dict[str, Any]],
+        name: str,
+        outputs: list[dict[str, Any]],
+        source: dict[str, Any],
+        source_failover_config: dict[str, Any],
+        sources: list[dict[str, Any]],
+        vpc_interfaces: list[dict[str, Any]],
+        maintenance: list[dict[str, Any]] | None = None,
+    ) -> Flow:
         flow = Flow(
+            account_id=self.account_id,
+            region_name=self.region_name,
             availability_zone=availability_zone,
             entitlements=entitlements,
             name=name,
@@ -107,19 +140,20 @@ class MediaConnectBackend(BaseBackend):
             source_failover_config=source_failover_config,
             sources=sources,
             vpc_interfaces=vpc_interfaces,
+            maintenance=maintenance,
         )
-        flow.description = "A Moto test flow"
-        flow.egress_ip = "127.0.0.1"
-        flow_id = uuid4().hex
-        flow.flow_arn = "arn:aws:mediaconnect:flow:{}".format(flow_id)
+        self._create_flow_add_details(flow)
         self._flows[flow.flow_arn] = flow
         return flow
 
-    def list_flows(self, max_results, next_token):
+    def list_flows(self, max_results: int | None) -> list[dict[str, Any]]:
+        """
+        Pagination is not yet implemented
+        """
         flows = list(self._flows.values())
         if max_results is not None:
             flows = flows[:max_results]
-        response_flows = [
+        return [
             fl.to_dict(
                 include=[
                     "availabilityZone",
@@ -132,78 +166,59 @@ class MediaConnectBackend(BaseBackend):
             )
             for fl in flows
         ]
-        return response_flows, next_token
 
-    def describe_flow(self, flow_arn=None):
-        messages = {}
+    def describe_flow(self, flow_arn: str) -> Flow:
         if flow_arn in self._flows:
             flow = self._flows[flow_arn]
             flow.resolve_transient_states()
-        else:
-            raise NotFoundException(message="Flow not found.")
-        return flow.to_dict(), messages
+            return flow
+        raise NotFoundException(message="Flow not found.")
 
-    def delete_flow(self, flow_arn):
+    def delete_flow(self, flow_arn: str) -> Flow:
         if flow_arn in self._flows:
-            flow = self._flows[flow_arn]
-            del self._flows[flow_arn]
-        else:
-            raise NotFoundException(message="Flow not found.")
-        return flow_arn, flow.status
+            return self._flows.pop(flow_arn)
+        raise NotFoundException(message="Flow not found.")
 
-    def start_flow(self, flow_arn):
+    def start_flow(self, flow_arn: str) -> Flow:
         if flow_arn in self._flows:
             flow = self._flows[flow_arn]
             flow.status = "STARTING"
-        else:
-            raise NotFoundException(message="Flow not found.")
-        return flow_arn, flow.status
+            return flow
+        raise NotFoundException(message="Flow not found.")
 
-    def stop_flow(self, flow_arn):
+    def stop_flow(self, flow_arn: str) -> Flow:
         if flow_arn in self._flows:
             flow = self._flows[flow_arn]
             flow.status = "STOPPING"
-        else:
-            raise NotFoundException(message="Flow not found.")
-        return flow_arn, flow.status
+            return flow
+        raise NotFoundException(message="Flow not found.")
 
-    def tag_resource(self, resource_arn, tags):
-        if resource_arn in self._resources:
-            resource = self._resources[resource_arn]
-        else:
-            resource = Resource(resource_arn=resource_arn)
-        resource.tags.update(tags)
-        self._resources[resource_arn] = resource
-        return None
+    def tag_resource(self, resource_arn: str, tags: dict[str, Any]) -> None:
+        tag_list = TaggingService.convert_dict_to_tags_input(tags)
+        self.tagger.tag_resource(resource_arn, tag_list)
 
-    def list_tags_for_resource(self, resource_arn):
-        if resource_arn in self._resources:
-            resource = self._resources[resource_arn]
-        else:
-            raise NotFoundException(message="Resource not found.")
-        return resource.tags
+    def list_tags_for_resource(self, resource_arn: str) -> dict[str, str]:
+        if self.tagger.has_tags(resource_arn):
+            return self.tagger.get_tag_dict_for_resource(resource_arn)
+        raise NotFoundException(message="Resource not found.")
 
-    def add_flow_vpc_interfaces(self, flow_arn, vpc_interfaces):
+    def add_flow_vpc_interfaces(
+        self, flow_arn: str, vpc_interfaces: list[dict[str, Any]]
+    ) -> Flow:
         if flow_arn in self._flows:
             flow = self._flows[flow_arn]
             flow.vpc_interfaces = vpc_interfaces
-        else:
-            raise NotFoundException(
-                message="flow with arn={} not found".format(flow_arn)
-            )
-        return flow_arn, flow.vpc_interfaces
+            return flow
+        raise NotFoundException(message=f"flow with arn={flow_arn} not found")
 
-    def add_flow_outputs(self, flow_arn, outputs):
+    def add_flow_outputs(self, flow_arn: str, outputs: list[dict[str, Any]]) -> Flow:
         if flow_arn in self._flows:
             flow = self._flows[flow_arn]
             flow.outputs = outputs
-        else:
-            raise NotFoundException(
-                message="flow with arn={} not found".format(flow_arn)
-            )
-        return flow_arn, flow.outputs
+            return flow
+        raise NotFoundException(message=f"flow with arn={flow_arn} not found")
 
-    def remove_flow_vpc_interface(self, flow_arn, vpc_interface_name):
+    def remove_flow_vpc_interface(self, flow_arn: str, vpc_interface_name: str) -> None:
         if flow_arn in self._flows:
             flow = self._flows[flow_arn]
             flow.vpc_interfaces = [
@@ -212,12 +227,9 @@ class MediaConnectBackend(BaseBackend):
                 if vpc_interface["name"] != vpc_interface_name
             ]
         else:
-            raise NotFoundException(
-                message="flow with arn={} not found".format(flow_arn)
-            )
-        return flow_arn, vpc_interface_name
+            raise NotFoundException(message=f"flow with arn={flow_arn} not found")
 
-    def remove_flow_output(self, flow_arn, output_name):
+    def remove_flow_output(self, flow_arn: str, output_name: str) -> None:
         if flow_arn in self._flows:
             flow = self._flows[flow_arn]
             flow.outputs = [
@@ -226,20 +238,169 @@ class MediaConnectBackend(BaseBackend):
                 if output["name"] != output_name
             ]
         else:
-            raise NotFoundException(
-                message="flow with arn={} not found".format(flow_arn)
+            raise NotFoundException(message=f"flow with arn={flow_arn} not found")
+
+    def update_flow_output(
+        self,
+        flow_arn: str,
+        output_arn: str,
+        cidr_allow_list: list[str],
+        description: str,
+        destination: str,
+        encryption: dict[str, str],
+        max_latency: int,
+        media_stream_output_configuration: list[dict[str, Any]],
+        min_latency: int,
+        port: int,
+        protocol: str,
+        remote_id: str,
+        sender_control_port: int,
+        sender_ip_address: str,
+        smoothing_latency: int,
+        stream_id: str,
+        vpc_interface_attachment: dict[str, str],
+    ) -> dict[str, Any]:
+        if flow_arn not in self._flows:
+            raise NotFoundException(message=f"flow with arn={flow_arn} not found")
+        flow = self._flows[flow_arn]
+        for output in flow.outputs:
+            if output["outputArn"] == output_arn:
+                output["cidrAllowList"] = cidr_allow_list
+                output["description"] = description
+                output["destination"] = destination
+                output["encryption"] = encryption
+                output["maxLatency"] = max_latency
+                output["mediaStreamOutputConfiguration"] = (
+                    media_stream_output_configuration
+                )
+                output["minLatency"] = min_latency
+                output["port"] = port
+                output["protocol"] = protocol
+                output["remoteId"] = remote_id
+                output["senderControlPort"] = sender_control_port
+                output["senderIpAddress"] = sender_ip_address
+                output["smoothingLatency"] = smoothing_latency
+                output["streamId"] = stream_id
+                output["vpcInterfaceAttachment"] = vpc_interface_attachment
+                return output
+        raise NotFoundException(message=f"output with arn={output_arn} not found")
+
+    def add_flow_sources(
+        self, flow_arn: str, sources: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        if flow_arn not in self._flows:
+            raise NotFoundException(message=f"flow with arn={flow_arn} not found")
+        flow = self._flows[flow_arn]
+        for source in sources:
+            source_id = random.uuid4().hex
+            name = source["name"]
+            arn = f"arn:{get_partition(self.region_name)}:mediaconnect:{self.region_name}:{self.account_id}:source:{source_id}:{name}"
+            source["sourceArn"] = arn
+        flow.sources = sources
+        return sources
+
+    def update_flow_source(
+        self,
+        flow_arn: str,
+        source_arn: str,
+        decryption: str,
+        description: str,
+        entitlement_arn: str,
+        ingest_port: int,
+        max_bitrate: int,
+        max_latency: int,
+        max_sync_buffer: int,
+        media_stream_source_configurations: list[dict[str, Any]],
+        min_latency: int,
+        protocol: str,
+        sender_control_port: int,
+        sender_ip_address: str,
+        stream_id: str,
+        vpc_interface_name: str,
+        whitelist_cidr: str,
+    ) -> dict[str, Any] | None:
+        if flow_arn not in self._flows:
+            raise NotFoundException(message=f"flow with arn={flow_arn} not found")
+        flow = self._flows[flow_arn]
+        source: dict[str, Any] | None = next(
+            iter(
+                [source for source in flow.sources if source["sourceArn"] == source_arn]
+            ),
+            {},
+        )
+        if source:
+            source["decryption"] = decryption
+            source["description"] = description
+            source["entitlementArn"] = entitlement_arn
+            source["ingestPort"] = ingest_port
+            source["maxBitrate"] = max_bitrate
+            source["maxLatency"] = max_latency
+            source["maxSyncBuffer"] = max_sync_buffer
+            source["mediaStreamSourceConfigurations"] = (
+                media_stream_source_configurations
             )
-        return flow_arn, output_name
+            source["minLatency"] = min_latency
+            source["protocol"] = protocol
+            source["senderControlPort"] = sender_control_port
+            source["senderIpAddress"] = sender_ip_address
+            source["streamId"] = stream_id
+            source["vpcInterfaceName"] = vpc_interface_name
+            source["whitelistCidr"] = whitelist_cidr
+        return source
 
-    # add methods from here
+    def grant_flow_entitlements(
+        self,
+        flow_arn: str,
+        entitlements: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if flow_arn not in self._flows:
+            raise NotFoundException(message=f"flow with arn={flow_arn} not found")
+        flow = self._flows[flow_arn]
+        for entitlement in entitlements:
+            entitlement_id = random.uuid4().hex
+            name = entitlement["name"]
+            arn = f"arn:{get_partition(self.region_name)}:mediaconnect:{self.region_name}:{self.account_id}:entitlement:{entitlement_id}:{name}"
+            entitlement["entitlementArn"] = arn
+
+        flow.entitlements += entitlements
+        return entitlements
+
+    def revoke_flow_entitlement(self, flow_arn: str, entitlement_arn: str) -> None:
+        if flow_arn not in self._flows:
+            raise NotFoundException(message=f"flow with arn={flow_arn} not found")
+        flow = self._flows[flow_arn]
+        for entitlement in flow.entitlements:
+            if entitlement_arn == entitlement["entitlementArn"]:
+                flow.entitlements.remove(entitlement)
+                return
+        raise NotFoundException(
+            message=f"entitlement with arn={entitlement_arn} not found"
+        )
+
+    def update_flow_entitlement(
+        self,
+        flow_arn: str,
+        entitlement_arn: str,
+        description: str,
+        encryption: dict[str, str],
+        entitlement_status: str,
+        name: str,
+        subscribers: list[str],
+    ) -> dict[str, Any]:
+        if flow_arn not in self._flows:
+            raise NotFoundException(message=f"flow with arn={flow_arn} not found")
+        flow = self._flows[flow_arn]
+        for entitlement in flow.entitlements:
+            if entitlement_arn == entitlement["entitlementArn"]:
+                entitlement["description"] = description
+                entitlement["encryption"] = encryption
+                entitlement["entitlementStatus"] = entitlement_status
+                entitlement["name"] = name
+                entitlement["subscribers"] = subscribers
+                return entitlement
+        raise NotFoundException(
+            message=f"entitlement with arn={entitlement_arn} not found"
+        )
 
 
-mediaconnect_backends = {}
-for region in Session().get_available_regions("mediaconnect"):
-    mediaconnect_backends[region] = MediaConnectBackend()
-for region in Session().get_available_regions(
-    "mediaconnect", partition_name="aws-us-gov"
-):
-    mediaconnect_backends[region] = MediaConnectBackend()
-for region in Session().get_available_regions("mediaconnect", partition_name="aws-cn"):
-    mediaconnect_backends[region] = MediaConnectBackend()
+mediaconnect_backends = BackendDict(MediaConnectBackend, "mediaconnect")

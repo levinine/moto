@@ -1,150 +1,152 @@
-from werkzeug.exceptions import HTTPException
-from jinja2 import DictLoader, Environment
 import json
+from typing import Any
 
-# TODO: add "<Type>Sender</Type>" to error responses below?
+from werkzeug.exceptions import HTTPException
 
-
-SINGLE_ERROR_RESPONSE = """<?xml version="1.0" encoding="UTF-8"?>
-<Error>
-    <Code>{{error_type}}</Code>
-    <Message>{{message}}</Message>
-    {% block extra %}{% endblock %}
-    <{{request_id_tag}}>7a62c49f-347e-4fc4-9331-6e8eEXAMPLE</{{request_id_tag}}>
-</Error>
-"""
-
-WRAPPED_SINGLE_ERROR_RESPONSE = """<?xml version="1.0" encoding="UTF-8"?>
-<ErrorResponse{% if xmlns is defined %} xmlns="{{xmlns}}"{% endif %}>
-    <Error>
-        <Code>{{error_type}}</Code>
-        <Message>{{message}}</Message>
-        {% block extra %}{% endblock %}
-        <{{request_id_tag}}>7a62c49f-347e-4fc4-9331-6e8eEXAMPLE</{{request_id_tag}}>
-    </Error>
-</ErrorResponse>"""
-
-ERROR_RESPONSE = """<?xml version="1.0" encoding="UTF-8"?>
-  <ErrorResponse>
-    <Errors>
-      <Error>
-        <Code>{{error_type}}</Code>
-        <Message><![CDATA[{{message}}]]></Message>
-        {% block extra %}{% endblock %}
-      </Error>
-    </Errors>
-  <{{request_id_tag}}>7a62c49f-347e-4fc4-9331-6e8eEXAMPLE</{{request_id_tag}}>
-</ErrorResponse>
-"""
+from moto.core.mime_types import APP_XML
 
 
-class RESTError(HTTPException):
+class ServiceException(Exception):
+    """
+    The base class for all (serializable) Moto service exceptions.
+
+    Attributes:
+        code (str): AWS service error code, e.g. ``InvalidParameterCombination``.
+        message (str): A descriptive error message.
+
+    The ``code`` and ``message`` attributes can be set as class attributes or
+    provided at initialization, or a combination thereof.
+
+    A single argument will explicitly set the message attribute:
+    >>> raise ServiceException("A specific error has occurred.")
+
+    Both class attributes overridden at initialization:
+    >>> raise ServiceException("ErrorCode", "Error message")
+
+    Notes:
+       * The ``code`` value should match an exception ShapeID in the AWS model
+         specification for a given service.  When the exception is serialized as
+         part of a Moto server response, additional metadata from the model will
+         be included (e.g. an HTTP status code).
+       * If the AWS error model expects specific attributes in addition to ``message``,
+         they can be set directly on the ``ServiceException`` (or subclass) object as
+         class or instance attributes.
+    """
+
+    code = "UnspecifiedErrorCode"
+    message = "An unspecified service error occurred"
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        if len(args) == 1:
+            msg = args[0]
+        elif len(args) == 2:
+            self.code = args[0]
+            msg = args[1]
+        else:
+            msg = self.message.format(**kwargs)
+        super().__init__(msg)
+        self.message = msg
+
+    def __str__(self) -> str:
+        return f"{self.code}: {self.message}"
+
+
+# Deprecated: do not import or use outside this module.
+class _RESTError(HTTPException):
     code = 400
-    # most APIs use <RequestId>, but some APIs (including EC2, S3) use <RequestID>
-    request_id_tag_name = "RequestId"
+    # When this field is set, the `Type` field will be included in the response
+    # This indicates that the fault lies with the client
+    include_type_sender = True
 
-    templates = {
-        "single_error": SINGLE_ERROR_RESPONSE,
-        "wrapped_single_error": WRAPPED_SINGLE_ERROR_RESPONSE,
-        "error": ERROR_RESPONSE,
-    }
-
-    def __init__(self, error_type, message, template="error", **kwargs):
-        super(RESTError, self).__init__()
+    def __init__(self, error_type: str, message: str, _: str = "", **__: Any):
+        super().__init__()
         self.error_type = error_type
         self.message = message
+        error = {
+            "Code": error_type,
+            "Message": message,
+        }
+        if self.include_type_sender:
+            error["Type"] = "Sender"
+        response = {"ErrorResponse": {"Errors": {"Error": error}}}
+        from xmltodict import unparse
 
-        if template in self.templates.keys():
-            env = Environment(loader=DictLoader(self.templates))
-            self.description = env.get_template(template).render(
-                error_type=error_type,
-                message=message,
-                request_id_tag=self.request_id_tag_name,
-                **kwargs
-            )
-            self.content_type = "application/xml"
+        self.description = unparse(response, full_document=True)
+        self.content_type = APP_XML
 
-    def get_headers(self, *args, **kwargs):
+    def get_headers(self, *args: Any, **kwargs: Any) -> list[tuple[str, str]]:
         return [
-            ("X-Amzn-ErrorType", self.error_type or "UnknownError"),
+            ("X-Amzn-ErrorType", self.relative_error_type or "UnknownError"),
             ("Content-Type", self.content_type),
         ]
 
-    def get_body(self, *args, **kwargs):
-        return self.description
+    @property
+    def relative_error_type(self) -> str:
+        return self.error_type
+
+    def get_body(self, *args: Any, **kwargs: Any) -> str:
+        return self.description or ""
+
+    def to_json(self) -> "JsonRESTError":
+        err = JsonRESTError(error_type=self.error_type, message=self.message)
+        err.code = self.code
+        return err
 
 
-class DryRunClientError(RESTError):
-    code = 412
-
-
-class JsonRESTError(RESTError):
-    def __init__(self, error_type, message, template="error_json", **kwargs):
-        super(JsonRESTError, self).__init__(error_type, message, template, **kwargs)
-        self.description = json.dumps(
+class JsonRESTError(_RESTError):
+    def __init__(self, error_type: str, message: str, _: str = "", **kwargs: Any):
+        super().__init__(error_type, message, **kwargs)
+        self.description: str = json.dumps(
             {"__type": self.error_type, "message": self.message}
         )
         self.content_type = "application/json"
 
-    def get_body(self, *args, **kwargs):
+    @property
+    def relative_error_type(self) -> str:
+        # https://smithy.io/2.0/aws/protocols/aws-json-1_1-protocol.html
+        # If a # character is present, then take only the contents after the first # character in the value
+        return (self.error_type.split("#")[-1]) if self.error_type else ""
+
+    def get_body(self, *args: Any, **kwargs: Any) -> str:
         return self.description
 
 
-class SignatureDoesNotMatchError(RESTError):
+class SignatureDoesNotMatchError(_RESTError):
     code = 403
 
-    def __init__(self):
-        super(SignatureDoesNotMatchError, self).__init__(
+    def __init__(self) -> None:
+        super().__init__(
             "SignatureDoesNotMatch",
             "The request signature we calculated does not match the signature you provided. Check your AWS Secret Access Key and signing method. Consult the service documentation for details.",
         )
 
 
-class InvalidClientTokenIdError(RESTError):
+class InvalidClientTokenIdError(_RESTError):
     code = 403
 
-    def __init__(self):
-        super(InvalidClientTokenIdError, self).__init__(
+    def __init__(self) -> None:
+        super().__init__(
             "InvalidClientTokenId",
             "The security token included in the request is invalid.",
         )
 
 
-class AccessDeniedError(RESTError):
+class AccessDeniedError(_RESTError):
     code = 403
 
-    def __init__(self, user_arn, action):
-        super(AccessDeniedError, self).__init__(
-            "AccessDenied",
-            "User: {user_arn} is not authorized to perform: {operation}".format(
-                user_arn=user_arn, operation=action
-            ),
+    def __init__(self, user_arn: str, action: str):
+        super().__init__(
+            "AccessDenied", f"User: {user_arn} is not authorized to perform: {action}"
         )
 
 
-class AuthFailureError(RESTError):
+class AuthFailureError(_RESTError):
     code = 401
 
-    def __init__(self):
-        super(AuthFailureError, self).__init__(
+    def __init__(self) -> None:
+        super().__init__(
             "AuthFailure",
             "AWS was not able to validate the provided access credentials",
-        )
-
-
-class AWSError(Exception):
-    TYPE = None
-    STATUS = 400
-
-    def __init__(self, message, type=None, status=None):
-        self.message = message
-        self.type = type if type is not None else self.TYPE
-        self.status = status if status is not None else self.STATUS
-
-    def response(self):
-        return (
-            json.dumps({"__type": self.type, "message": self.message}),
-            dict(status=self.status),
         )
 
 
@@ -153,15 +155,28 @@ class InvalidNextTokenException(JsonRESTError):
 
     code = 400
 
-    def __init__(self):
-        super(InvalidNextTokenException, self).__init__(
+    def __init__(self) -> None:
+        super().__init__(
             "InvalidNextTokenException", "The nextToken provided is invalid"
         )
 
 
-class InvalidToken(AWSError):
-    TYPE = "InvalidToken"
-    STATUS = 400
+class InvalidToken(ServiceException):
+    """Raised by the @paginate decorator when a pagination token can't be used."""
 
-    def __init__(self, message="Invalid token"):
-        super(InvalidToken, self).__init__("Invalid Token: {}".format(message))
+    code = "InvalidToken"
+
+    def __init__(self, message: str = "Invalid token"):
+        super().__init__(f"Invalid Token: {message}")
+
+
+class ServiceNotWhitelisted(Exception):
+    def __init__(self, service_name: str):
+        from moto.settings import default_user_config
+
+        services_whitelisted = default_user_config.get("core", {}).get(
+            "service_whitelist"
+        )
+        super().__init__(
+            f"Service {service_name} not whitelisted. Only services {services_whitelisted} are allowed."
+        )

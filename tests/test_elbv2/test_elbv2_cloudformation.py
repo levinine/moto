@@ -1,13 +1,12 @@
-import boto3
 import json
-import sure  # noqa # pylint: disable=unused-import
 
-from moto import mock_elbv2, mock_ec2, mock_cloudformation
-from moto.core import ACCOUNT_ID
+import boto3
+
+from moto import mock_aws
+from moto.core import DEFAULT_ACCOUNT_ID as ACCOUNT_ID
 
 
-@mock_elbv2
-@mock_cloudformation
+@mock_aws
 def test_redirect_action_listener_rule_cloudformation():
     cnf_conn = boto3.client("cloudformation", region_name="us-east-1")
     elbv2_client = boto3.client("elbv2", region_name="us-east-1")
@@ -68,35 +67,26 @@ def test_redirect_action_listener_rule_cloudformation():
     template_json = json.dumps(template)
     cnf_conn.create_stack(StackName="test-stack", TemplateBody=template_json)
 
-    describe_load_balancers_response = elbv2_client.describe_load_balancers(
-        Names=["my-lb"]
-    )
-    describe_load_balancers_response["LoadBalancers"].should.have.length_of(1)
-    load_balancer_arn = describe_load_balancers_response["LoadBalancers"][0][
-        "LoadBalancerArn"
+    resp = elbv2_client.describe_load_balancers(Names=["my-lb"])
+    assert len(resp["LoadBalancers"]) == 1
+    load_balancer_arn = resp["LoadBalancers"][0]["LoadBalancerArn"]
+
+    listeners = elbv2_client.describe_listeners(LoadBalancerArn=load_balancer_arn)
+
+    assert len(listeners["Listeners"]) == 1
+    assert listeners["Listeners"][0]["DefaultActions"] == [
+        {
+            "Type": "redirect",
+            "RedirectConfig": {
+                "Port": "443",
+                "Protocol": "HTTPS",
+                "StatusCode": "HTTP_301",
+            },
+        }
     ]
 
-    describe_listeners_response = elbv2_client.describe_listeners(
-        LoadBalancerArn=load_balancer_arn
-    )
 
-    describe_listeners_response["Listeners"].should.have.length_of(1)
-    describe_listeners_response["Listeners"][0]["DefaultActions"].should.equal(
-        [
-            {
-                "Type": "redirect",
-                "RedirectConfig": {
-                    "Port": "443",
-                    "Protocol": "HTTPS",
-                    "StatusCode": "HTTP_301",
-                },
-            }
-        ]
-    )
-
-
-@mock_elbv2
-@mock_cloudformation
+@mock_aws
 def test_cognito_action_listener_rule_cloudformation():
     cnf_conn = boto3.client("cloudformation", region_name="us-east-1")
     elbv2_client = boto3.client("elbv2", region_name="us-east-1")
@@ -144,9 +134,7 @@ def test_cognito_action_listener_rule_cloudformation():
                         {
                             "Type": "authenticate-cognito",
                             "AuthenticateCognitoConfig": {
-                                "UserPoolArn": "arn:aws:cognito-idp:us-east-1:{}:userpool/us-east-1_ABCD1234".format(
-                                    ACCOUNT_ID
-                                ),
+                                "UserPoolArn": f"arn:aws:cognito-idp:us-east-1:{ACCOUNT_ID}:userpool/us-east-1_ABCD1234",
                                 "UserPoolClientId": "abcd1234abcd",
                                 "UserPoolDomain": "testpool",
                             },
@@ -169,26 +157,20 @@ def test_cognito_action_listener_rule_cloudformation():
         LoadBalancerArn=load_balancer_arn
     )
 
-    describe_listeners_response["Listeners"].should.have.length_of(1)
-    describe_listeners_response["Listeners"][0]["DefaultActions"].should.equal(
-        [
-            {
-                "Type": "authenticate-cognito",
-                "AuthenticateCognitoConfig": {
-                    "UserPoolArn": "arn:aws:cognito-idp:us-east-1:{}:userpool/us-east-1_ABCD1234".format(
-                        ACCOUNT_ID
-                    ),
-                    "UserPoolClientId": "abcd1234abcd",
-                    "UserPoolDomain": "testpool",
-                },
-            }
-        ]
-    )
+    assert len(describe_listeners_response["Listeners"]) == 1
+    assert describe_listeners_response["Listeners"][0]["DefaultActions"] == [
+        {
+            "Type": "authenticate-cognito",
+            "AuthenticateCognitoConfig": {
+                "UserPoolArn": f"arn:aws:cognito-idp:us-east-1:{ACCOUNT_ID}:userpool/us-east-1_ABCD1234",
+                "UserPoolClientId": "abcd1234abcd",
+                "UserPoolDomain": "testpool",
+            },
+        }
+    ]
 
 
-@mock_ec2
-@mock_elbv2
-@mock_cloudformation
+@mock_aws
 def test_create_target_groups_through_cloudformation():
     cfn_conn = boto3.client("cloudformation", region_name="us-east-1")
     elbv2_client = boto3.client("elbv2", region_name="us-east-1")
@@ -262,8 +244,7 @@ def test_create_target_groups_through_cloudformation():
     )
 
 
-@mock_elbv2
-@mock_cloudformation
+@mock_aws
 def test_fixed_response_action_listener_rule_cloudformation():
     cnf_conn = boto3.client("cloudformation", region_name="us-east-1")
     elbv2_client = boto3.client("elbv2", region_name="us-east-1")
@@ -334,16 +315,107 @@ def test_fixed_response_action_listener_rule_cloudformation():
         LoadBalancerArn=load_balancer_arn
     )
 
-    describe_listeners_response["Listeners"].should.have.length_of(1)
-    describe_listeners_response["Listeners"][0]["DefaultActions"].should.equal(
-        [
-            {
-                "Type": "fixed-response",
-                "FixedResponseConfig": {
-                    "ContentType": "text/plain",
-                    "MessageBody": "This page does not exist",
-                    "StatusCode": "404",
-                },
-            }
-        ]
+    assert len(describe_listeners_response["Listeners"]) == 1
+    assert describe_listeners_response["Listeners"][0]["DefaultActions"] == [
+        {
+            "Type": "fixed-response",
+            "FixedResponseConfig": {
+                "ContentType": "text/plain",
+                "MessageBody": "This page does not exist",
+                "StatusCode": "404",
+            },
+        }
+    ]
+
+
+@mock_aws
+def test_https_listener_rule_with_certificate_cloudformation():
+    cnf_conn = boto3.client("cloudformation", region_name="us-east-1")
+    elbv2_client = boto3.client("elbv2", region_name="us-east-1")
+    acm_client = boto3.client("acm", region_name="us-east-1")
+
+    acm_request_response = acm_client.request_certificate(
+        DomainName="fake.domain.com",
+        DomainValidationOptions=[
+            {"DomainName": "fake.domain.com", "ValidationDomain": "domain.com"},
+        ],
     )
+    certificate_arn = acm_request_response["CertificateArn"]
+
+    template = {
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Description": "ECS Cluster Test CloudFormation",
+        "Resources": {
+            "testVPC": {
+                "Type": "AWS::EC2::VPC",
+                "Properties": {"CidrBlock": "10.0.0.0/16"},
+            },
+            "subnet1": {
+                "Type": "AWS::EC2::Subnet",
+                "Properties": {
+                    "CidrBlock": "10.0.0.0/24",
+                    "VpcId": {"Ref": "testVPC"},
+                    "AvalabilityZone": "us-east-1b",
+                },
+            },
+            "subnet2": {
+                "Type": "AWS::EC2::Subnet",
+                "Properties": {
+                    "CidrBlock": "10.0.1.0/24",
+                    "VpcId": {"Ref": "testVPC"},
+                    "AvalabilityZone": "us-east-1b",
+                },
+            },
+            "testLb": {
+                "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+                "Properties": {
+                    "Name": "my-lb",
+                    "Subnets": [{"Ref": "subnet1"}, {"Ref": "subnet2"}],
+                    "Type": "application",
+                    "SecurityGroups": [],
+                },
+            },
+            "testListener": {
+                "Type": "AWS::ElasticLoadBalancingV2::Listener",
+                "Properties": {
+                    "LoadBalancerArn": {"Ref": "testLb"},
+                    "Certificates": [{"CertificateArn": certificate_arn}],
+                    "Port": 443,
+                    "Protocol": "HTTPS",
+                    "DefaultActions": [
+                        {
+                            "Type": "fixed-response",
+                            "FixedResponseConfig": {
+                                "ContentType": "text/plain",
+                                "MessageBody": "This page does not exist",
+                                "StatusCode": "404",
+                            },
+                        }
+                    ],
+                },
+            },
+        },
+    }
+    template_json = json.dumps(template)
+    cnf_conn.create_stack(StackName="test-stack", TemplateBody=template_json)
+
+    resp = elbv2_client.describe_load_balancers(Names=["my-lb"])
+    assert len(resp["LoadBalancers"]) == 1
+    load_balancer_arn = resp["LoadBalancers"][0]["LoadBalancerArn"]
+
+    listeners = elbv2_client.describe_listeners(LoadBalancerArn=load_balancer_arn)
+
+    assert len(listeners["Listeners"]) == 1
+    assert listeners["Listeners"][0]["DefaultActions"] == [
+        {
+            "Type": "fixed-response",
+            "FixedResponseConfig": {
+                "ContentType": "text/plain",
+                "MessageBody": "This page does not exist",
+                "StatusCode": "404",
+            },
+        }
+    ]
+    assert listeners["Listeners"][0]["Certificates"] == [
+        {"CertificateArn": certificate_arn}
+    ]

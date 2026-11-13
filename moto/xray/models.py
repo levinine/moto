@@ -1,62 +1,70 @@
 import bisect
-from boto3 import Session
 import datetime
-from collections import defaultdict
 import json
-from moto.core import BaseBackend, BaseModel
-from moto.core.exceptions import AWSError
+from collections import defaultdict
+from typing import Any
+
+from moto.core.base_backend import BackendDict, BaseBackend
+from moto.core.common_models import BaseModel
+
 from .exceptions import BadSegmentException
 
 
 class TelemetryRecords(BaseModel):
-    def __init__(self, instance_id, hostname, resource_arn, records):
+    def __init__(
+        self,
+        instance_id: str,
+        hostname: str,
+        resource_arn: str,
+        records: list[dict[str, Any]],
+    ):
         self.instance_id = instance_id
         self.hostname = hostname
         self.resource_arn = resource_arn
         self.records = records
 
     @classmethod
-    def from_json(cls, json):
-        instance_id = json.get("EC2InstanceId", None)
-        hostname = json.get("Hostname")
-        resource_arn = json.get("ResourceARN")
-        telemetry_records = json["TelemetryRecords"]
+    def from_json(cls, src: dict[str, Any]) -> "TelemetryRecords":  # type: ignore[misc]
+        instance_id = src.get("EC2InstanceId", None)
+        hostname = src.get("Hostname")
+        resource_arn = src.get("ResourceARN")
+        telemetry_records = src["TelemetryRecords"]
 
-        return cls(instance_id, hostname, resource_arn, telemetry_records)
+        return cls(instance_id, hostname, resource_arn, telemetry_records)  # type: ignore
 
 
 # https://docs.aws.amazon.com/xray/latest/devguide/xray-api-segmentdocuments.html
 class TraceSegment(BaseModel):
     def __init__(
         self,
-        name,
-        segment_id,
-        trace_id,
-        start_time,
-        raw,
-        end_time=None,
-        in_progress=False,
-        service=None,
-        user=None,
-        origin=None,
-        parent_id=None,
-        http=None,
-        aws=None,
-        metadata=None,
-        annotations=None,
-        subsegments=None,
-        **kwargs
+        name: str,
+        segment_id: str,
+        trace_id: str,
+        start_time: float,
+        raw: Any,
+        end_time: float | None = None,
+        in_progress: bool = False,
+        service: Any = None,
+        user: Any = None,
+        origin: Any = None,
+        parent_id: Any = None,
+        http: Any = None,
+        aws: Any = None,
+        metadata: Any = None,
+        annotations: Any = None,
+        subsegments: Any = None,
+        **kwargs: Any,
     ):
         self.name = name
         self.id = segment_id
         self.trace_id = trace_id
-        self._trace_version = None
-        self._original_request_start_time = None
+        self._trace_version: int | None = None
+        self._original_request_start_time: datetime.datetime | None = None
         self._trace_identifier = None
         self.start_time = start_time
-        self._start_date = None
+        self._start_date: datetime.datetime | None = None
         self.end_time = end_time
-        self._end_date = None
+        self._end_date: datetime.datetime | None = None
         self.in_progress = in_progress
         self.service = service
         self.user = user
@@ -72,17 +80,17 @@ class TraceSegment(BaseModel):
         # Raw json string
         self.raw = raw
 
-    def __lt__(self, other):
+    def __lt__(self, other: Any) -> bool:
         return self.start_date < other.start_date
 
     @property
-    def trace_version(self):
+    def trace_version(self) -> int:
         if self._trace_version is None:
             self._trace_version = int(self.trace_id.split("-", 1)[0])
         return self._trace_version
 
     @property
-    def request_start_date(self):
+    def request_start_date(self) -> datetime.datetime:
         if self._original_request_start_time is None:
             start_time = int(self.trace_id.split("-")[1], 16)
             self._original_request_start_time = datetime.datetime.fromtimestamp(
@@ -91,19 +99,19 @@ class TraceSegment(BaseModel):
         return self._original_request_start_time
 
     @property
-    def start_date(self):
+    def start_date(self) -> datetime.datetime:
         if self._start_date is None:
             self._start_date = datetime.datetime.fromtimestamp(self.start_time)
         return self._start_date
 
     @property
-    def end_date(self):
+    def end_date(self) -> datetime.datetime:
         if self._end_date is None:
-            self._end_date = datetime.datetime.fromtimestamp(self.end_time)
+            self._end_date = datetime.datetime.fromtimestamp(self.end_time)  # type: ignore
         return self._end_date
 
     @classmethod
-    def from_dict(cls, data, raw):
+    def from_dict(cls, data: dict[str, Any], raw: Any) -> "TraceSegment":  # type: ignore[misc]
         # Check manditory args
         if "id" not in data:
             raise BadSegmentException(code="MissingParam", message="Missing segment ID")
@@ -130,12 +138,12 @@ class TraceSegment(BaseModel):
         return cls(raw=raw, **data)
 
 
-class SegmentCollection(object):
-    def __init__(self):
-        self._traces = defaultdict(self._new_trace_item)
+class SegmentCollection:
+    def __init__(self) -> None:
+        self._traces: dict[str, dict[str, Any]] = defaultdict(self._new_trace_item)
 
     @staticmethod
-    def _new_trace_item():
+    def _new_trace_item() -> dict[str, Any]:  # type: ignore[misc]
         return {
             "start_date": datetime.datetime(1970, 1, 1),
             "end_date": datetime.datetime(1970, 1, 1),
@@ -144,7 +152,7 @@ class SegmentCollection(object):
             "segments": [],
         }
 
-    def put_segment(self, segment):
+    def put_segment(self, segment: Any) -> None:
         # insert into a sorted list
         bisect.insort_left(self._traces[segment.trace_id]["segments"], segment)
 
@@ -161,12 +169,13 @@ class SegmentCollection(object):
             # Todo consolidate trace segments into a trace.
             # not enough working knowledge of xray to do this
 
-    def summary(self, start_time, end_time, filter_expression=None, sampling=False):
+    def summary(
+        self, start_time: str, end_time: str, filter_expression: Any = None
+    ) -> dict[str, Any]:
         # This beast https://docs.aws.amazon.com/xray/latest/api/API_GetTraceSummaries.html#API_GetTraceSummaries_ResponseSyntax
         if filter_expression is not None:
-            raise AWSError(
-                "Not implemented yet - moto", code="InternalFailure", status=500
-            )
+            # Surfaced to the client as an InternalFailure by XRayResponse
+            raise NotImplementedError("Not implemented yet - moto")
 
         summaries = []
 
@@ -180,11 +189,9 @@ class SegmentCollection(object):
                     (trace["end_date"] - trace["start_date"]).total_seconds()
                 )
                 # this stuff is mostly guesses, refer to TODO above
-                has_error = any(["error" in seg.misc for seg in trace["segments"]])
-                has_fault = any(["fault" in seg.misc for seg in trace["segments"]])
-                has_throttle = any(
-                    ["throttle" in seg.misc for seg in trace["segments"]]
-                )
+                has_error = any("error" in seg.misc for seg in trace["segments"])
+                has_fault = any("fault" in seg.misc for seg in trace["segments"])
+                has_throttle = any("throttle" in seg.misc for seg in trace["segments"])
 
                 # Apparently all of these options are optional
                 summary_part = {
@@ -214,7 +221,9 @@ class SegmentCollection(object):
 
         return result
 
-    def get_trace_ids(self, trace_ids):
+    def get_trace_ids(
+        self, trace_ids: list[str]
+    ) -> tuple[list[dict[str, Any]], list[str]]:
         traces = []
         unprocessed = []
 
@@ -230,21 +239,15 @@ class SegmentCollection(object):
 
 
 class XRayBackend(BaseBackend):
-    def __init__(self):
-        self._telemetry_records = []
+    def __init__(self, region_name: str, account_id: str):
+        super().__init__(region_name, account_id)
+        self._telemetry_records: list[TelemetryRecords] = []
         self._segment_collection = SegmentCollection()
 
-    @staticmethod
-    def default_vpc_endpoint_service(service_region, zones):
-        """Default VPC endpoint service."""
-        return BaseBackend.default_vpc_endpoint_service_factory(
-            service_region, zones, "xray"
-        )
+    def add_telemetry_records(self, src: Any) -> None:
+        self._telemetry_records.append(TelemetryRecords.from_json(src))
 
-    def add_telemetry_records(self, json):
-        self._telemetry_records.append(TelemetryRecords.from_json(json))
-
-    def process_segment(self, doc):
+    def process_segment(self, doc: Any) -> None:
         try:
             data = json.loads(doc)
         except ValueError:
@@ -264,15 +267,15 @@ class XRayBackend(BaseBackend):
                 seg_id=segment.id, code="InternalFailure", message=str(err)
             )
 
-    def get_trace_summary(self, start_time, end_time, filter_expression, summaries):
-        return self._segment_collection.summary(
-            start_time, end_time, filter_expression, summaries
-        )
+    def get_trace_summary(
+        self, start_time: str, end_time: str, filter_expression: Any
+    ) -> dict[str, Any]:
+        return self._segment_collection.summary(start_time, end_time, filter_expression)
 
-    def get_trace_ids(self, trace_ids, next_token):
+    def get_trace_ids(self, trace_ids: list[str]) -> dict[str, Any]:
         traces, unprocessed_ids = self._segment_collection.get_trace_ids(trace_ids)
 
-        result = {"Traces": [], "UnprocessedTraceIds": unprocessed_ids}
+        result: dict[str, Any] = {"Traces": [], "UnprocessedTraceIds": unprocessed_ids}
 
         for trace in traces:
             segments = []
@@ -292,10 +295,4 @@ class XRayBackend(BaseBackend):
         return result
 
 
-xray_backends = {}
-for region in Session().get_available_regions("xray"):
-    xray_backends[region] = XRayBackend()
-for region in Session().get_available_regions("xray", partition_name="aws-us-gov"):
-    xray_backends[region] = XRayBackend()
-for region in Session().get_available_regions("xray", partition_name="aws-cn"):
-    xray_backends[region] = XRayBackend()
+xray_backends = BackendDict(XRayBackend, "xray")

@@ -1,12 +1,11 @@
-import pytest
+from uuid import uuid4
 
 import boto3
+import pytest
 from botocore.exceptions import ClientError
-import sure  # noqa # pylint: disable=unused-import
 
-from moto import mock_ec2, mock_iam
+from moto import mock_aws
 from tests import EXAMPLE_AMI_ID
-from uuid import uuid4
 
 
 def quick_instance_creation():
@@ -26,8 +25,7 @@ def quick_instance_profile_creation(name):
     return test_instance_profile.arn, test_instance_profile.name
 
 
-@mock_ec2
-@mock_iam
+@mock_aws
 def test_associate():
     client = boto3.client("ec2", region_name="us-east-1")
     instance_id = quick_instance_creation()
@@ -42,15 +40,15 @@ def test_associate():
         },
         InstanceId=instance_id,
     )
-    association["IamInstanceProfileAssociation"]["InstanceId"].should.equal(instance_id)
-    association["IamInstanceProfileAssociation"]["IamInstanceProfile"][
-        "Arn"
-    ].should.equal(instance_profile_arn)
-    association["IamInstanceProfileAssociation"]["State"].should.equal("associating")
+    assert association["IamInstanceProfileAssociation"]["InstanceId"] == instance_id
+    assert (
+        association["IamInstanceProfileAssociation"]["IamInstanceProfile"]["Arn"]
+        == instance_profile_arn
+    )
+    assert association["IamInstanceProfileAssociation"]["State"] == "associating"
 
 
-@mock_ec2
-@mock_iam
+@mock_aws
 def test_invalid_associate():
     client = boto3.client("ec2", region_name="us-east-1")
     instance_id = quick_instance_creation()
@@ -75,18 +73,18 @@ def test_invalid_associate():
             },
             InstanceId=instance_id,
         )
-    ex.value.response["Error"]["Code"].should.equal("IncorrectState")
-    ex.value.response["Error"]["Message"].should.contain(
-        "There is an existing association for"
+    assert ex.value.response["Error"]["Code"] == "IncorrectState"
+    assert (
+        "There is an existing association for" in ex.value.response["Error"]["Message"]
     )
 
     # Wrong instance profile
     with pytest.raises(ClientError) as ex:
         client.associate_iam_instance_profile(
-            IamInstanceProfile={"Arn": "fake", "Name": "fake"}, InstanceId=instance_id,
+            IamInstanceProfile={"Arn": "fake", "Name": "fake"}, InstanceId=instance_id
         )
-    ex.value.response["Error"]["Code"].should.equal("NoSuchEntity")
-    ex.value.response["Error"]["Message"].should.contain("not found")
+    assert ex.value.response["Error"]["Code"] == "NoSuchEntity"
+    assert "not found" in ex.value.response["Error"]["Message"]
 
     # Wrong instance id
     with pytest.raises(ClientError) as ex:
@@ -97,12 +95,11 @@ def test_invalid_associate():
             },
             InstanceId="fake",
         )
-    ex.value.response["Error"]["Code"].should.equal("InvalidInstanceID.NotFound")
-    ex.value.response["Error"]["Message"].should.contain("does not exist")
+    assert ex.value.response["Error"]["Code"] == "InvalidInstanceID.NotFound"
+    assert "does not exist" in ex.value.response["Error"]["Message"]
 
 
-@mock_ec2
-@mock_iam
+@mock_aws
 def test_describe():
     client = boto3.client("ec2", region_name="us-east-1")
 
@@ -119,16 +116,16 @@ def test_describe():
     )
     associations = client.describe_iam_instance_profile_associations()
     associations = associations["IamInstanceProfileAssociations"]
-    [a["IamInstanceProfile"]["Arn"] for a in associations].should.contain(
-        instance_profile_arn1
-    )
+    assert instance_profile_arn1 in [
+        a["IamInstanceProfile"]["Arn"] for a in associations
+    ]
     my_assoc = [
         a
         for a in associations
         if a["IamInstanceProfile"]["Arn"] == instance_profile_arn1
     ][0]
-    my_assoc["InstanceId"].should.equal(instance_id1)
-    my_assoc["State"].should.equal("associated")
+    assert my_assoc["InstanceId"] == instance_id1
+    assert my_assoc["State"] == "associated"
 
     instance_id2 = quick_instance_creation()
     instance_profile_arn2, instance_profile_name2 = quick_instance_profile_creation(
@@ -144,12 +141,12 @@ def test_describe():
 
     associations = client.describe_iam_instance_profile_associations()
     associations = associations["IamInstanceProfileAssociations"]
-    [a["IamInstanceProfile"]["Arn"] for a in associations].should.contain(
-        instance_profile_arn1
-    )
-    [a["IamInstanceProfile"]["Arn"] for a in associations].should.contain(
-        instance_profile_arn2
-    )
+    assert instance_profile_arn1 in [
+        a["IamInstanceProfile"]["Arn"] for a in associations
+    ]
+    assert instance_profile_arn2 in [
+        a["IamInstanceProfile"]["Arn"] for a in associations
+    ]
     my_assoc = [
         a
         for a in associations
@@ -157,27 +154,28 @@ def test_describe():
     ][0]
 
     associations = client.describe_iam_instance_profile_associations(
-        AssociationIds=[my_assoc["AssociationId"],]
+        AssociationIds=[my_assoc["AssociationId"]]
     )
-    associations["IamInstanceProfileAssociations"].should.have.length_of(1)
-    associations["IamInstanceProfileAssociations"][0]["IamInstanceProfile"][
-        "Arn"
-    ].should.equal(my_assoc["IamInstanceProfile"]["Arn"])
+    assert len(associations["IamInstanceProfileAssociations"]) == 1
+    assert (
+        associations["IamInstanceProfileAssociations"][0]["IamInstanceProfile"]["Arn"]
+        == my_assoc["IamInstanceProfile"]["Arn"]
+    )
 
     associations = client.describe_iam_instance_profile_associations(
         Filters=[
-            {"Name": "instance-id", "Values": [my_assoc["InstanceId"],],},
+            {"Name": "instance-id", "Values": [my_assoc["InstanceId"]]},
             {"Name": "state", "Values": ["associated"]},
         ]
     )
-    associations["IamInstanceProfileAssociations"].should.have.length_of(1)
-    associations["IamInstanceProfileAssociations"][0]["IamInstanceProfile"][
-        "Arn"
-    ].should.equal(my_assoc["IamInstanceProfile"]["Arn"])
+    assert len(associations["IamInstanceProfileAssociations"]) == 1
+    assert (
+        associations["IamInstanceProfileAssociations"][0]["IamInstanceProfile"]["Arn"]
+        == my_assoc["IamInstanceProfile"]["Arn"]
+    )
 
 
-@mock_ec2
-@mock_iam
+@mock_aws
 def test_replace():
     client = boto3.client("ec2", region_name="us-east-1")
     instance_id1 = quick_instance_creation()
@@ -204,14 +202,14 @@ def test_replace():
         AssociationId=association["IamInstanceProfileAssociation"]["AssociationId"],
     )
 
-    association["IamInstanceProfileAssociation"]["IamInstanceProfile"][
-        "Arn"
-    ].should.equal(instance_profile_arn2)
-    association["IamInstanceProfileAssociation"]["State"].should.equal("associating")
+    assert (
+        association["IamInstanceProfileAssociation"]["IamInstanceProfile"]["Arn"]
+        == instance_profile_arn2
+    )
+    assert association["IamInstanceProfileAssociation"]["State"] == "associating"
 
 
-@mock_ec2
-@mock_iam
+@mock_aws
 def test_invalid_replace():
     client = boto3.client("ec2", region_name="us-east-1")
     instance_id = quick_instance_creation()
@@ -239,21 +237,20 @@ def test_invalid_replace():
             },
             AssociationId="fake",
         )
-    ex.value.response["Error"]["Code"].should.equal("InvalidAssociationID.NotFound")
-    ex.value.response["Error"]["Message"].should.contain("An invalid association-id of")
+    assert ex.value.response["Error"]["Code"] == "InvalidAssociationID.NotFound"
+    assert "An invalid association-id of" in ex.value.response["Error"]["Message"]
 
     # Wrong instance profile
     with pytest.raises(ClientError) as ex:
         client.replace_iam_instance_profile_association(
-            IamInstanceProfile={"Arn": "fake", "Name": "fake",},
+            IamInstanceProfile={"Arn": "fake", "Name": "fake"},
             AssociationId=association["IamInstanceProfileAssociation"]["AssociationId"],
         )
-    ex.value.response["Error"]["Code"].should.equal("NoSuchEntity")
-    ex.value.response["Error"]["Message"].should.contain("not found")
+    assert ex.value.response["Error"]["Code"] == "NoSuchEntity"
+    assert "not found" in ex.value.response["Error"]["Message"]
 
 
-@mock_ec2
-@mock_iam
+@mock_aws
 def test_disassociate():
     client = boto3.client("ec2", region_name="us-east-1")
     instance_id = quick_instance_creation()
@@ -271,35 +268,43 @@ def test_disassociate():
 
     associations = client.describe_iam_instance_profile_associations()
     associations = associations["IamInstanceProfileAssociations"]
-    [a["IamInstanceProfile"]["Arn"] for a in associations].should.contain(
-        instance_profile_arn
-    )
+    assert instance_profile_arn in [
+        a["IamInstanceProfile"]["Arn"] for a in associations
+    ]
+
+    reservations = client.describe_instances(InstanceIds=[instance_id])["Reservations"]
+    instances = reservations[0]["Instances"]
+
+    assert "IamInstanceProfile" in instances[0]
 
     disassociation = client.disassociate_iam_instance_profile(
-        AssociationId=association["IamInstanceProfileAssociation"]["AssociationId"],
+        AssociationId=association["IamInstanceProfileAssociation"]["AssociationId"]
     )
 
-    disassociation["IamInstanceProfileAssociation"]["IamInstanceProfile"][
-        "Arn"
-    ].should.equal(instance_profile_arn)
-    disassociation["IamInstanceProfileAssociation"]["State"].should.equal(
-        "disassociating"
+    assert (
+        disassociation["IamInstanceProfileAssociation"]["IamInstanceProfile"]["Arn"]
+        == instance_profile_arn
     )
+    assert disassociation["IamInstanceProfileAssociation"]["State"] == "disassociating"
 
     associations = client.describe_iam_instance_profile_associations()
     associations = associations["IamInstanceProfileAssociations"]
-    [a["IamInstanceProfile"]["Arn"] for a in associations].shouldnt.contain(
-        instance_profile_arn
-    )
+    assert instance_profile_arn not in [
+        a["IamInstanceProfile"]["Arn"] for a in associations
+    ]
+
+    reservations = client.describe_instances(InstanceIds=[instance_id])["Reservations"]
+    instances = reservations[0]["Instances"]
+
+    assert "IamInstanceProfile" not in instances[0]
 
 
-@mock_ec2
-@mock_iam
+@mock_aws
 def test_invalid_disassociate():
     client = boto3.client("ec2", region_name="us-east-1")
 
     # Wrong id
     with pytest.raises(ClientError) as ex:
-        client.disassociate_iam_instance_profile(AssociationId="fake",)
-    ex.value.response["Error"]["Code"].should.equal("InvalidAssociationID.NotFound")
-    ex.value.response["Error"]["Message"].should.contain("An invalid association-id of")
+        client.disassociate_iam_instance_profile(AssociationId="fake")
+    assert ex.value.response["Error"]["Code"] == "InvalidAssociationID.NotFound"
+    assert "An invalid association-id of" in ex.value.response["Error"]["Message"]

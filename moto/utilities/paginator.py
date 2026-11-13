@@ -1,59 +1,99 @@
-from functools import wraps, reduce
+import inspect
+from collections.abc import Callable
+from copy import deepcopy
+from functools import wraps
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from botocore.paginate import TokenDecoder, TokenEncoder
 
 from moto.core.exceptions import InvalidToken
 
+if TYPE_CHECKING:
+    from typing_extensions import ParamSpec, Protocol
 
-def paginate(pagination_model, original_function=None):
-    def pagination_decorator(func):
+    P1 = ParamSpec("P1")
+    P2 = ParamSpec("P2")
+else:
+    Protocol = object
+
+T = TypeVar("T")
+
+
+class GenericFunction(Protocol):
+    def __call__(
+        self, func: "Callable[P1, list[T]]"
+    ) -> "Callable[P2, tuple[list[T], str | None]]": ...
+
+
+def paginate(pagination_model: dict[str, Any]) -> GenericFunction:
+    def pagination_decorator(
+        func: Callable[..., list[T]],
+    ) -> Callable[..., tuple[list[T], str | None]]:
         @wraps(func)
-        def pagination_wrapper(*args, **kwargs):
-
+        def pagination_wrapper(*args: Any, **kwargs: Any) -> Any:  # type: ignore
             method = func.__name__
             model = pagination_model
             pagination_config = model.get(method)
             if not pagination_config:
-                raise ValueError(
-                    "No pagination config for backend method: {}".format(method)
-                )
-            # We pop the pagination arguments, so the remaining kwargs (if any)
-            # can be used to compute the optional parameters checksum.
-            input_token = kwargs.pop(pagination_config.get("input_token"), None)
-            limit = kwargs.pop(pagination_config.get("limit_key"), None)
+                raise ValueError(f"No pagination config for backend method: {method}")
+            # Get the pagination arguments, to be used by the paginator
+            next_token_name = pagination_config.get("input_token", "next_token")
+            limit_name = pagination_config.get("limit_key")
+            input_token = kwargs.get(next_token_name)
+            limit = kwargs.get(limit_name, None)
+            # Remove pagination arguments from our input kwargs
+            # We need this to verify that our input kwargs are the same across invocations
+            #   list_all(service="x")                   next_token = "a"
+            #   list_all(service="x", next_token="a") ==> Works fine
+            #   list_all(service="y", next_token="a") ==> Should throw an error, as the input_kwargs are different
+            input_kwargs = deepcopy(kwargs)
+            input_kwargs.pop(next_token_name, None)
+            input_kwargs.pop(limit_name, None)
             fail_on_invalid_token = pagination_config.get("fail_on_invalid_token", True)
             paginator = Paginator(
                 max_results=limit,
                 max_results_default=pagination_config.get("limit_default"),
                 starting_token=input_token,
-                page_ending_range_keys=pagination_config.get("page_ending_range_keys"),
-                param_values_to_check=kwargs,
+                unique_attribute=pagination_config.get("unique_attribute"),
+                param_values_to_check=input_kwargs,
                 fail_on_invalid_token=fail_on_invalid_token,
             )
+
+            # Determine which parameters to pass
+            (arg_names, _, has_kwargs, _, _, _, _) = inspect.getfullargspec(func)
+            # If the target-func expects `**kwargs`, we can pass everything
+            if not has_kwargs:
+                # If the target-function does not expect the next_token/limit, do not pass it
+                if next_token_name not in arg_names:
+                    kwargs.pop(next_token_name, None)
+                if limit_name not in arg_names:
+                    kwargs.pop(limit_name, None)
+
             results = func(*args, **kwargs)
             return paginator.paginate(results)
 
         return pagination_wrapper
 
-    if original_function:
-        return pagination_decorator(original_function)
-
     return pagination_decorator
 
 
-class Paginator(object):
+class Paginator:
     def __init__(
         self,
-        max_results=None,
-        max_results_default=None,
-        starting_token=None,
-        page_ending_range_keys=None,
-        param_values_to_check=None,
-        fail_on_invalid_token=True,
+        max_results: Any = None,
+        max_results_default: Any = None,
+        starting_token: Any = None,
+        unique_attribute: Any = None,
+        param_values_to_check: Any = None,
+        fail_on_invalid_token: bool = True,
     ):
         self._max_results = max_results if max_results else max_results_default
         self._starting_token = starting_token
-        self._page_ending_range_keys = page_ending_range_keys
+        self._unique_attributes = (
+            unique_attribute
+            if isinstance(unique_attribute, list)
+            else [unique_attribute]
+        )
         self._param_values_to_check = param_values_to_check
         self._fail_on_invalid_token = fail_on_invalid_token
         self._token_encoder = TokenEncoder()
@@ -61,7 +101,7 @@ class Paginator(object):
         self._param_checksum = self._calculate_parameter_checksum()
         self._parsed_token = self._parse_starting_token()
 
-    def _parse_starting_token(self):
+    def _parse_starting_token(self) -> dict[str, Any] | None:
         if self._starting_token is None:
             return None
         # The starting token is a dict passed as a base64 encoded string.
@@ -69,48 +109,72 @@ class Paginator(object):
         try:
             next_token = self._token_decoder.decode(next_token)
         except (ValueError, TypeError, UnicodeDecodeError):
-            if self._fail_on_invalid_token:
-                raise InvalidToken("Invalid token")
+            self._raise_exception_if_required(next_token)
             return None
         if next_token.get("parameterChecksum") != self._param_checksum:
-            raise InvalidToken(
-                "Input inconsistent with page token: {}".format(str(next_token))
-            )
+            raise InvalidToken(f"Input inconsistent with page token: {str(next_token)}")
         return next_token
 
-    def _calculate_parameter_checksum(self):
-        if not self._param_values_to_check:
-            return None
-        return reduce(
-            lambda x, y: x ^ y,
-            [hash(item) for item in self._param_values_to_check.items()],
-        )
+    def _raise_exception_if_required(self, token: str | None) -> None:
+        if self._fail_on_invalid_token:
+            if isinstance(self._fail_on_invalid_token, type):
+                # we need to raise a custom exception
+                func_info = inspect.getfullargspec(self._fail_on_invalid_token)
+                arg_names, _, _, _, _, _, _ = func_info
+                # arg_names == [self] or [self, token_argument_that_can_have_any_name]
+                requires_token_arg = len(arg_names) > 1
+                if requires_token_arg:
+                    raise self._fail_on_invalid_token(token)
+                else:
+                    raise self._fail_on_invalid_token()
+            raise InvalidToken("Invalid token")
 
-    def _check_predicate(self, item):
+    def _calculate_parameter_checksum(self) -> int:
+        def freeze(o: Any) -> Any:
+            if not o:
+                return None
+            if isinstance(o, dict):
+                return frozenset({k: freeze(v) for k, v in o.items()}.items())
+
+            if isinstance(o, (list, tuple, set)):
+                return tuple([freeze(v) for v in o])
+
+            return o
+
+        return hash(freeze(self._param_values_to_check))
+
+    def _check_predicate(self, item: Any) -> bool:
         if self._parsed_token is None:
             return False
-        page_ending_range_key = self._parsed_token["pageEndingRangeKey"]
-        predicate_values = page_ending_range_key.split("|")
-        for (index, attr) in enumerate(self._page_ending_range_keys):
-            curr_val = item[attr] if type(item) == dict else getattr(item, attr, None)
-            if not curr_val == predicate_values[index]:
+        unique_attributes = self._parsed_token["uniqueAttributes"]
+        predicate_values = unique_attributes.split("|")
+        for index, attr in enumerate(self._unique_attributes):
+            curr_val = self._get_unique_value(item, attr, None)
+            if not str(curr_val) == predicate_values[index]:
                 return False
+
         return True
 
-    def _build_next_token(self, next_item):
-        token_dict = {}
+    @staticmethod
+    def _get_unique_value(item: Any, attr: Any, default: Any = None) -> Any:
+        # Scalar items (e.g. a list of ARNs or URLs) are their own unique value
+        if isinstance(item, str):
+            return item
+        if isinstance(item, dict):
+            return item[attr]
+        return getattr(item, attr, default)
+
+    def _build_next_token(self, next_item: Any) -> str:
+        token_dict: dict[str, Any] = {}
         if self._param_checksum:
             token_dict["parameterChecksum"] = self._param_checksum
         range_keys = []
-        for (index, attr) in enumerate(self._page_ending_range_keys):
-            if type(next_item) == dict:
-                range_keys.append(next_item[attr])
-            else:
-                range_keys.append(getattr(next_item, attr))
-        token_dict["pageEndingRangeKey"] = "|".join(range_keys)
+        for attr in self._unique_attributes:
+            range_keys.append(str(self._get_unique_value(next_item, attr)))
+        token_dict["uniqueAttributes"] = "|".join(range_keys)
         return self._token_encoder.encode(token_dict)
 
-    def paginate(self, results):
+    def paginate(self, results: list[Any]) -> tuple[list[Any], str | None]:
         index_start = 0
         if self._starting_token:
             try:
@@ -133,6 +197,6 @@ class Paginator(object):
 
         next_token = None
         if results_page and index_end < len(results):
-            page_ending_result = results[index_end]
-            next_token = self._build_next_token(page_ending_result)
+            last_resource_on_this_page = results[index_end]
+            next_token = self._build_next_token(last_resource_on_this_page)
         return results_page, next_token

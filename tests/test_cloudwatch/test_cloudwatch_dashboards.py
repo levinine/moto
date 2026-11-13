@@ -1,22 +1,29 @@
 import boto3
+import pytest
 from botocore.exceptions import ClientError
-import sure  # noqa # pylint: disable=unused-import
 
-from moto import mock_cloudwatch
+from moto import mock_aws
 
 
-@mock_cloudwatch
-def test_put_list_dashboard():
-    client = boto3.client("cloudwatch", region_name="eu-central-1")
+@mock_aws
+@pytest.mark.parametrize(
+    "region,partition", [("eu-central-1", "aws"), ("cn-north-1", "aws-cn")]
+)
+def test_put_list_dashboard(region, partition):
+    client = boto3.client("cloudwatch", region_name=region)
     widget = '{"widgets": [{"type": "text", "x": 0, "y": 7, "width": 3, "height": 3, "properties": {"markdown": "Hello world"}}]}'
 
     client.put_dashboard(DashboardName="test1", DashboardBody=widget)
-    resp = client.list_dashboards()
+    dashboards = client.list_dashboards()["DashboardEntries"]
 
-    len(resp["DashboardEntries"]).should.equal(1)
+    assert len(dashboards) == 1
+    assert (
+        dashboards[0]["DashboardArn"]
+        == f"arn:{partition}:cloudwatch::123456789012:dashboard/test1"
+    )
 
 
-@mock_cloudwatch
+@mock_aws
 def test_put_list_prefix_nomatch_dashboard():
     client = boto3.client("cloudwatch", region_name="eu-central-1")
     widget = '{"widgets": [{"type": "text", "x": 0, "y": 7, "width": 3, "height": 3, "properties": {"markdown": "Hello world"}}]}'
@@ -24,10 +31,10 @@ def test_put_list_prefix_nomatch_dashboard():
     client.put_dashboard(DashboardName="test1", DashboardBody=widget)
     resp = client.list_dashboards(DashboardNamePrefix="nomatch")
 
-    len(resp["DashboardEntries"]).should.equal(0)
+    assert len(resp["DashboardEntries"]) == 0
 
 
-@mock_cloudwatch
+@mock_aws
 def test_delete_dashboard():
     client = boto3.client("cloudwatch", region_name="eu-central-1")
     widget = '{"widgets": [{"type": "text", "x": 0, "y": 7, "width": 3, "height": 3, "properties": {"markdown": "Hello world"}}]}'
@@ -38,10 +45,10 @@ def test_delete_dashboard():
     client.delete_dashboards(DashboardNames=["test2", "test1"])
 
     resp = client.list_dashboards(DashboardNamePrefix="test3")
-    len(resp["DashboardEntries"]).should.equal(1)
+    assert len(resp["DashboardEntries"]) == 1
 
 
-@mock_cloudwatch
+@mock_aws
 def test_delete_dashboard_fail():
     client = boto3.client("cloudwatch", region_name="eu-central-1")
     widget = '{"widgets": [{"type": "text", "x": 0, "y": 7, "width": 3, "height": 3, "properties": {"markdown": "Hello world"}}]}'
@@ -49,37 +56,31 @@ def test_delete_dashboard_fail():
     client.put_dashboard(DashboardName="test1", DashboardBody=widget)
     client.put_dashboard(DashboardName="test2", DashboardBody=widget)
     client.put_dashboard(DashboardName="test3", DashboardBody=widget)
-    # Doesnt delete anything if all dashboards to be deleted do not exist
-    try:
+    # Doesn't delete anything if some dashboards to be deleted do not exist
+    with pytest.raises(ClientError) as exc:
         client.delete_dashboards(DashboardNames=["test2", "test1", "test_no_match"])
-    except ClientError as err:
-        err.response["Error"]["Code"].should.equal("ResourceNotFound")
-    else:
-        raise RuntimeError("Should of raised error")
+    assert exc.value.response["Error"]["Code"] == "ResourceNotFound"
 
     resp = client.list_dashboards()
-    len(resp["DashboardEntries"]).should.equal(3)
+    assert len(resp["DashboardEntries"]) == 3
 
 
-@mock_cloudwatch
+@mock_aws
 def test_get_dashboard():
     client = boto3.client("cloudwatch", region_name="eu-central-1")
     widget = '{"widgets": [{"type": "text", "x": 0, "y": 7, "width": 3, "height": 3, "properties": {"markdown": "Hello world"}}]}'
     client.put_dashboard(DashboardName="test1", DashboardBody=widget)
 
     resp = client.get_dashboard(DashboardName="test1")
-    resp.should.contain("DashboardArn")
-    resp.should.contain("DashboardBody")
-    resp["DashboardName"].should.equal("test1")
+    assert "DashboardArn" in resp
+    assert "DashboardBody" in resp
+    assert resp["DashboardName"] == "test1"
 
 
-@mock_cloudwatch
+@mock_aws
 def test_get_dashboard_fail():
     client = boto3.client("cloudwatch", region_name="eu-central-1")
 
-    try:
+    with pytest.raises(ClientError) as exc:
         client.get_dashboard(DashboardName="test1")
-    except ClientError as err:
-        err.response["Error"]["Code"].should.equal("ResourceNotFound")
-    else:
-        raise RuntimeError("Should have raised error")
+    assert exc.value.response["Error"]["Code"] == "ResourceNotFound"

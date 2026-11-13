@@ -1,39 +1,50 @@
 import json
+from collections.abc import Iterable
 
-from dateutil.parser import parse as dtparse
+from moto.core.responses import ActionResult, BaseResponse, EmptyResult
 
-from moto.core.responses import BaseResponse
-from moto.core.utils import amzn_request_id
-from .models import cloudwatch_backends, MetricDataQuery, MetricStat, Metric, Dimension
+from .exceptions import (
+    DashboardInvalidInputError,
+    InvalidParameterCombination,
+    InvalidParameterValue,
+    ResourceNotFound,
+    ValidationError,
+)
+from .models import (
+    Alarm,
+    CloudWatchBackend,
+    Dimension,
+    Metric,
+    MetricDataQuery,
+    MetricStat,
+    cloudwatch_backends,
+)
 
 
 class CloudWatchResponse(BaseResponse):
+    def __init__(self) -> None:
+        super().__init__(service_name="cloudwatch")
+        self.automated_parameter_parsing = True
+
     @property
-    def cloudwatch_backend(self):
-        return cloudwatch_backends[self.region]
+    def cloudwatch_backend(self) -> CloudWatchBackend:
+        return cloudwatch_backends[self.current_account][self.region]
 
-    def _error(self, code, message, status=400):
-        template = self.response_template(ERROR_RESPONSE_TEMPLATE)
-        return template.render(code=code, message=message), dict(status=status)
-
-    @amzn_request_id
-    def put_metric_alarm(self):
+    def put_metric_alarm(self) -> ActionResult:
         name = self._get_param("AlarmName")
         namespace = self._get_param("Namespace")
         metric_name = self._get_param("MetricName")
-        metrics = self._get_multi_param("Metrics.member", skip_result_conversion=True)
+        metrics = self._get_param("Metrics", [])
         metric_data_queries = None
         if metrics:
             metric_data_queries = []
             for metric in metrics:
-                dimensions = []
+                metric_dimensions = []
                 dims = (
-                    metric.get("MetricStat", {})
-                    .get("Metric", {})
-                    .get("Dimensions.member", [])
+                    metric.get("MetricStat", {}).get("Metric", {}).get("Dimensions", [])
                 )
                 for dim in dims:
-                    dimensions.append(
+                    metric_dimensions.append(
                         Dimension(name=dim.get("Name"), value=dim.get("Value"))
                     )
                 metric_stat = None
@@ -47,7 +58,7 @@ class CloudWatchResponse(BaseResponse):
                         metric=Metric(
                             metric_name=stat_metric_name,
                             namespace=stat_metric_ns,
-                            dimensions=dimensions,
+                            dimensions=metric_dimensions,
                         ),
                         period=stat_details.get("Period"),
                         stat=stat_details.get("Stat"),
@@ -55,7 +66,7 @@ class CloudWatchResponse(BaseResponse):
                     )
                 metric_data_queries.append(
                     MetricDataQuery(
-                        id=metric.get("Id"),
+                        query_id=metric.get("Id"),
                         label=metric.get("Label"),
                         period=metric.get("Period"),
                         return_data=metric.get("ReturnData"),
@@ -72,13 +83,11 @@ class CloudWatchResponse(BaseResponse):
         statistic = self._get_param("Statistic")
         extended_statistic = self._get_param("ExtendedStatistic")
         description = self._get_param("AlarmDescription")
-        dimensions = self._get_list_prefix("Dimensions.member")
-        alarm_actions = self._get_multi_param("AlarmActions.member")
-        ok_actions = self._get_multi_param("OKActions.member")
-        actions_enabled = self._get_param("ActionsEnabled")
-        insufficient_data_actions = self._get_multi_param(
-            "InsufficientDataActions.member"
-        )
+        dimensions = self._get_param("Dimensions", [])
+        alarm_actions = self._get_param("AlarmActions", [])
+        ok_actions = self._get_param("OKActions", [])
+        actions_enabled = self._get_bool_param("ActionsEnabled")
+        insufficient_data_actions = self._get_param("InsufficientDataActions", [])
         unit = self._get_param("Unit")
         treat_missing_data = self._get_param("TreatMissingData")
         evaluate_low_sample_count_percentile = self._get_param(
@@ -87,8 +96,8 @@ class CloudWatchResponse(BaseResponse):
         threshold_metric_id = self._get_param("ThresholdMetricId")
         # fetch AlarmRule to re-use this method for composite alarms as well
         rule = self._get_param("AlarmRule")
-        tags = self._get_multi_param("Tags.member")
-        alarm = self.cloudwatch_backend.put_metric_alarm(
+        tags = self._get_param("Tags", [])
+        self.cloudwatch_backend.put_metric_alarm(
             name=name,
             namespace=namespace,
             metric_name=metric_name,
@@ -113,14 +122,12 @@ class CloudWatchResponse(BaseResponse):
             rule=rule,
             tags=tags,
         )
-        template = self.response_template(PUT_METRIC_ALARM_TEMPLATE)
-        return template.render(alarm=alarm)
+        return EmptyResult()
 
-    @amzn_request_id
-    def describe_alarms(self):
+    def describe_alarms(self) -> ActionResult:
         action_prefix = self._get_param("ActionPrefix")
         alarm_name_prefix = self._get_param("AlarmNamePrefix")
-        alarm_names = self._get_multi_param("AlarmNames.member")
+        alarm_names = self._get_param("AlarmNames", [])
         state_value = self._get_param("StateValue")
 
         if action_prefix:
@@ -134,62 +141,60 @@ class CloudWatchResponse(BaseResponse):
         elif state_value:
             alarms = self.cloudwatch_backend.get_alarms_by_state_value(state_value)
         else:
-            alarms = self.cloudwatch_backend.get_all_alarms()
+            alarms = self.cloudwatch_backend.describe_alarms()
 
         metric_alarms = [a for a in alarms if a.rule is None]
         composite_alarms = [a for a in alarms if a.rule is not None]
 
-        template = self.response_template(DESCRIBE_ALARMS_TEMPLATE)
-        return template.render(
-            metric_alarms=metric_alarms, composite_alarms=composite_alarms
-        )
+        result = {"MetricAlarms": metric_alarms, "CompositeAlarms": composite_alarms}
+        return ActionResult(result)
 
-    @amzn_request_id
-    def delete_alarms(self):
-        alarm_names = self._get_multi_param("AlarmNames.member")
+    def delete_alarms(self) -> ActionResult:
+        alarm_names = self._get_param("AlarmNames", [])
         self.cloudwatch_backend.delete_alarms(alarm_names)
-        template = self.response_template(DELETE_METRIC_ALARMS_TEMPLATE)
-        return template.render()
+        return EmptyResult()
 
-    @amzn_request_id
-    def put_metric_data(self):
+    def put_metric_data(self) -> ActionResult:
         namespace = self._get_param("Namespace")
-        metric_data = self._get_multi_param("MetricData.member")
+        metric_data = self._get_param("MetricData", [])
         self.cloudwatch_backend.put_metric_data(namespace, metric_data)
-        template = self.response_template(PUT_METRIC_DATA_TEMPLATE)
-        return template.render()
+        return EmptyResult()
 
-    @amzn_request_id
-    def get_metric_data(self):
-        start = dtparse(self._get_param("StartTime"))
-        end = dtparse(self._get_param("EndTime"))
-        scan_by = self._get_param("ScanBy")
+    def get_metric_data(self) -> ActionResult:
+        params = self._get_params()
+        start = params["StartTime"]
+        end = params["EndTime"]
+        scan_by = params.get("ScanBy") or "TimestampDescending"
 
-        queries = self._get_list_prefix("MetricDataQueries.member")
+        queries = params.get("MetricDataQueries", [])
+        for query in queries:
+            if "MetricStat" not in query and "Expression" not in query:
+                # AWS also returns the empty line
+                raise ValidationError(
+                    "The parameter MetricDataQueries.member.1.MetricStat is required.\n"
+                )
         results = self.cloudwatch_backend.get_metric_data(
             start_time=start, end_time=end, queries=queries, scan_by=scan_by
         )
 
-        template = self.response_template(GET_METRIC_DATA_TEMPLATE)
-        return template.render(results=results)
+        result = {"MetricDataResults": results}
+        return ActionResult(result)
 
-    @amzn_request_id
-    def get_metric_statistics(self):
+    def get_metric_statistics(self) -> ActionResult:
         namespace = self._get_param("Namespace")
         metric_name = self._get_param("MetricName")
-        start_time = dtparse(self._get_param("StartTime"))
-        end_time = dtparse(self._get_param("EndTime"))
-        period = int(self._get_param("Period"))
-        statistics = self._get_multi_param("Statistics.member")
-        dimensions = self._get_multi_param("Dimensions.member")
+        start_time = self._get_param("StartTime")
+        end_time = self._get_param("EndTime")
+        period = self._get_int_param("Period")
+        statistics = self._get_param("Statistics", [])
+        dimensions = self._get_param("Dimensions", [])
 
         # Unsupported Parameters (To Be Implemented)
         unit = self._get_param("Unit")
         extended_statistics = self._get_param("ExtendedStatistics")
 
-        # TODO: this should instead throw InvalidParameterCombination
         if not statistics and not extended_statistics:
-            raise NotImplementedError(
+            raise InvalidParameterCombination(
                 "Must specify either Statistics or ExtendedStatistics"
             )
 
@@ -203,11 +208,10 @@ class CloudWatchResponse(BaseResponse):
             unit=unit,
             dimensions=dimensions,
         )
-        template = self.response_template(GET_METRIC_STATISTICS_TEMPLATE)
-        return template.render(label=metric_name, datapoints=datapoints)
+        result = {"Label": metric_name, "Datapoints": datapoints}
+        return ActionResult(result)
 
-    @amzn_request_id
-    def list_metrics(self):
+    def list_metrics(self) -> ActionResult:
         namespace = self._get_param("Namespace")
         metric_name = self._get_param("MetricName")
         dimensions = self._get_params().get("Dimensions", [])
@@ -215,28 +219,24 @@ class CloudWatchResponse(BaseResponse):
         next_token, metrics = self.cloudwatch_backend.list_metrics(
             next_token, namespace, metric_name, dimensions
         )
-        template = self.response_template(LIST_METRICS_TEMPLATE)
-        return template.render(metrics=metrics, next_token=next_token)
+        result = {"Metrics": metrics, "NextToken": next_token}
+        return ActionResult(result)
 
-    @amzn_request_id
-    def delete_dashboards(self):
-        dashboards = self._get_multi_param("DashboardNames.member")
-        if dashboards is None:
-            return self._error("InvalidParameterValue", "Need at least 1 dashboard")
+    def delete_dashboards(self) -> ActionResult:
+        dashboards = self._get_param("DashboardNames", [])
+        if not dashboards:
+            raise InvalidParameterValue("Need at least 1 dashboard")
 
-        status, error = self.cloudwatch_backend.delete_dashboards(dashboards)
-        if not status:
-            return self._error("ResourceNotFound", error)
+        error = self.cloudwatch_backend.delete_dashboards(dashboards)
+        if error is not None:
+            raise ResourceNotFound(error)
 
-        template = self.response_template(DELETE_DASHBOARD_TEMPLATE)
-        return template.render()
-
-    @amzn_request_id
-    def describe_alarm_history(self):
-        raise NotImplementedError()
+        return EmptyResult()
 
     @staticmethod
-    def filter_alarms(alarms, metric_name, namespace):
+    def filter_alarms(
+        alarms: Iterable[Alarm], metric_name: str, namespace: str
+    ) -> list[Alarm]:
         metric_filtered_alarms = []
 
         for alarm in alarms:
@@ -244,494 +244,109 @@ class CloudWatchResponse(BaseResponse):
                 metric_filtered_alarms.append(alarm)
         return metric_filtered_alarms
 
-    @amzn_request_id
-    def describe_alarms_for_metric(self):
-        alarms = self.cloudwatch_backend.get_all_alarms()
+    def describe_alarms_for_metric(self) -> ActionResult:
+        alarms = self.cloudwatch_backend.describe_alarms()
         namespace = self._get_param("Namespace")
         metric_name = self._get_param("MetricName")
         filtered_alarms = self.filter_alarms(alarms, metric_name, namespace)
-        template = self.response_template(DESCRIBE_METRIC_ALARMS_TEMPLATE)
-        return template.render(alarms=filtered_alarms)
+        result = {"MetricAlarms": filtered_alarms}
+        return ActionResult(result)
 
-    @amzn_request_id
-    def disable_alarm_actions(self):
-        raise NotImplementedError()
+    def disable_alarm_actions(self) -> ActionResult:
+        alarm_names = self._get_param("AlarmNames", [])
+        self.cloudwatch_backend.disable_alarm_actions(alarm_names)
+        return EmptyResult()
 
-    @amzn_request_id
-    def enable_alarm_actions(self):
-        raise NotImplementedError()
+    def enable_alarm_actions(self) -> ActionResult:
+        alarm_names = self._get_param("AlarmNames", [])
+        self.cloudwatch_backend.enable_alarm_actions(alarm_names)
+        return EmptyResult()
 
-    @amzn_request_id
-    def get_dashboard(self):
+    def get_dashboard(self) -> ActionResult:
         dashboard_name = self._get_param("DashboardName")
-
         dashboard = self.cloudwatch_backend.get_dashboard(dashboard_name)
         if dashboard is None:
-            return self._error("ResourceNotFound", "Dashboard does not exist")
+            raise ResourceNotFound("Dashboard does not exist")
+        return ActionResult(dashboard)
 
-        template = self.response_template(GET_DASHBOARD_TEMPLATE)
-        return template.render(dashboard=dashboard)
-
-    @amzn_request_id
-    def list_dashboards(self):
+    def list_dashboards(self) -> ActionResult:
         prefix = self._get_param("DashboardNamePrefix", "")
-
         dashboards = self.cloudwatch_backend.list_dashboards(prefix)
+        result = {"DashboardEntries": dashboards}
+        return ActionResult(result)
 
-        template = self.response_template(LIST_DASHBOARD_RESPONSE)
-        return template.render(dashboards=dashboards)
-
-    @amzn_request_id
-    def put_dashboard(self):
+    def put_dashboard(self) -> ActionResult:
         name = self._get_param("DashboardName")
         body = self._get_param("DashboardBody")
-
         try:
             json.loads(body)
         except ValueError:
-            return self._error("InvalidParameterInput", "Body is invalid JSON")
-
+            raise DashboardInvalidInputError("Body is invalid JSON")
         self.cloudwatch_backend.put_dashboard(name, body)
+        result = {"DashboardValidationMessages": []}  # type: ignore[var-annotated]
+        return ActionResult(result)
 
-        template = self.response_template(PUT_DASHBOARD_RESPONSE)
-        return template.render()
-
-    @amzn_request_id
-    def set_alarm_state(self):
+    def set_alarm_state(self) -> ActionResult:
         alarm_name = self._get_param("AlarmName")
         reason = self._get_param("StateReason")
         reason_data = self._get_param("StateReasonData")
         state_value = self._get_param("StateValue")
-
         self.cloudwatch_backend.set_alarm_state(
             alarm_name, reason, reason_data, state_value
         )
+        return EmptyResult()
 
-        template = self.response_template(SET_ALARM_STATE_TEMPLATE)
-        return template.render()
-
-    @amzn_request_id
-    def list_tags_for_resource(self):
+    def list_tags_for_resource(self) -> ActionResult:
         resource_arn = self._get_param("ResourceARN")
-
         tags = self.cloudwatch_backend.list_tags_for_resource(resource_arn)
+        result = {"Tags": [{"Key": k, "Value": v} for k, v in tags.items()]}
+        return ActionResult(result)
 
-        template = self.response_template(LIST_TAGS_FOR_RESOURCE_TEMPLATE)
-        return template.render(tags=tags)
-
-    @amzn_request_id
-    def tag_resource(self):
+    def tag_resource(self) -> ActionResult:
         resource_arn = self._get_param("ResourceARN")
-        tags = self._get_multi_param("Tags.member")
-
+        tags = self._get_param("Tags", [])
+        tags = {tag["Key"]: tag["Value"] for tag in tags}
         self.cloudwatch_backend.tag_resource(resource_arn, tags)
+        return EmptyResult()
 
-        template = self.response_template(TAG_RESOURCE_TEMPLATE)
-        return template.render()
-
-    @amzn_request_id
-    def untag_resource(self):
+    def untag_resource(self) -> ActionResult:
         resource_arn = self._get_param("ResourceARN")
-        tag_keys = self._get_multi_param("TagKeys.member")
-
+        tag_keys = self._get_param("TagKeys", [])
         self.cloudwatch_backend.untag_resource(resource_arn, tag_keys)
+        return EmptyResult()
 
-        template = self.response_template(UNTAG_RESOURCE_TEMPLATE)
-        return template.render()
+    def put_insight_rule(self) -> ActionResult:
+        name = self._get_param("RuleName")
+        state = self._get_param("RuleState")
+        definition = self._get_param("RuleDefinition")
+        tags = self._get_param("Tags", [])
+        self.cloudwatch_backend.put_insight_rule(
+            name=name,
+            state=state,
+            definition=definition,
+            tags=tags,
+        )
+        return EmptyResult()
 
+    def describe_insight_rules(self) -> ActionResult:
+        rules = self.cloudwatch_backend.describe_insight_rules()
+        result = {"InsightRules": rules}
+        return ActionResult(result)
 
-PUT_METRIC_ALARM_TEMPLATE = """<PutMetricAlarmResponse xmlns="http://monitoring.amazonaws.com/doc/2010-08-01/">
-   <ResponseMetadata>
-      <RequestId>
-         {{ request_id }}
-      </RequestId>
-   </ResponseMetadata>
-</PutMetricAlarmResponse>"""
+    def delete_insight_rules(self) -> ActionResult:
+        names = self._get_param("RuleNames", [])
+        failures = self.cloudwatch_backend.delete_insight_rules(rule_names=names)
+        result = {"Failures": failures}
+        return ActionResult(result)
 
-DESCRIBE_ALARMS_TEMPLATE = """<DescribeAlarmsResponse xmlns="http://monitoring.amazonaws.com/doc/2010-08-01/">
-    <DescribeAlarmsResult>
-        {% for tag_name, alarms in (('MetricAlarms', metric_alarms), ('CompositeAlarms', composite_alarms)) %}
-        <{{tag_name}}>
-            {% for alarm in alarms %}
-            <member>
-                <ActionsEnabled>{{ alarm.actions_enabled }}</ActionsEnabled>
-                <AlarmActions>
-                    {% for action in alarm.alarm_actions %}
-                    <member>{{ action }}</member>
-                    {% endfor %}
-                </AlarmActions>
-                <AlarmArn>{{ alarm.alarm_arn }}</AlarmArn>
-                <AlarmConfigurationUpdatedTimestamp>{{ alarm.configuration_updated_timestamp }}</AlarmConfigurationUpdatedTimestamp>
-                <AlarmDescription>{{ alarm.description or '' }}</AlarmDescription>
-                <AlarmName>{{ alarm.name }}</AlarmName>
-                <ComparisonOperator>{{ alarm.comparison_operator }}</ComparisonOperator>
-                {% if alarm.dimensions is not none %}
-                    <Dimensions>
-                        {% for dimension in alarm.dimensions %}
-                        <member>
-                            <Name>{{ dimension.name }}</Name>
-                            <Value>{{ dimension.value }}</Value>
-                        </member>
-                        {% endfor %}
-                    </Dimensions>
-                {% endif %}
-                <EvaluationPeriods>{{ alarm.evaluation_periods }}</EvaluationPeriods>
-                {% if alarm.datapoints_to_alarm is not none %}
-                <DatapointsToAlarm>{{ alarm.datapoints_to_alarm }}</DatapointsToAlarm>
-                {% endif %}
-                <InsufficientDataActions>
-                    {% for action in alarm.insufficient_data_actions %}
-                    <member>{{ action }}</member>
-                    {% endfor %}
-                </InsufficientDataActions>
-                {% if alarm.metric_name is not none %}
-                <MetricName>{{ alarm.metric_name }}</MetricName>
-                {% endif %}
-                {% if alarm.metric_data_queries is not none %}
-                <Metrics>
-                    {% for metric in alarm.metric_data_queries %}
-                     <member>
-                        <Id>{{ metric.id }}</Id>
-                        {% if metric.label is not none %}
-                        <Label>{{ metric.label }}</Label>
-                        {% endif %}
-                        {% if metric.expression is not none %}
-                        <Expression>{{ metric.expression }}</Expression>
-                        {% endif %}
-                        {% if metric.metric_stat is not none %}
-                        <MetricStat>
-                            <Metric>
-                                <Namespace>{{ metric.metric_stat.metric.namespace }}</Namespace>
-                                <MetricName>{{ metric.metric_stat.metric.metric_name }}</MetricName>
-                                <Dimensions>
-                                {% for dim in metric.metric_stat.metric.dimensions %}
-                                    <member>
-                                        <Name>{{ dim.name }}</Name>
-                                        <Value>{{ dim.value }}</Value>
-                                    </member>
-                                {% endfor %}
-                                </Dimensions>
-                            </Metric>
-                            {% if metric.metric_stat.period is not none %}
-                            <Period>{{ metric.metric_stat.period }}</Period>
-                            {% endif %}
-                            <Stat>{{ metric.metric_stat.stat }}</Stat>
-                            {% if metric.metric_stat.unit is not none %}
-                            <Unit>{{ metric.metric_stat.unit }}</Unit>
-                            {% endif %}
-                        </MetricStat>
-                        {% endif %}
-                        {% if metric.period is not none %}
-                        <Period>{{ metric.period }}</Period>
-                        {% endif %}
-                        <ReturnData>{{ metric.return_data }}</ReturnData>
-                    </member>
-                    {% endfor %}
-                </Metrics>
-                {% endif %}
-                {% if alarm.namespace is not none %}
-                <Namespace>{{ alarm.namespace }}</Namespace>
-                {% endif %}
-                <OKActions>
-                    {% for action in alarm.ok_actions %}
-                    <member>{{ action }}</member>
-                    {% endfor %}
-                </OKActions>
-                {% if alarm.period is not none %}
-                <Period>{{ alarm.period }}</Period>
-                {% endif %}
-                <StateReason>{{ alarm.state_reason }}</StateReason>
-                <StateReasonData>{{ alarm.state_reason_data }}</StateReasonData>
-                <StateUpdatedTimestamp>{{ alarm.state_updated_timestamp }}</StateUpdatedTimestamp>
-                <StateValue>{{ alarm.state_value }}</StateValue>
-                {% if alarm.statistic is not none %}
-                <Statistic>{{ alarm.statistic }}</Statistic>
-                {% endif %}
-                {% if alarm.extended_statistic is not none %}
-                <ExtendedStatistic>{{ alarm.extended_statistic }}</ExtendedStatistic>
-                {% endif %}
-                {% if alarm.threshold is not none %}
-                <Threshold>{{ alarm.threshold }}</Threshold>
-                {% endif %}
-                {% if alarm.unit is not none %}
-                <Unit>{{ alarm.unit }}</Unit>
-                {% endif %}
-                {% if alarm.treat_missing_data is not none %}
-                <TreatMissingData>{{ alarm.treat_missing_data }}</TreatMissingData>
-                {% endif %}
-                {% if alarm.evaluate_low_sample_count_percentile is not none %}
-                <EvaluateLowSampleCountPercentile>{{ alarm.evaluate_low_sample_count_percentile }}</EvaluateLowSampleCountPercentile>
-                {% endif %}
-                {% if alarm.threshold_metric_id is not none %}
-                <ThresholdMetricId>{{ alarm.threshold_metric_id }}</ThresholdMetricId>
-                {% endif %}
-                {% if alarm.rule is not none %}
-                <AlarmRule>{{ alarm.rule }}</AlarmRule>
-                {% endif %}
-            </member>
-            {% endfor %}
-        </{{tag_name}}>
-        {% endfor %}
-    </DescribeAlarmsResult>
-</DescribeAlarmsResponse>"""
+    def disable_insight_rules(self) -> ActionResult:
+        names = self._get_param("RuleNames", [])
+        failures = self.cloudwatch_backend.disable_insight_rules(rule_names=names)
+        result = {"Failures": failures}
+        return ActionResult(result)
 
-DESCRIBE_METRIC_ALARMS_TEMPLATE = """<DescribeAlarmsForMetricResponse xmlns="http://monitoring.amazonaws.com/doc/2010-08-01/">
-    <DescribeAlarmsForMetricResult>
-        <MetricAlarms>
-            {% for alarm in alarms %}
-            <member>
-                <ActionsEnabled>{{ alarm.actions_enabled }}</ActionsEnabled>
-                <AlarmActions>
-                    {% for action in alarm.alarm_actions %}
-                    <member>{{ action }}</member>
-                    {% endfor %}
-                </AlarmActions>
-                <AlarmArn>{{ alarm.alarm_arn }}</AlarmArn>
-                <AlarmConfigurationUpdatedTimestamp>{{ alarm.configuration_updated_timestamp }}</AlarmConfigurationUpdatedTimestamp>
-                <AlarmDescription>{{ alarm.description }}</AlarmDescription>
-                <AlarmName>{{ alarm.name }}</AlarmName>
-                <ComparisonOperator>{{ alarm.comparison_operator }}</ComparisonOperator>
-                <Dimensions>
-                    {% for dimension in alarm.dimensions %}
-                    <member>
-                        <Name>{{ dimension.name }}</Name>
-                        <Value>{{ dimension.value }}</Value>
-                    </member>
-                    {% endfor %}
-                </Dimensions>
-                <EvaluationPeriods>{{ alarm.evaluation_periods }}</EvaluationPeriods>
-                <InsufficientDataActions>
-                    {% for action in alarm.insufficient_data_actions %}
-                    <member>{{ action }}</member>
-                    {% endfor %}
-                </InsufficientDataActions>
-                <MetricName>{{ alarm.metric_name }}</MetricName>
-                <Namespace>{{ alarm.namespace }}</Namespace>
-                <OKActions>
-                    {% for action in alarm.ok_actions %}
-                    <member>{{ action }}</member>
-                    {% endfor %}
-                </OKActions>
-                <Period>{{ alarm.period }}</Period>
-                <StateReason>{{ alarm.state_reason }}</StateReason>
-                <StateReasonData>{{ alarm.state_reason_data }}</StateReasonData>
-                <StateUpdatedTimestamp>{{ alarm.state_updated_timestamp }}</StateUpdatedTimestamp>
-                <StateValue>{{ alarm.state_value }}</StateValue>
-                <Statistic>{{ alarm.statistic }}</Statistic>
-                {% if alarm.threshold is not none %}
-                <Threshold>{{ alarm.threshold }}</Threshold>
-                {% endif %}
-                <Unit>{{ alarm.unit }}</Unit>
-            </member>
-            {% endfor %}
-        </MetricAlarms>
-    </DescribeAlarmsForMetricResult>
-</DescribeAlarmsForMetricResponse>"""
-
-DELETE_METRIC_ALARMS_TEMPLATE = """<DeleteMetricAlarmResponse xmlns="http://monitoring.amazonaws.com/doc/2010-08-01/">
-   <ResponseMetadata>
-      <RequestId>
-         {{ request_id }}
-      </RequestId>
-   </ResponseMetadata>
-</DeleteMetricAlarmResponse>"""
-
-PUT_METRIC_DATA_TEMPLATE = """<PutMetricDataResponse xmlns="http://monitoring.amazonaws.com/doc/2010-08-01/">
-   <ResponseMetadata>
-      <RequestId>
-         {{ request_id }}
-      </RequestId>
-   </ResponseMetadata>
-</PutMetricDataResponse>"""
-
-GET_METRIC_DATA_TEMPLATE = """<GetMetricDataResponse xmlns="http://monitoring.amazonaws.com/doc/2010-08-01/">
-   <GetMetricDataResult>
-       <MetricDataResults>
-           {% for result in results %}
-            <member>
-                <Id>{{ result.id }}</Id>
-                <Label>{{ result.label }}</Label>
-                <StatusCode>Complete</StatusCode>
-                <Timestamps>
-                    {% for val in result.timestamps %}
-                    <member>{{ val }}</member>
-                    {% endfor %}
-                </Timestamps>
-                <Values>
-                    {% for val in result.vals %}
-                    <member>{{ val }}</member>
-                    {% endfor %}
-                </Values>
-            </member>
-            {% endfor %}
-       </MetricDataResults>
-   </GetMetricDataResult>
-   <ResponseMetadata>
-       <RequestId>
-            {{ request_id }}
-       </RequestId>
-   </ResponseMetadata>
-</GetMetricDataResponse>"""
-
-GET_METRIC_STATISTICS_TEMPLATE = """<GetMetricStatisticsResponse xmlns="http://monitoring.amazonaws.com/doc/2010-08-01/">
-  <GetMetricStatisticsResult>
-      <Label>{{ label }}</Label>
-      <Datapoints>
-        {% for datapoint in datapoints %}
-            <member>
-              {% if datapoint.sum is not none %}
-              <Sum>{{ datapoint.sum }}</Sum>
-              {% endif %}
-
-              {% if datapoint.average is not none %}
-              <Average>{{ datapoint.average }}</Average>
-              {% endif %}
-
-              {% if datapoint.maximum is not none %}
-              <Maximum>{{ datapoint.maximum }}</Maximum>
-              {% endif %}
-
-              {% if datapoint.minimum is not none %}
-              <Minimum>{{ datapoint.minimum }}</Minimum>
-              {% endif %}
-
-              {% if datapoint.sample_count is not none %}
-              <SampleCount>{{ datapoint.sample_count }}</SampleCount>
-              {% endif %}
-
-              {% if datapoint.extended_statistics is not none %}
-              <ExtendedStatistics>{{ datapoint.extended_statistics }}</ExtendedStatistics>
-              {% endif %}
-
-              <Timestamp>{{ datapoint.timestamp }}</Timestamp>
-              {% if datapoint.unit is not none %}
-              <Unit>{{ datapoint.unit }}</Unit>
-              {% endif %}
-            </member>
-        {% endfor %}
-      </Datapoints>
-    </GetMetricStatisticsResult>
-    <ResponseMetadata>
-      <RequestId>
-        {{ request_id }}
-      </RequestId>
-    </ResponseMetadata>
-</GetMetricStatisticsResponse>"""
-
-LIST_METRICS_TEMPLATE = """<ListMetricsResponse xmlns="http://monitoring.amazonaws.com/doc/2010-08-01/">
-    <ListMetricsResult>
-        <Metrics>
-            {% for metric in metrics %}
-            <member>
-                <Dimensions>
-                    {% for dimension in metric.dimensions %}
-                    <member>
-                        <Name>{{ dimension.name }}</Name>
-                        <Value>{{ dimension.value }}</Value>
-                    </member>
-                    {% endfor %}
-                </Dimensions>
-                <MetricName>{{ metric.name }}</MetricName>
-                <Namespace>{{ metric.namespace }}</Namespace>
-            </member>
-            {% endfor %}
-        </Metrics>
-        {% if next_token is not none %}
-        <NextToken>
-            {{ next_token }}
-        </NextToken>
-        {% endif %}
-    </ListMetricsResult>
-</ListMetricsResponse>"""
-
-PUT_DASHBOARD_RESPONSE = """<PutDashboardResponse xmlns="http://monitoring.amazonaws.com/doc/2010-08-01/">
-  <PutDashboardResult>
-    <DashboardValidationMessages/>
-  </PutDashboardResult>
-  <ResponseMetadata>
-    <RequestId>{{ request_id }}</RequestId>
-  </ResponseMetadata>
-</PutDashboardResponse>"""
-
-LIST_DASHBOARD_RESPONSE = """<ListDashboardsResponse xmlns="http://monitoring.amazonaws.com/doc/2010-08-01/">
-  <ListDashboardsResult>
-    <DashboardEntries>
-      {% for dashboard in dashboards %}
-      <member>
-        <DashboardArn>{{ dashboard.arn }}</DashboardArn>
-        <LastModified>{{ dashboard.last_modified_iso }}</LastModified>
-        <Size>{{ dashboard.size }}</Size>
-        <DashboardName>{{ dashboard.name }}</DashboardName>
-      </member>
-      {% endfor %}
-    </DashboardEntries>
-  </ListDashboardsResult>
-  <ResponseMetadata>
-    <RequestId>{{ request_id }}</RequestId>
-  </ResponseMetadata>
-</ListDashboardsResponse>"""
-
-DELETE_DASHBOARD_TEMPLATE = """<DeleteDashboardsResponse xmlns="http://monitoring.amazonaws.com/doc/2010-08-01/">
-  <DeleteDashboardsResult/>
-  <ResponseMetadata>
-    <RequestId>{{ request_id }}</RequestId>
-  </ResponseMetadata>
-</DeleteDashboardsResponse>"""
-
-GET_DASHBOARD_TEMPLATE = """<GetDashboardResponse xmlns="http://monitoring.amazonaws.com/doc/2010-08-01/">
-  <GetDashboardResult>
-    <DashboardArn>{{ dashboard.arn }}</DashboardArn>
-    <DashboardBody>{{ dashboard.body }}</DashboardBody>
-    <DashboardName>{{ dashboard.name }}</DashboardName>
-  </GetDashboardResult>
-  <ResponseMetadata>
-    <RequestId>{{ request_id }}</RequestId>
-  </ResponseMetadata>
-</GetDashboardResponse>
-"""
-
-SET_ALARM_STATE_TEMPLATE = """<SetAlarmStateResponse xmlns="http://monitoring.amazonaws.com/doc/2010-08-01/">
-  <ResponseMetadata>
-    <RequestId>{{ request_id }}</RequestId>
-  </ResponseMetadata>
-</SetAlarmStateResponse>"""
-
-ERROR_RESPONSE_TEMPLATE = """<ErrorResponse xmlns="http://monitoring.amazonaws.com/doc/2010-08-01/">
-  <Error>
-    <Type>Sender</Type>
-    <Code>{{ code }}</Code>
-    <Message>{{ message }}</Message>
-  </Error>
-  <RequestId>{{ request_id }}</RequestId>
-</ErrorResponse>"""
-
-LIST_TAGS_FOR_RESOURCE_TEMPLATE = """<ListTagsForResourceResponse xmlns="http://monitoring.amazonaws.com/doc/2010-08-01/">
-  <ListTagsForResourceResult>
-    <Tags>
-      {% for key, value in tags.items() %}
-      <member>
-        <Key>{{ key }}</Key>
-        <Value>{{ value }}</Value>
-      </member>
-      {% endfor %}
-    </Tags>
-  </ListTagsForResourceResult>
-  <ResponseMetadata>
-    <RequestId>{{ request_id }}</RequestId>
-  </ResponseMetadata>
-</ListTagsForResourceResponse>
-"""
-
-TAG_RESOURCE_TEMPLATE = """<TagResourceResponse xmlns="http://monitoring.amazonaws.com/doc/2010-08-01/">
-  <TagResourceResult/>
-  <ResponseMetadata>
-    <RequestId>{{ request_id }}</RequestId>
-  </ResponseMetadata>
-</TagResourceResponse>"""
-
-UNTAG_RESOURCE_TEMPLATE = """<UntagResourceResponse xmlns="http://monitoring.amazonaws.com/doc/2010-08-01/">
-  <UntagResourceResult/>
-  <ResponseMetadata>
-    <RequestId>{{ request_id }}</RequestId>
-  </ResponseMetadata>
-</UntagResourceResponse>"""
+    def enable_insight_rules(self) -> ActionResult:
+        names = self._get_param("RuleNames", [])
+        failures = self.cloudwatch_backend.enable_insight_rules(rule_names=names)
+        result = {"Failures": failures}
+        return ActionResult(result)

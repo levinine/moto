@@ -1,22 +1,30 @@
-from moto.autoscaling import autoscaling_backends
-from moto.core.responses import BaseResponse
-from moto.core.utils import camelcase_to_underscores
-from moto.ec2.exceptions import MissingParameterError
-from moto.ec2.utils import (
-    filters_from_querystring,
-    dict_from_querystring,
-)
-from moto.elbv2 import elbv2_backends
-from moto.core import ACCOUNT_ID
-
 from copy import deepcopy
+from typing import Any
+
+from moto.core.responses import ActionResult, EmptyResult
+from moto.core.types import Base64EncodedString
+from moto.core.utils import camelcase_to_underscores
+from moto.ec2.exceptions import (
+    InvalidParameterCombination,
+    InvalidRequest,
+    MissingParameterError,
+)
+from moto.ec2.utils import filter_iam_instance_profiles, parse_user_data
+
+from ._base_response import EC2BaseResponse
 
 
-class InstanceResponse(BaseResponse):
-    def describe_instances(self):
+class InstanceResponse(EC2BaseResponse):
+    def describe_instances(self) -> ActionResult:
         self.error_on_dryrun()
-        filter_dict = filters_from_querystring(self.querystring)
-        instance_ids = self._get_multi_param("InstanceId")
+        # https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/ec2/client/describe_instances.html
+        # You cannot specify this(MaxResults) parameter and the instance IDs parameter in the same request.
+        if "InstanceId.1" in self.data and "MaxResults" in self.data:
+            raise InvalidParameterCombination(
+                "The parameter instancesSet cannot be used with the parameter maxResults"
+            )
+        filter_dict = self._filters_from_querystring()
+        instance_ids = self._get_param("InstanceIds", [])
         token = self._get_param("NextToken")
         if instance_ids:
             reservations = self.ec2_backend.get_reservations_by_instance_ids(
@@ -35,127 +43,178 @@ class InstanceResponse(BaseResponse):
         next_token = None
         if max_results and len(reservations) > (start + max_results):
             next_token = reservations_resp[-1].id
-        template = self.response_template(EC2_DESCRIBE_INSTANCES)
-        return (
-            template.render(reservations=reservations_resp, next_token=next_token)
-            .replace("True", "true")
-            .replace("False", "false")
-        )
+        result = {"Reservations": reservations_resp, "NextToken": next_token}
+        return ActionResult(result)
 
-    def run_instances(self):
+    def run_instances(self) -> ActionResult:
         min_count = int(self._get_param("MinCount", if_none="1"))
         image_id = self._get_param("ImageId")
-        owner_id = self._get_param("OwnerId")
-        user_data = self._get_param("UserData")
-        security_group_names = self._get_multi_param("SecurityGroup")
+        user_data = parse_user_data(self._get_param("UserData"))
+        security_group_names = self._get_param("SecurityGroups", [])
         kwargs = {
-            "instance_type": self._get_param("InstanceType", if_none="m1.small"),
+            "instance_type": self._get_param("InstanceType", "m1.small"),
+            "is_instance_type_default": not self._get_param("InstanceType"),
             "placement": self._get_param("Placement.AvailabilityZone"),
+            "placement_hostid": self._get_param("Placement.HostId"),
             "region_name": self.region,
             "subnet_id": self._get_param("SubnetId"),
-            "owner_id": owner_id,
             "key_name": self._get_param("KeyName"),
-            "security_group_ids": self._get_multi_param("SecurityGroupId"),
-            "nics": dict_from_querystring("NetworkInterface", self.querystring),
+            "security_group_ids": self._get_param("SecurityGroupIds", []),
+            "nics": self._get_param("NetworkInterfaces", []),
             "private_ip": self._get_param("PrivateIpAddress"),
             "associate_public_ip": self._get_param("AssociatePublicIpAddress"),
-            "tags": self._parse_tag_specification("TagSpecification"),
+            "tags": self._parse_tag_specification(),
             "ebs_optimized": self._get_param("EbsOptimized") or False,
+            "disable_api_stop": self._get_param("DisableApiStop") or False,
             "instance_market_options": self._get_param(
-                "InstanceMarketOptions.MarketType"
-            )
-            or {},
+                "InstanceMarketOptions.MarketType", {}
+            ),
             "instance_initiated_shutdown_behavior": self._get_param(
                 "InstanceInitiatedShutdownBehavior"
             ),
-            "launch_template": self._get_multi_param_dict("LaunchTemplate"),
+            "launch_template": self._get_param("LaunchTemplate", {}),
+            "hibernation_options": self._get_param("HibernationOptions", {}),
+            "iam_instance_profile_name": self._get_param("IamInstanceProfile.Name"),
+            "iam_instance_profile_arn": self._get_param("IamInstanceProfile.Arn"),
+            "monitoring_state": "enabled"
+            if self._get_param("Monitoring.Enabled")
+            else "disabled",
+            "ipv6_address_count": self._get_int_param("Ipv6AddressCount"),
+            "metadata_options": self._get_param("MetadataOptions", {}),
+            "client_token": self._get_param("ClientToken", "ABCDE"),
         }
+        if len(kwargs["nics"]) and kwargs["subnet_id"]:
+            raise InvalidParameterCombination(
+                msg="Network interfaces and an instance-level subnet ID may not be specified on the same request"
+            )
 
         mappings = self._parse_block_device_mapping()
         if mappings:
             kwargs["block_device_mappings"] = mappings
 
-        if self.is_not_dryrun("RunInstance"):
-            new_reservation = self.ec2_backend.add_instances(
-                image_id, min_count, user_data, security_group_names, **kwargs
+        iam_instance_profile_name = kwargs.get("iam_instance_profile_name")
+        iam_instance_profile_arn = kwargs.get("iam_instance_profile_arn")
+        if iam_instance_profile_arn or iam_instance_profile_name:
+            # Validate the profile exists, before we error_on_dryrun and run_instances
+            filter_iam_instance_profiles(
+                self.current_account,
+                partition=self.partition,
+                iam_instance_profile_arn=iam_instance_profile_arn,
+                iam_instance_profile_name=iam_instance_profile_name,
             )
+        self.error_on_dryrun()
+        new_reservation = self.ec2_backend.run_instances(
+            image_id, min_count, user_data, security_group_names, **kwargs
+        )
+        if iam_instance_profile_name:
+            self.ec2_backend.associate_iam_instance_profile(
+                instance_id=new_reservation.instances[0].id,
+                iam_instance_profile_name=iam_instance_profile_name,
+            )
+        if iam_instance_profile_arn:
+            self.ec2_backend.associate_iam_instance_profile(
+                instance_id=new_reservation.instances[0].id,
+                iam_instance_profile_arn=iam_instance_profile_arn,
+            )
+        return ActionResult(new_reservation)
 
-            template = self.response_template(EC2_RUN_INSTANCES)
-            return template.render(reservation=new_reservation)
+    def terminate_instances(self) -> ActionResult:
+        instance_ids = self._get_param("InstanceIds", [])
 
-    def terminate_instances(self):
-        instance_ids = self._get_multi_param("InstanceId")
-        if self.is_not_dryrun("TerminateInstance"):
-            instances = self.ec2_backend.terminate_instances(instance_ids)
-            autoscaling_backends[self.region].notify_terminate_instances(instance_ids)
-            elbv2_backends[self.region].notify_terminate_instances(instance_ids)
-            template = self.response_template(EC2_TERMINATE_INSTANCES)
-            return template.render(instances=instances)
+        self.error_on_dryrun()
 
-    def reboot_instances(self):
-        instance_ids = self._get_multi_param("InstanceId")
-        if self.is_not_dryrun("RebootInstance"):
-            instances = self.ec2_backend.reboot_instances(instance_ids)
-            template = self.response_template(EC2_REBOOT_INSTANCES)
-            return template.render(instances=instances)
+        instances = self.ec2_backend.terminate_instances(instance_ids)
+        from moto.autoscaling import autoscaling_backends
+        from moto.elbv2 import elbv2_backends
 
-    def stop_instances(self):
-        instance_ids = self._get_multi_param("InstanceId")
-        if self.is_not_dryrun("StopInstance"):
-            instances = self.ec2_backend.stop_instances(instance_ids)
-            template = self.response_template(EC2_STOP_INSTANCES)
-            return template.render(instances=instances)
+        autoscaling_backends[self.current_account][
+            self.region
+        ].notify_terminate_instances(instance_ids)
+        elbv2_backends[self.current_account][self.region].notify_terminate_instances(
+            instance_ids
+        )
+        result = {
+            "TerminatingInstances": [
+                {
+                    "InstanceId": instance.id,
+                    "CurrentState": {"Code": 32, "Name": "shutting-down"},
+                    "PreviousState": previous_state,
+                }
+                for instance, previous_state in instances
+            ]
+        }
+        return ActionResult(result)
 
-    def start_instances(self):
-        instance_ids = self._get_multi_param("InstanceId")
-        if self.is_not_dryrun("StartInstance"):
-            instances = self.ec2_backend.start_instances(instance_ids)
-            template = self.response_template(EC2_START_INSTANCES)
-            return template.render(instances=instances)
+    def reboot_instances(self) -> ActionResult:
+        instance_ids = self._get_param("InstanceIds", [])
+        self.error_on_dryrun()
+        self.ec2_backend.reboot_instances(instance_ids)
+        return EmptyResult()
 
-    def _get_list_of_dict_params(self, param_prefix, _dct):
-        """
-        Simplified version of _get_dict_param
-        Allows you to pass in a custom dict instead of using self.querystring by default
-        """
-        params = []
-        for key, value in _dct.items():
-            if key.startswith(param_prefix):
-                params.append(value)
-        return params
+    def stop_instances(self) -> ActionResult:
+        instance_ids = self._get_param("InstanceIds", [])
+        self.error_on_dryrun()
+        instances = self.ec2_backend.stop_instances(instance_ids)
+        result = {
+            "StoppingInstances": [
+                {
+                    "InstanceId": instance.id,
+                    "CurrentState": {"Code": 64, "Name": "stopping"},
+                    "PreviousState": previous_state,
+                }
+                for instance, previous_state in instances
+            ]
+        }
+        return ActionResult(result)
 
-    def describe_instance_status(self):
-        instance_ids = self._get_multi_param("InstanceId")
-        include_all_instances = self._get_param("IncludeAllInstances") == "true"
-        filters = self._get_list_prefix("Filter")
+    def start_instances(self) -> ActionResult:
+        instance_ids = self._get_param("InstanceIds", [])
+        self.error_on_dryrun()
+        instances = self.ec2_backend.start_instances(instance_ids)
+        result = {
+            "StartingInstances": [
+                {
+                    "InstanceId": instance.id,
+                    "CurrentState": {"Code": 0, "Name": "pending"},
+                    "PreviousState": previous_state,
+                }
+                for instance, previous_state in instances
+            ]
+        }
+        return ActionResult(result)
+
+    def describe_instance_status(self) -> ActionResult:
+        instance_ids = self._get_param("InstanceIds", [])
+        include_all_instances = self._get_bool_param("IncludeAllInstances", False)
         filters = [
-            {"name": f["name"], "values": self._get_list_of_dict_params("value.", f)}
-            for f in filters
+            {"name": k, "values": v}
+            for k, v in self._filters_from_querystring().items()
         ]
-
         instances = self.ec2_backend.describe_instance_status(
             instance_ids, include_all_instances, filters
         )
+        result = {"InstanceStatuses": instances}
+        return ActionResult(result)
 
-        template = self.response_template(EC2_INSTANCE_STATUS)
-        return template.render(instances=instances)
+    def describe_instance_types(self) -> ActionResult:
+        instance_type_filters = self._get_param("InstanceTypes", [])
+        filter_dict = self._filters_from_querystring()
+        instance_types = self.ec2_backend.describe_instance_types(
+            instance_type_filters, filter_dict
+        )
+        result = {"InstanceTypes": instance_types}
+        return ActionResult(result)
 
-    def describe_instance_types(self):
-        instance_type_filters = self._get_multi_param("InstanceType")
-        instance_types = self.ec2_backend.describe_instance_types(instance_type_filters)
-        template = self.response_template(EC2_DESCRIBE_INSTANCE_TYPES)
-        return template.render(instance_types=instance_types)
-
-    def describe_instance_type_offerings(self):
+    def describe_instance_type_offerings(self) -> ActionResult:
         location_type_filters = self._get_param("LocationType")
-        filter_dict = filters_from_querystring(self.querystring)
+        filter_dict = self._filters_from_querystring()
         offerings = self.ec2_backend.describe_instance_type_offerings(
             location_type_filters, filter_dict
         )
-        template = self.response_template(EC2_DESCRIBE_INSTANCE_TYPE_OFFERINGS)
-        return template.render(instance_type_offerings=offerings)
+        result = {"InstanceTypeOfferings": offerings}
+        return ActionResult(result)
 
-    def describe_instance_attribute(self):
+    def describe_instance_attribute(self) -> ActionResult:
         # TODO this and modify below should raise IncorrectInstanceState if
         # instance not in stopped state
         attribute = self._get_param("Attribute")
@@ -163,23 +222,30 @@ class InstanceResponse(BaseResponse):
         instance, value = self.ec2_backend.describe_instance_attribute(
             instance_id, attribute
         )
+        attribute_name = attribute[0].upper() + attribute[1:]
+        attribute_value: Any = {"Value": value}
+        if attribute_name == "GroupSet":
+            attribute_name = "Groups"
+            attribute_value = [{"GroupId": group.id} for group in value]
+        elif attribute_name == "UserData" and value is None:
+            attribute_value = ""
+        result = {"InstanceId": instance.id, attribute_name: attribute_value}
+        return ActionResult(result)
 
-        if attribute == "groupSet":
-            template = self.response_template(EC2_DESCRIBE_INSTANCE_GROUPSET_ATTRIBUTE)
-        else:
-            template = self.response_template(EC2_DESCRIBE_INSTANCE_ATTRIBUTE)
-
-        return template.render(instance=instance, attribute=attribute, value=value)
-
-    def describe_instance_credit_specifications(self):
-        instance_ids = self._get_multi_param("InstanceId")
-        instance = self.ec2_backend.describe_instance_credit_specifications(
+    def describe_instance_credit_specifications(self) -> ActionResult:
+        instance_ids = self._get_param("InstanceIds", [])
+        instances = self.ec2_backend.describe_instance_credit_specifications(
             instance_ids
         )
-        template = self.response_template(EC2_DESCRIBE_INSTANCE_CREDIT_SPECIFICATIONS)
-        return template.render(instances=instance)
+        result = {
+            "InstanceCreditSpecifications": [
+                {"InstanceId": instance.id, "CpuCredits": "standard"}
+                for instance in instances
+            ],
+        }
+        return ActionResult(result)
 
-    def modify_instance_attribute(self):
+    def modify_instance_attribute(self) -> ActionResult:
         handlers = [
             self._attribute_value_handler,
             self._dot_value_instance_attribute_handler,
@@ -190,16 +256,45 @@ class InstanceResponse(BaseResponse):
         for handler in handlers:
             success = handler()
             if success:
-                return success
+                return EmptyResult()
 
         msg = (
             "This specific call to ModifyInstanceAttribute has not been"
             " implemented in Moto yet. Feel free to open an issue at"
-            " https://github.com/spulec/moto/issues"
+            " https://github.com/getmoto/moto/issues"
         )
         raise NotImplementedError(msg)
 
-    def _block_device_mapping_handler(self):
+    def modify_instance_metadata_options(self) -> ActionResult:
+        instance_id = self._get_param("InstanceId")
+        tokens = self._get_param("HttpTokens")
+        hop_limit = self._get_int_param("HttpPutResponseHopLimit")
+        endpoint = self._get_param("HttpEndpoint")
+        dry_run = False
+        http_protocol = self._get_param("HttpProtocolIpv6")
+        metadata_tags = self._get_param("InstanceMetadataTags")
+        options = self.ec2_backend.modify_instance_metadata_options(
+            instance_id=instance_id,
+            http_tokens=tokens,
+            hop_limit=hop_limit,
+            http_endpoint=endpoint,
+            dry_run=dry_run,
+            http_protocol=http_protocol,
+            metadata_tags=metadata_tags,
+        )
+        result = {"InstanceId": instance_id, "InstanceMetadataOptions": options}
+        return ActionResult(result)
+
+    def get_instance_uefi_data(self) -> ActionResult:
+        instance_id = self._get_param("InstanceId")
+        uefi_data = self.ec2_backend.get_instance_uefi_data(instance_id)
+        result = {
+            "InstanceId": instance_id,
+            "UefiData": Base64EncodedString.from_encoded_bytes(uefi_data),
+        }
+        return ActionResult(result)
+
+    def _block_device_mapping_handler(self) -> bool:
         """
         Handles requests which are generated by code similar to:
 
@@ -210,141 +305,142 @@ class InstanceResponse(BaseResponse):
                 }]
             )
 
-        The querystring contains information similar to:
-
-            BlockDeviceMapping.1.Ebs.DeleteOnTermination : ['true']
-            BlockDeviceMapping.1.DeviceName : ['/dev/sda1']
-
         For now we only support the "BlockDeviceMapping.1.Ebs.DeleteOnTermination"
         configuration, but it should be trivial to add anything else.
         """
-        mapping_counter = 1
-        mapping_device_name_fmt = "BlockDeviceMapping.%s.DeviceName"
-        mapping_del_on_term_fmt = "BlockDeviceMapping.%s.Ebs.DeleteOnTermination"
-        while True:
-            mapping_device_name = mapping_device_name_fmt % mapping_counter
-            if mapping_device_name not in self.querystring.keys():
-                break
-
-            mapping_del_on_term = mapping_del_on_term_fmt % mapping_counter
-            del_on_term_value_str = self.querystring[mapping_del_on_term][0]
-            del_on_term_value = True if "true" == del_on_term_value_str else False
-            device_name_value = self.querystring[mapping_device_name][0]
+        attribute_modified = False
+        for mapping in self._get_param("BlockDeviceMappings", []):
+            device_name = mapping.get("DeviceName")
+            del_on_term_value = mapping.get("Ebs", {}).get("DeleteOnTermination")
 
             instance_id = self._get_param("InstanceId")
             instance = self.ec2_backend.get_instance(instance_id)
 
-            if self.is_not_dryrun("ModifyInstanceAttribute"):
-                block_device_type = instance.block_device_mapping[device_name_value]
-                block_device_type.delete_on_termination = del_on_term_value
+            self.error_on_dryrun()
 
-            # +1 for the next device
-            mapping_counter += 1
+            if del_on_term_value is None:
+                continue
+            block_device_type = instance.block_device_mapping[device_name]
+            block_device_type.delete_on_termination = del_on_term_value
 
-        if mapping_counter > 1:
-            return EC2_MODIFY_INSTANCE_ATTRIBUTE
+            attribute_modified = True
 
-    def _dot_value_instance_attribute_handler(self):
-        attribute_key = None
-        for key, value in self.querystring.items():
-            if ".Value" in key:
-                attribute_key = key
+        if attribute_modified:
+            return True
+        return False
+
+    def _dot_value_instance_attribute_handler(self) -> bool:
+        attribute_modified = False
+        for attribute in (
+            "InstanceType",
+            "Kernel",
+            "UserData",
+            "DisableApiTermination",
+            "SourceDestCheck",
+            "EbsOptimized",
+            "DisableApiStop",
+        ):
+            if self._get_param(f"{attribute}.Value") is not None:
+                self.error_on_dryrun()
+                instance_id = self._get_param("InstanceId")
+                attr_name = camelcase_to_underscores(attribute)
+                attr_value = self._get_param(f"{attribute}.Value")
+                if attribute == "UserData" and attr_value:
+                    attr_value = parse_user_data(attr_value)
+                self.ec2_backend.modify_instance_attribute(
+                    instance_id, attr_name, attr_value
+                )
+                attribute_modified = True
                 break
+        if attribute_modified:
+            return True
+        return False
 
-        if not attribute_key:
-            return
-
-        if self.is_not_dryrun("Modify" + attribute_key.split(".")[0]):
-            value = self.querystring.get(attribute_key)[0]
-            normalized_attribute = camelcase_to_underscores(attribute_key.split(".")[0])
-            instance_id = self._get_param("InstanceId")
-            self.ec2_backend.modify_instance_attribute(
-                instance_id, normalized_attribute, value
-            )
-            return EC2_MODIFY_INSTANCE_ATTRIBUTE
-
-    def _attribute_value_handler(self):
+    def _attribute_value_handler(self) -> bool:
         attribute_key = self._get_param("Attribute")
 
         if attribute_key is None:
-            return
+            return False
 
-        if self.is_not_dryrun("ModifyInstanceAttribute"):
-            value = self._get_param("Value")
-            normalized_attribute = camelcase_to_underscores(attribute_key)
-            instance_id = self._get_param("InstanceId")
-            self.ec2_backend.modify_instance_attribute(
-                instance_id, normalized_attribute, value
-            )
-            return EC2_MODIFY_INSTANCE_ATTRIBUTE
+        self.error_on_dryrun()
 
-    def _security_grp_instance_attribute_handler(self):
-        new_security_grp_list = []
-        for key, value in self.querystring.items():
-            if "GroupId." in key:
-                new_security_grp_list.append(self.querystring.get(key)[0])
-
+        value = self._get_param("Value")
+        normalized_attribute = camelcase_to_underscores(attribute_key)
         instance_id = self._get_param("InstanceId")
-        if self.is_not_dryrun("ModifyInstanceSecurityGroups"):
-            self.ec2_backend.modify_instance_security_groups(
-                instance_id, new_security_grp_list
-            )
-            return EC2_MODIFY_INSTANCE_ATTRIBUTE
+        self.ec2_backend.modify_instance_attribute(
+            instance_id, normalized_attribute, value
+        )
+        return True
 
-    def _parse_block_device_mapping(self):
-        device_mappings = self._get_list_prefix("BlockDeviceMapping")
+    def _security_grp_instance_attribute_handler(self) -> bool:
+        new_security_grp_list = self._get_param("Groups", [])
+        self.error_on_dryrun()
+        instance_id = self._get_param("InstanceId")
+        self.ec2_backend.modify_instance_security_groups(
+            instance_id, new_security_grp_list
+        )
+        return True
+
+    def _parse_block_device_mapping(self) -> list[dict[str, Any]]:
+        device_mappings = self._get_param("BlockDeviceMappings", [])
         mappings = []
         for device_mapping in device_mappings:
             self._validate_block_device_mapping(device_mapping)
-            device_template = deepcopy(BLOCK_DEVICE_MAPPING_TEMPLATE)
-            device_template["VirtualName"] = device_mapping.get("virtual_name")
-            device_template["DeviceName"] = device_mapping.get("device_name")
-            device_template["Ebs"]["SnapshotId"] = device_mapping.get(
-                "ebs._snapshot_id"
+            device_template: dict[str, Any] = deepcopy(BLOCK_DEVICE_MAPPING_TEMPLATE)
+            device_template["VirtualName"] = device_mapping.get("VirtualName")
+            device_template["DeviceName"] = device_mapping.get("DeviceName")
+            device_template["Ebs"]["SnapshotId"] = device_mapping.get("Ebs", {}).get(
+                "SnapshotId"
             )
-            device_template["Ebs"]["VolumeSize"] = device_mapping.get(
-                "ebs._volume_size"
+            device_template["Ebs"]["VolumeSize"] = device_mapping.get("Ebs", {}).get(
+                "VolumeSize"
             )
-            device_template["Ebs"]["DeleteOnTermination"] = self._convert_to_bool(
-                device_mapping.get("ebs._delete_on_termination", False)
+            device_template["Ebs"]["DeleteOnTermination"] = device_mapping.get(
+                "Ebs", {}
+            ).get("DeleteOnTermination", False)
+            device_template["Ebs"]["VolumeType"] = device_mapping.get("Ebs", {}).get(
+                "VolumeType"
             )
-            device_template["Ebs"]["VolumeType"] = device_mapping.get(
-                "ebs._volume_type"
+            device_template["Ebs"]["Iops"] = device_mapping.get("Ebs", {}).get("Iops")
+            device_template["Ebs"]["Encrypted"] = device_mapping.get("Ebs", {}).get(
+                "Encrypted", False
             )
-            device_template["Ebs"]["Iops"] = device_mapping.get("ebs._iops")
-            device_template["Ebs"]["Encrypted"] = self._convert_to_bool(
-                device_mapping.get("ebs._encrypted", False)
+            device_template["Ebs"]["KmsKeyId"] = device_mapping.get("Ebs", {}).get(
+                "KmsKeyId"
             )
-            device_template["Ebs"]["KmsKeyId"] = device_mapping.get("ebs._kms_key_id")
+            device_template["NoDevice"] = device_mapping.get("NoDevice")
             mappings.append(device_template)
 
         return mappings
 
     @staticmethod
-    def _validate_block_device_mapping(device_mapping):
+    def _validate_block_device_mapping(device_mapping: dict[str, Any]) -> None:  # type: ignore[misc]
+        from botocore import __version__ as botocore_version
 
-        if not any(mapping for mapping in device_mapping if mapping.startswith("ebs.")):
+        if "NoDevice" in device_mapping:
+            assert isinstance(device_mapping["NoDevice"], str), (
+                f"botocore {botocore_version} isn't limiting NoDevice to str type anymore, it is type:{type(device_mapping['no_device'])}"
+            )
+            if device_mapping["NoDevice"] == "":
+                # the only legit value it can have is empty string
+                # and none of the other checks here matter if NoDevice
+                # is being used
+                return
+            else:
+                raise InvalidRequest()
+
+        if "Ebs" not in device_mapping:
             raise MissingParameterError("ebs")
-        if (
-            "ebs._volume_size" not in device_mapping
-            and "ebs._snapshot_id" not in device_mapping
-        ):
+        if not device_mapping.get("Ebs", {}).get(
+            "VolumeSize"
+        ) and not device_mapping.get("Ebs", {}).get("SnapshotId"):
             raise MissingParameterError("size or snapshotId")
-
-    @staticmethod
-    def _convert_to_bool(bool_str):
-        if isinstance(bool_str, bool):
-            return bool_str
-
-        if isinstance(bool_str, str):
-            return str(bool_str).lower() == "true"
-
-        return False
 
 
 BLOCK_DEVICE_MAPPING_TEMPLATE = {
     "VirtualName": None,
     "DeviceName": None,
+    "NoDevice": None,
     "Ebs": {
         "SnapshotId": None,
         "VolumeSize": None,
@@ -354,535 +450,3 @@ BLOCK_DEVICE_MAPPING_TEMPLATE = {
         "Encrypted": None,
     },
 }
-
-EC2_RUN_INSTANCES = (
-    """<RunInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-  <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-  <reservationId>{{ reservation.id }}</reservationId>
-  <ownerId>"""
-    + ACCOUNT_ID
-    + """</ownerId>
-  <groupSet>
-    <item>
-      <groupId>sg-245f6a01</groupId>
-      <groupName>default</groupName>
-    </item>
-  </groupSet>
-  <instancesSet>
-    {% for instance in reservation.instances %}
-        <item>
-          <instanceId>{{ instance.id }}</instanceId>
-          <imageId>{{ instance.image_id }}</imageId>
-          <instanceState>
-            <code>0</code>
-            <name>pending</name>
-         </instanceState>
-          <privateDnsName>{{ instance.private_dns }}</privateDnsName>
-          <publicDnsName>{{ instance.public_dns }}</publicDnsName>
-          <dnsName>{{ instance.public_dns }}</dnsName>
-          <reason/>
-          <keyName>{{ instance.key_name }}</keyName>
-          <ebsOptimized>{{ instance.ebs_optimized }}</ebsOptimized>
-          <amiLaunchIndex>{{ instance.ami_launch_index }}</amiLaunchIndex>
-          <instanceType>{{ instance.instance_type }}</instanceType>
-          <launchTime>{{ instance.launch_time }}</launchTime>
-          {% if instance.lifecycle %}
-          <instanceLifecycle>{{ instance.lifecycle }}</instanceLifecycle>
-          {% endif %}
-          <placement>
-            <availabilityZone>{{ instance.placement}}</availabilityZone>
-            <groupName/>
-            <tenancy>default</tenancy>
-          </placement>
-          <monitoring>
-            <state>enabled</state>
-          </monitoring>
-          {% if instance.subnet_id %}
-            <subnetId>{{ instance.subnet_id }}</subnetId>
-          {% elif instance.nics[0].subnet.id %}
-            <subnetId>{{ instance.nics[0].subnet.id }}</subnetId>
-          {% endif %}
-          {% if instance.vpc_id %}
-            <vpcId>{{ instance.vpc_id }}</vpcId>
-          {% elif instance.nics[0].subnet.vpc_id %}
-            <vpcId>{{ instance.nics[0].subnet.vpc_id }}</vpcId>
-          {% endif %}
-          <privateIpAddress>{{ instance.private_ip }}</privateIpAddress>
-          {% if instance.nics[0].public_ip %}
-              <ipAddress>{{ instance.nics[0].public_ip }}</ipAddress>
-          {% endif %}
-          <sourceDestCheck>{{ instance.source_dest_check }}</sourceDestCheck>
-          <groupSet>
-             {% for group in instance.dynamic_group_list %}
-             <item>
-                <groupId>{{ group.id }}</groupId>
-                <groupName>{{ group.name }}</groupName>
-             </item>
-             {% endfor %}
-          </groupSet>
-          {% if instance.platform %}
-          <platform>{{ instance.platform }}</platform>
-          {% endif %}
-          <virtualizationType>{{ instance.virtualization_type }}</virtualizationType>
-          <architecture>{{ instance.architecture }}</architecture>
-          <kernelId>{{ instance.kernel }}</kernelId>
-          <clientToken/>
-          <hypervisor>xen</hypervisor>
-          <ebsOptimized>false</ebsOptimized>
-          <tagSet>
-            {% for tag in instance.get_tags() %}
-              <item>
-                <key>{{ tag.key }}</key>
-                <value>{{ tag.value }}</value>
-              </item>
-            {% endfor %}
-          </tagSet>
-          <networkInterfaceSet>
-            {% for nic in instance.nics.values() %}
-              <item>
-                <networkInterfaceId>{{ nic.id }}</networkInterfaceId>
-                {% if nic.subnet %}
-                  <subnetId>{{ nic.subnet.id }}</subnetId>
-                  <vpcId>{{ nic.subnet.vpc_id }}</vpcId>
-                {% endif %}
-                <description>Primary network interface</description>
-                <ownerId>"""
-    + ACCOUNT_ID
-    + """</ownerId>
-                <status>in-use</status>
-                <macAddress>1b:2b:3c:4d:5e:6f</macAddress>
-                <privateIpAddress>{{ nic.private_ip_address }}</privateIpAddress>
-                <sourceDestCheck>{{ instance.source_dest_check }}</sourceDestCheck>
-                <groupSet>
-                  {% for group in nic.group_set %}
-                  <item>
-                    <groupId>{{ group.id }}</groupId>
-                    <groupName>{{ group.name }}</groupName>
-                  </item>
-                  {% endfor %}
-                </groupSet>
-                <attachment>
-                  <attachmentId>{{ nic.attachment_id }}</attachmentId>
-                  <deviceIndex>{{ nic.device_index }}</deviceIndex>
-                  <status>attached</status>
-                  <attachTime>2015-01-01T00:00:00Z</attachTime>
-                  <deleteOnTermination>true</deleteOnTermination>
-                </attachment>
-                {% if nic.public_ip %}
-                  <association>
-                    <publicIp>{{ nic.public_ip }}</publicIp>
-                    <ipOwnerId>"""
-    + ACCOUNT_ID
-    + """</ipOwnerId>
-                  </association>
-                {% endif %}
-                <privateIpAddressesSet>
-                  <item>
-                    <privateIpAddress>{{ nic.private_ip_address }}</privateIpAddress>
-                    <primary>true</primary>
-                    {% if nic.public_ip %}
-                      <association>
-                        <publicIp>{{ nic.public_ip }}</publicIp>
-                        <ipOwnerId>"""
-    + ACCOUNT_ID
-    + """</ipOwnerId>
-                      </association>
-                    {% endif %}
-                  </item>
-                </privateIpAddressesSet>
-              </item>
-            {% endfor %}
-          </networkInterfaceSet>
-        </item>
-    {% endfor %}
-  </instancesSet>
-  </RunInstancesResponse>"""
-)
-
-EC2_DESCRIBE_INSTANCES = (
-    """<DescribeInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-  <requestId>fdcdcab1-ae5c-489e-9c33-4637c5dda355</requestId>
-      <reservationSet>
-        {% for reservation in reservations %}
-          <item>
-            <reservationId>{{ reservation.id }}</reservationId>
-            <ownerId>"""
-    + ACCOUNT_ID
-    + """</ownerId>
-            <groupSet>
-              {% for group in reservation.dynamic_group_list %}
-              <item>
-      {% if group.id %}
-                <groupId>{{ group.id }}</groupId>
-                <groupName>{{ group.name }}</groupName>
-                {% else %}
-                <groupId>{{ group }}</groupId>
-                {% endif %}
-              </item>
-              {% endfor %}
-            </groupSet>
-            <instancesSet>
-                {% for instance in reservation.instances %}
-                  <item>
-                    <instanceId>{{ instance.id }}</instanceId>
-                    <imageId>{{ instance.image_id }}</imageId>
-                    <instanceState>
-                      <code>{{ instance._state.code }}</code>
-                      <name>{{ instance._state.name }}</name>
-                    </instanceState>
-                    <privateDnsName>{{ instance.private_dns }}</privateDnsName>
-                    <publicDnsName>{{ instance.public_dns }}</publicDnsName>
-                    <dnsName>{{ instance.public_dns }}</dnsName>
-                    <reason>{{ instance._reason }}</reason>
-                    <keyName>{{ instance.key_name }}</keyName>
-                    <ebsOptimized>{{ instance.ebs_optimized }}</ebsOptimized>
-                    <amiLaunchIndex>{{ instance.ami_launch_index }}</amiLaunchIndex>
-                    <productCodes/>
-                    <instanceType>{{ instance.instance_type }}</instanceType>
-                    <launchTime>{{ instance.launch_time }}</launchTime>
-                    {% if instance.lifecycle %}
-                    <instanceLifecycle>{{ instance.lifecycle }}</instanceLifecycle>
-                    {% endif %}
-                    <placement>
-                      <availabilityZone>{{ instance.placement }}</availabilityZone>
-                      <groupName/>
-                      <tenancy>default</tenancy>
-                    </placement>
-                    {% if instance.platform %}
-                    <platform>{{ instance.platform }}</platform>
-                    {% endif %}
-                    <monitoring>
-                      <state>disabled</state>
-                    </monitoring>
-                    {% if instance.subnet_id %}
-                      <subnetId>{{ instance.subnet_id }}</subnetId>
-                    {% elif instance.nics[0].subnet.id %}
-                      <subnetId>{{ instance.nics[0].subnet.id }}</subnetId>
-                    {% endif %}
-                    {% if instance.vpc_id %}
-                      <vpcId>{{ instance.vpc_id }}</vpcId>
-                    {% elif instance.nics[0].subnet.vpc_id %}
-                      <vpcId>{{ instance.nics[0].subnet.vpc_id }}</vpcId>
-                    {% endif %}
-                    <privateIpAddress>{{ instance.private_ip }}</privateIpAddress>
-                    {% if instance.nics[0].public_ip %}
-                        <ipAddress>{{ instance.nics[0].public_ip }}</ipAddress>
-                    {% endif %}
-                    <sourceDestCheck>{{ instance.source_dest_check }}</sourceDestCheck>
-                    <groupSet>
-                      {% for group in instance.dynamic_group_list %}
-                      <item>
-                      {% if group.id %}
-                      <groupId>{{ group.id }}</groupId>
-                      <groupName>{{ group.name }}</groupName>
-                      {% else %}
-                      <groupId>{{ group }}</groupId>
-                      {% endif %}
-                      </item>
-                      {% endfor %}
-                    </groupSet>
-                    <stateReason>
-                      <code>{{ instance._state_reason.code }}</code>
-                      <message>{{ instance._state_reason.message }}</message>
-                    </stateReason>
-                    <architecture>{{ instance.architecture }}</architecture>
-                    <kernelId>{{ instance.kernel }}</kernelId>
-                    <rootDeviceType>ebs</rootDeviceType>
-                    <rootDeviceName>/dev/sda1</rootDeviceName>
-                    <blockDeviceMapping>
-                        {% for device_name,deviceobject in instance.get_block_device_mapping %}
-                      <item>
-                         <deviceName>{{ device_name }}</deviceName>
-                          <ebs>
-                             <volumeId>{{ deviceobject.volume_id }}</volumeId>
-                             <status>{{ deviceobject.status }}</status>
-                             <attachTime>{{ deviceobject.attach_time }}</attachTime>
-                             <deleteOnTermination>{{ deviceobject.delete_on_termination }}</deleteOnTermination>
-                             <size>{{deviceobject.size}}</size>
-                        </ebs>
-                      </item>
-                     {% endfor %}
-                    </blockDeviceMapping>
-                    <virtualizationType>{{ instance.virtualization_type }}</virtualizationType>
-                    <clientToken>ABCDE"""
-    + ACCOUNT_ID
-    + """3</clientToken>
-                    {% if instance.get_tags() %}
-                    <tagSet>
-                      {% for tag in instance.get_tags() %}
-                        <item>
-                          <resourceId>{{ tag.resource_id }}</resourceId>
-                          <resourceType>{{ tag.resource_type }}</resourceType>
-                          <key>{{ tag.key }}</key>
-                          <value>{{ tag.value }}</value>
-                        </item>
-                      {% endfor %}
-                    </tagSet>
-                    {% endif %}
-                    <hypervisor>xen</hypervisor>
-                    <networkInterfaceSet>
-                      {% for nic in instance.nics.values() %}
-                        <item>
-                          <networkInterfaceId>{{ nic.id }}</networkInterfaceId>
-                          {% if nic.subnet %}
-                            <subnetId>{{ nic.subnet.id }}</subnetId>
-                            <vpcId>{{ nic.subnet.vpc_id }}</vpcId>
-                          {% endif %}
-                          <description>Primary network interface</description>
-                          <ownerId>"""
-    + ACCOUNT_ID
-    + """</ownerId>
-                          <status>in-use</status>
-                          <macAddress>1b:2b:3c:4d:5e:6f</macAddress>
-                          <privateIpAddress>{{ nic.private_ip_address }}</privateIpAddress>
-                          <sourceDestCheck>{{ instance.source_dest_check }}</sourceDestCheck>
-                          <groupSet>
-                            {% for group in nic.group_set %}
-                            <item>
-               {% if group.id %}
-               <groupId>{{ group.id }}</groupId>
-               <groupName>{{ group.name }}</groupName>
-               {% else %}
-               <groupId>{{ group }}</groupId>
-               {% endif %}
-                            </item>
-                            {% endfor %}
-                          </groupSet>
-                          <attachment>
-                            <attachmentId>{{ nic.attachment_id }}</attachmentId>
-                            <deviceIndex>{{ nic.device_index }}</deviceIndex>
-                            <status>attached</status>
-                            <attachTime>2015-01-01T00:00:00Z</attachTime>
-                            <deleteOnTermination>true</deleteOnTermination>
-                          </attachment>
-                          {% if nic.public_ip %}
-                            <association>
-                              <publicIp>{{ nic.public_ip }}</publicIp>
-                              <ipOwnerId>"""
-    + ACCOUNT_ID
-    + """</ipOwnerId>
-                            </association>
-                          {% endif %}
-                          <privateIpAddressesSet>
-                            <item>
-                              <privateIpAddress>{{ nic.private_ip_address }}</privateIpAddress>
-                              <primary>true</primary>
-                              {% if nic.public_ip %}
-                                <association>
-                                  <publicIp>{{ nic.public_ip }}</publicIp>
-                                  <ipOwnerId>"""
-    + ACCOUNT_ID
-    + """</ipOwnerId>
-                                </association>
-                              {% endif %}
-                            </item>
-                          </privateIpAddressesSet>
-                        </item>
-                      {% endfor %}
-                    </networkInterfaceSet>
-                  </item>
-                {% endfor %}
-            </instancesSet>
-          </item>
-        {% endfor %}
-      </reservationSet>
-      {% if next_token %}
-      <nextToken>{{ next_token }}</nextToken>
-      {% endif %}
-</DescribeInstancesResponse>"""
-)
-
-EC2_TERMINATE_INSTANCES = """
-<TerminateInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-  <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-  <instancesSet>
-    {% for instance in instances %}
-      <item>
-        <instanceId>{{ instance.id }}</instanceId>
-        <previousState>
-          <code>16</code>
-          <name>running</name>
-        </previousState>
-        <currentState>
-          <code>32</code>
-          <name>shutting-down</name>
-        </currentState>
-      </item>
-    {% endfor %}
-  </instancesSet>
-</TerminateInstancesResponse>"""
-
-EC2_STOP_INSTANCES = """
-<StopInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-  <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-  <instancesSet>
-    {% for instance in instances %}
-      <item>
-        <instanceId>{{ instance.id }}</instanceId>
-        <previousState>
-          <code>16</code>
-          <name>running</name>
-        </previousState>
-        <currentState>
-          <code>64</code>
-          <name>stopping</name>
-        </currentState>
-      </item>
-    {% endfor %}
-  </instancesSet>
-</StopInstancesResponse>"""
-
-EC2_START_INSTANCES = """
-<StartInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-  <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-  <instancesSet>
-    {% for instance in instances %}
-      <item>
-        <instanceId>{{ instance.id }}</instanceId>
-        <previousState>
-          <code>16</code>
-          <name>running</name>
-        </previousState>
-        <currentState>
-          <code>0</code>
-          <name>pending</name>
-        </currentState>
-      </item>
-    {% endfor %}
-  </instancesSet>
-</StartInstancesResponse>"""
-
-EC2_REBOOT_INSTANCES = """<RebootInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-  <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-  <return>true</return>
-</RebootInstancesResponse>"""
-
-EC2_DESCRIBE_INSTANCE_ATTRIBUTE = """<DescribeInstanceAttributeResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-  <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-  <instanceId>{{ instance.id }}</instanceId>
-  <{{ attribute }}>
-    {% if value is not none %}
-    <value>{{ value }}</value>
-    {% endif %}
-  </{{ attribute }}>
-</DescribeInstanceAttributeResponse>"""
-
-EC2_DESCRIBE_INSTANCE_CREDIT_SPECIFICATIONS = """<DescribeInstanceCreditSpecificationsResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
-    <requestId>1b234b5c-d6ef-7gh8-90i1-j2345678901</requestId>
-    <instanceCreditSpecificationSet>
-       {% for instance in instances %}
-      <item>
-        <instanceId>{{ instance.id }}</instanceId>
-        <cpuCredits>standard</cpuCredits>
-      </item>
-    {% endfor %}
-    </instanceCreditSpecificationSet>
-</DescribeInstanceCreditSpecificationsResponse>"""
-
-EC2_DESCRIBE_INSTANCE_GROUPSET_ATTRIBUTE = """<DescribeInstanceAttributeResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-  <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-  <instanceId>{{ instance.id }}</instanceId>
-  <{{ attribute }}>
-    {% for sg in value %}
-      <item>
-        <groupId>{{ sg.id }}</groupId>
-      </item>
-    {% endfor %}
-  </{{ attribute }}>
-</DescribeInstanceAttributeResponse>"""
-
-EC2_MODIFY_INSTANCE_ATTRIBUTE = """<ModifyInstanceAttributeResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-  <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-  <return>true</return>
-</ModifyInstanceAttributeResponse>"""
-
-EC2_INSTANCE_STATUS = """<?xml version="1.0" encoding="UTF-8"?>
-<DescribeInstanceStatusResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-    <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-    <instanceStatusSet>
-      {% for instance in instances %}
-        <item>
-            <instanceId>{{ instance.id }}</instanceId>
-            <availabilityZone>{{ instance.placement }}</availabilityZone>
-            <instanceState>
-                <code>{{ instance.state_code }}</code>
-                <name>{{ instance.state }}</name>
-            </instanceState>
-            {% if instance.state_code == 16 %}
-              <systemStatus>
-                  <status>ok</status>
-                  <details>
-                      <item>
-                          <name>reachability</name>
-                          <status>passed</status>
-                      </item>
-                  </details>
-              </systemStatus>
-              <instanceStatus>
-                  <status>ok</status>
-                  <details>
-                      <item>
-                          <name>reachability</name>
-                          <status>passed</status>
-                      </item>
-                  </details>
-              </instanceStatus>
-            {% else %}
-              <systemStatus>
-                  <status>not-applicable</status>
-              </systemStatus>
-              <instanceStatus>
-                  <status>not-applicable</status>
-              </instanceStatus>
-            {% endif %}
-        </item>
-      {% endfor %}
-    </instanceStatusSet>
-</DescribeInstanceStatusResponse>"""
-
-EC2_DESCRIBE_INSTANCE_TYPES = """<?xml version="1.0" encoding="UTF-8"?>
-<DescribeInstanceTypesResponse xmlns="http://api.outscale.com/wsdl/fcuext/2014-04-15/">
-    <requestId>f8b86168-d034-4e65-b48d-3b84c78e64af</requestId>
-    <instanceTypeSet>
-    {% for instance_type in instance_types %}
-        <item>
-            <instanceType>{{ instance_type.InstanceType }}</instanceType>
-            <vCpuInfo>
-                <defaultVCpus>{{ instance_type.get('VCpuInfo', {}).get('DefaultVCpus', 0)|int }}</defaultVCpus>
-                <defaultCores>{{ instance_type.get('VCpuInfo', {}).get('DefaultCores', 0)|int }}</defaultCores>
-                <defaultThreadsPerCore>{{ instance_type.get('VCpuInfo').get('DefaultThreadsPerCore', 0)|int }}</defaultThreadsPerCore>
-            </vCpuInfo>
-            <memoryInfo>
-                <sizeInMiB>{{ instance_type.get('MemoryInfo', {}).get('SizeInMiB', 0)|int }}</sizeInMiB>
-            </memoryInfo>
-            <instanceStorageInfo>
-                <totalSizeInGB>{{ instance_type.get('InstanceStorageInfo', {}).get('TotalSizeInGB', 0)|int }}</totalSizeInGB>
-            </instanceStorageInfo>
-            <processorInfo>
-                <supportedArchitectures>
-                    {% for arch in instance_type.get('ProcessorInfo', {}).get('SupportedArchitectures', []) %}
-                    <item>
-                        {{ arch }}
-                    </item>
-                    {% endfor %}
-                </supportedArchitectures>
-            </processorInfo>
-        </item>
-    {% endfor %}
-    </instanceTypeSet>
-</DescribeInstanceTypesResponse>"""
-
-
-EC2_DESCRIBE_INSTANCE_TYPE_OFFERINGS = """<?xml version="1.0" encoding="UTF-8"?>
-<DescribeInstanceTypeOfferingsResponse xmlns="http://api.outscale.com/wsdl/fcuext/2014-04-15/">
-    <requestId>f8b86168-d034-4e65-b48d-3b84c78e64af</requestId>
-    <instanceTypeOfferingSet>
-    {% for offering in instance_type_offerings %}
-        <item>
-            <instanceType>{{ offering.InstanceType }}</instanceType>
-            <location>{{ offering.Location }}</location>
-            <locationType>{{ offering.LocationType }}</locationType>
-        </item>
-    {% endfor %}
-    </instanceTypeOfferingSet>
-</DescribeInstanceTypeOfferingsResponse>"""

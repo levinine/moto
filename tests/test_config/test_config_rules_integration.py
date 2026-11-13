@@ -1,14 +1,16 @@
-from .test_config_rules import managed_config_rule, TEST_REGION
-from botocore.exceptions import ClientError
-from moto import mock_config, mock_iam, mock_lambda
-from moto.core import ACCOUNT_ID
+import json
 from io import BytesIO
 from uuid import uuid4
-from zipfile import ZipFile, ZIP_DEFLATED
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import boto3
-import json
 import pytest
+from botocore.exceptions import ClientError
+
+from moto import mock_aws
+from moto.core import DEFAULT_ACCOUNT_ID as ACCOUNT_ID
+
+from .test_config_rules import TEST_REGION, managed_config_rule
 
 
 def custom_config_rule(func_name="test_config_rule"):
@@ -47,25 +49,23 @@ def lambda_handler(event, context):
         return zip_output.read()
 
 
-@mock_lambda
 def create_lambda_for_config_rule():
     """Return the ARN of a lambda that can be used by a custom rule."""
     role_name = "test-role"
     lambda_role = None
-    with mock_iam():
-        iam_client = boto3.client("iam", region_name=TEST_REGION)
-        try:
-            lambda_role = iam_client.get_role(RoleName=role_name)["Role"]["Arn"]
-        except ClientError:
-            lambda_role = iam_client.create_role(
-                RoleName=role_name, AssumeRolePolicyDocument="test policy", Path="/",
-            )["Role"]["Arn"]
+    iam_client = boto3.client("iam", region_name=TEST_REGION)
+    try:
+        lambda_role = iam_client.get_role(RoleName=role_name)["Role"]["Arn"]
+    except ClientError:
+        lambda_role = iam_client.create_role(
+            RoleName=role_name, AssumeRolePolicyDocument="test policy", Path="/"
+        )["Role"]["Arn"]
 
     # Create the lambda function and identify its location.
     lambda_client = boto3.client("lambda", region_name=TEST_REGION)
     lambda_client.create_function(
         FunctionName="test_config_rule",
-        Runtime="python3.8",
+        Runtime="python3.11",
         Role=lambda_role,
         Handler="lambda_function.lambda_handler",
         Code={"ZipFile": zipped_lambda_function()},
@@ -76,7 +76,7 @@ def create_lambda_for_config_rule():
     )
 
 
-@mock_config
+@mock_aws
 def test_config_rules_source_details_errors():
     """Test error conditions with ConfigRule.Source_Details instantiation."""
     client = boto3.client("config", region_name=TEST_REGION)
@@ -143,9 +143,9 @@ def test_config_rules_source_details_errors():
     )
 
     custom_rule = custom_config_rule()
-    custom_rule["Source"]["SourceDetails"][0][
-        "MessageType"
-    ] = "ConfigurationItemChangeNotification"
+    custom_rule["Source"]["SourceDetails"][0]["MessageType"] = (
+        "ConfigurationItemChangeNotification"
+    )
     with pytest.raises(ClientError) as exc:
         client.put_config_rule(ConfigRule=custom_rule)
     err = exc.value.response["Error"]
@@ -157,7 +157,7 @@ def test_config_rules_source_details_errors():
     )
 
 
-@mock_config
+@mock_aws
 def test_valid_put_config_custom_rule():
     """Test valid put_config_rule API calls for custom rules."""
     client = boto3.client("config", region_name=TEST_REGION)
@@ -225,8 +225,8 @@ def test_valid_put_config_custom_rule():
     assert updated_rule["MaximumExecutionFrequency"] == "Six_Hours"
 
 
-@mock_config
-def test_config_rules_source_errors():  # pylint: disable=too-many-statements
+@mock_aws
+def test_config_rules_source_errors():
     """Test various error conditions in ConfigRule.Source instantiation."""
     client = boto3.client("config", region_name=TEST_REGION)
 
@@ -288,7 +288,7 @@ def test_config_rules_source_errors():  # pylint: disable=too-many-statements
     err = exc.value.response["Error"]
     assert err["Code"] == "InsufficientPermissionsException"
     assert (
-        f'The AWS Lambda function {custom_rule["Source"]["SourceIdentifier"]} '
+        f"The AWS Lambda function {custom_rule['Source']['SourceIdentifier']} "
         f"cannot be invoked. Check the specified function ARN, and check the "
         f"function's permissions" in err["Message"]
     )

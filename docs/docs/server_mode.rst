@@ -3,11 +3,17 @@
 .. role:: bash(code)
    :language: bash
 
+.. role:: raw-html(raw)
+    :format: html
+
 ================================
 Non-Python SDK's / Server Mode
 ================================
 
 Moto has a stand-alone server mode. This allows you to use Moto with any of the official AWS SDK's.
+
+Installation
+-------------
 
 Install the required dependencies using:
 
@@ -41,10 +47,103 @@ interfaces with 0.0.0.0:
 Please be aware this might allow other network users to access your
 server.
 
-To use Moto in your tests, you can pass the `endpoint_url`-parameter to the SDK of your choice.
+Start within Python
+--------------------
+It is possible to start this server from within Python, in a separate thread.  :raw-html:`<br />`
+By default, this server will start on port 5000, but this is configurable.
 
-Examples
---------
+.. code-block:: python
+
+    from moto.server import ThreadedMotoServer
+    server = ThreadedMotoServer()
+    server.start()
+    # run tests
+    client = boto3.client("service", endpoint_url="http://localhost:5000")
+    ...
+    server.stop()
+
+
+If you're using pytest, you can create this as a fixture:
+
+.. code-block:: python
+
+    # Note: pick an appropriate fixture "scope" for your use case
+    @pytest.fixture(scope="module")
+    def moto_server():
+        """Fixture to run a mocked AWS server for testing."""
+        # Note: pass `port=0` to get a random free port.
+        server = ThreadedMotoServer(port=0)
+        server.start()
+        host, port = server.get_host_and_port()
+        yield f"http://{host}:{port}"
+        server.stop()
+
+    def test_s3_using_moto_fixture(moto_server):
+        client = boto3.client("s3", endpoint_url=moto_server)
+        client.list_buckets()
+
+
+Note that the ThreadedMotoServer and the decorators act on the same state, making it possible to combine the two approaches.  :raw-html:`<br />`
+See the following example:
+
+.. code-block:: python
+
+    class TestThreadedMotoServer(unittest.TestCase):
+
+        def setUp(self):
+            self.server = ThreadedMotoServer()
+            self.server.start()
+
+        def tearDown(self):
+            self.server.stop()
+
+        @mock_aws
+        def test_load_data_using_decorators(self):
+            server_client = boto3.client("s3", endpoint_url="http://127.0.0.1:5000")
+            server_client.create_bucket(Bucket="test")
+
+            in_mem_client = boto3.client("s3")
+            buckets = in_mem_client.list_buckets()["Buckets"]
+            self.assertEqual([b["Name"] for b in buckets], ["test"])
+
+This example shows it is possible to create state using the TreadedMotoServer, and access that state using the usual decorators.  :raw-html:`<br />`
+Note that the decorators will destroy any resources on start, so make sure to not accidentally destroy any resources created by the ThreadedMotoServer that should be kept.
+
+
+Run using Docker
+----------------------
+You could also use the official Docker image.
+This is stored in two different repositories:
+
+ - https://hub.docker.com/r/motoserver/moto/tags
+ - https://github.com/getmoto/moto/pkgs/container/motoserver
+
+.. code-block:: bash
+
+    docker run --rm -p 5000:5000 --name moto motoserver/moto:latest
+    docker run --rm -p 5000:5000 --name moto ghcr.io/getmoto/motoserver:latest
+
+Example docker-compose.yaml 
+ Look at `server.py <https://github.com/getmoto/moto/blob/master/moto/server.py>`_ to find more environment variables.
+
+.. code-block:: yaml
+
+  motoserver:
+    image: motoserver/moto:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - MOTO_PORT=3000 # set moto listener port with env var
+   
+
+Example Usage
+--------------
+
+To use Moto in your tests, pass the `endpoint_url`-parameter to the SDK of your choice.
+
+For more recent SDK's, this can be configured using the environment variable `AWS_ENDPOINT_URL`. See the official AWS documentation: https://docs.aws.amazon.com/sdkref/latest/guide/feature-ss-endpoints.html
+
+If your SDK does not support this, here are some code samples to set this parameter the old-fashioned way.
 
 In Python:
 
@@ -75,7 +174,7 @@ In Scala:
 
 In Terraform:
 
-.. code-block::
+.. code-block:: bash
 
     provider "aws" {
         region                      = "us-east-1"
@@ -99,6 +198,10 @@ Other languages:
 * `Javascript`_
 
 
+.. warning::
+
+    Note that we use `localhost` everywhere here - 127.0.0.1 is not an adequate replacement, and may not work.
+
 Use ServerMode using the decorators
 -------------------------------------
 
@@ -114,12 +217,21 @@ Whenever a mock-decorator starts, Moto will:
  #. Send a reset-request to :bash:`http://localhost:5000`, removing all state that was kept
  #. Add the :bash:`endpoint_url` parameter to boto3, so that all requests will be made to :bash:`http://localhost:5000`.
 
+Optionally, the `http://localhost:5000` endpoint can be overridden by:
+
+.. code-block:: bash
+
+    TEST_SERVER_MODE_ENDPOINT=http://moto-server:5000
+
+This can be used for example in case of docker-compose configuration that runs Moto server
+in a separate service container.
+
 Calling the reset-API ensures the same behaviour as normal decorators, where the complete state is removed.
 It is possible to keep the state in between tests, using this environment variable:
 
 .. code-block:: bash
 
-    MOTO_CALL_RESET_API=true
+    MOTO_CALL_RESET_API=false
 
 
 Dashboard
@@ -167,8 +279,8 @@ For the above services, this is required because the hostname is in the form of 
 As a result, you need to add that entry to your host file for your tests to function properly.
 
 
-.. _Java: https://github.com/spulec/moto/blob/master/other_langs/sqsSample.java
-.. _Ruby: https://github.com/spulec/moto/blob/master/other_langs/test.rb
-.. _Javascript: https://github.com/spulec/moto/blob/master/other_langs/test.js
+.. _Java: https://github.com/getmoto/moto/blob/master/other_langs/sqsSample.java
+.. _Ruby: https://github.com/getmoto/moto/blob/master/other_langs/test.rb
+.. _Javascript: https://github.com/getmoto/moto/blob/master/other_langs/test.js
 .. _Homebrew: https://brew.sh
 .. _Terraform Docs: https://registry.terraform.io/providers/hashicorp/aws/latest/docs/guides/custom-service-endpoints

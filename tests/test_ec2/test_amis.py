@@ -1,118 +1,51 @@
-import boto
-import boto.ec2
-import boto3
-from boto.exception import EC2ResponseError
-from botocore.exceptions import ClientError
-
-import pytest
-import sure  # noqa # pylint: disable=unused-import
+import os
 import random
-
-from moto import mock_ec2_deprecated, mock_ec2
-from moto.ec2.models import AMIS, OWNER_ID
-from moto.core import ACCOUNT_ID
-from tests import EXAMPLE_AMI_ID, EXAMPLE_AMI_PARAVIRTUAL
-from tests.helpers import requires_boto_gte
+from unittest import SkipTest, mock
 from uuid import uuid4
 
+import boto3
+import pytest
+from botocore.exceptions import ClientError
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
-def test_ami_create_and_delete():
-    conn = boto.connect_ec2("the_key", "the_secret")
-
-    initial_ami_count = len(AMIS)
-    conn.get_all_volumes().should.have.length_of(0)
-    conn.get_all_snapshots().should.have.length_of(initial_ami_count)
-
-    reservation = conn.run_instances(EXAMPLE_AMI_ID)
-    instance = reservation.instances[0]
-
-    with pytest.raises(EC2ResponseError) as ex:
-        conn.create_image(instance.id, "test-ami", "this is a test ami", dry_run=True)
-    ex.value.error_code.should.equal("DryRunOperation")
-    ex.value.status.should.equal(412)
-    ex.value.message.should.equal(
-        "An error occurred (DryRunOperation) when calling the CreateImage operation: Request would have succeeded, but DryRun flag is set"
-    )
-
-    image_id = conn.create_image(instance.id, "test-ami", "this is a test ami")
-
-    all_images = conn.get_all_images()
-    set([i.id for i in all_images]).should.contain(image_id)
-
-    retrieved_image = [i for i in all_images if i.id == image_id][0]
-
-    retrieved_image.id.should.equal(image_id)
-    retrieved_image.virtualization_type.should.equal(instance.virtualization_type)
-    retrieved_image.architecture.should.equal(instance.architecture)
-    retrieved_image.kernel_id.should.equal(instance.kernel)
-    retrieved_image.platform.should.equal(instance.platform)
-    retrieved_image.creationDate.should_not.be.none
-    instance.terminate()
-
-    # Ensure we're no longer creating a volume
-    volumes = conn.get_all_volumes()
-    volumes.should.have.length_of(0)
-
-    # Validate auto-created snapshot
-    snapshots = conn.get_all_snapshots()
-    snapshots.should.have.length_of(initial_ami_count + 1)
-
-    retrieved_image_snapshot_id = (
-        retrieved_image.block_device_mapping.current_value.snapshot_id
-    )
-    [s.id for s in snapshots].should.contain(retrieved_image_snapshot_id)
-    snapshot = [s for s in snapshots if s.id == retrieved_image_snapshot_id][0]
-    snapshot.description.should.equal(
-        "Auto-created snapshot for AMI {0}".format(retrieved_image.id)
-    )
-
-    # root device should be in AMI's block device mappings
-    root_mapping = retrieved_image.block_device_mapping.get(
-        retrieved_image.root_device_name
-    )
-    root_mapping.should_not.be.none
-
-    # Deregister
-    with pytest.raises(EC2ResponseError) as ex:
-        success = conn.deregister_image(image_id, dry_run=True)
-    ex.value.error_code.should.equal("DryRunOperation")
-    ex.value.status.should.equal(412)
-    ex.value.message.should.equal(
-        "An error occurred (DryRunOperation) when calling the DeregisterImage operation: Request would have succeeded, but DryRun flag is set"
-    )
-
-    success = conn.deregister_image(image_id)
-    success.should.be.true
-
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.deregister_image(image_id)
-    cm.value.code.should.equal("InvalidAMIID.NotFound")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
+from moto import mock_aws, settings
+from moto.core import DEFAULT_ACCOUNT_ID as ACCOUNT_ID
+from moto.core.utils import RFC3339_DATETIME_PATTERN
+from moto.ec2.models.amis import AMIS
+from tests import EXAMPLE_AMI_ID, EXAMPLE_AMI_PARAVIRTUAL
+from tests.test_ec2 import ec2_aws_verified
+from tests.test_ec2.helpers import assert_dryrun_error
 
 
-@mock_ec2
+# The default AMIs are not loaded for our test case, to speed things up
+# But we do need it for this specific test (and others in this file..)
+@mock.patch.dict(os.environ, {"MOTO_EC2_LOAD_DEFAULT_AMIS": "true"})
+@mock_aws
+@pytest.mark.requires_clean_slate
 def test_snapshots_for_initial_amis():
+    if settings.TEST_SERVER_MODE:
+        raise SkipTest("Can't set environment variables in ServerMode")
     ec2 = boto3.client("ec2", region_name="us-east-1")
 
     snapshots = ec2.describe_snapshots()["Snapshots"]
     snapshot_descs = [s["Description"] for s in snapshots]
     initial_ami_count = len(AMIS)
 
-    assert (
-        len(snapshots) >= initial_ami_count
-    ), "Should have at least as many snapshots as AMIs"
+    assert len(snapshots) >= initial_ami_count, (
+        "Should have at least as many snapshots as AMIs"
+    )
 
     for ami in AMIS:
         ami_id = ami["ami_id"]
         expected_description = f"Auto-created snapshot for AMI {ami_id}"
-        snapshot_descs.should.contain(expected_description)
+        assert expected_description in snapshot_descs
 
 
-@mock_ec2
-def test_ami_create_and_delete_boto3():
+@mock.patch.dict(os.environ, {"MOTO_EC2_LOAD_DEFAULT_AMIS": "true"})
+@mock_aws
+@pytest.mark.requires_clean_slate
+def test_ami_create_and_delete():
+    if settings.TEST_SERVER_MODE:
+        raise SkipTest("Can't set environment variables in ServerMode")
     ec2 = boto3.client("ec2", region_name="us-east-1")
 
     reservation = ec2.run_instances(ImageId=EXAMPLE_AMI_ID, MinCount=1, MaxCount=1)
@@ -123,30 +56,23 @@ def test_ami_create_and_delete_boto3():
         ec2.create_image(
             InstanceId=instance["InstanceId"], Name="test-ami", DryRun=True
         )
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(412)
-    err = ex.value.response["Error"]
-    err["Code"].should.equal("DryRunOperation")
-    err["Message"].should.equal(
-        "An error occurred (DryRunOperation) when calling the CreateImage operation: Request would have succeeded, but DryRun flag is set"
-    )
+    assert_dryrun_error(ex)
+    assert_dryrun_error(ex)
 
     image_id = ec2.create_image(
-        InstanceId=instance_id, Name="test-ami", Description="this is a test ami",
+        InstanceId=instance_id, Name="test-ami", Description="this is a test ami"
     )["ImageId"]
 
     all_images = ec2.describe_images()["Images"]
-    set([i["ImageId"] for i in all_images]).should.contain(image_id)
+    assert image_id in {i["ImageId"] for i in all_images}
 
     retrieved_image = [i for i in all_images if i["ImageId"] == image_id][0]
 
-    retrieved_image.should.have.key("ImageId").equal(image_id)
-    retrieved_image.should.have.key("VirtualizationType").equal(
-        instance["VirtualizationType"]
-    )
-    retrieved_image.should.have.key("Architecture").equal(instance["Architecture"])
-    retrieved_image.should.have.key("KernelId").equal(instance["KernelId"])
-    retrieved_image.should.have.key("Platform").equal(instance["Platform"])
-    retrieved_image.should.have.key("CreationDate")
+    assert retrieved_image["ImageId"] == image_id
+    assert retrieved_image["VirtualizationType"] == instance["VirtualizationType"]
+    assert retrieved_image["Architecture"] == instance["Architecture"]
+    assert retrieved_image["Platform"] == instance["Platform"]
+    assert RFC3339_DATETIME_PATTERN.match(retrieved_image["CreationDate"])
     ec2.terminate_instances(InstanceIds=[instance_id])
 
     # Ensure we're no longer creating a volume
@@ -155,7 +81,7 @@ def test_ami_create_and_delete_boto3():
         for v in ec2.describe_volumes()["Volumes"]
         if "Attachment" in v and v["Attachment"][0]["InstanceId"] == instance_id
     ]
-    volumes_for_instance.should.have.length_of(0)
+    assert len(volumes_for_instance) == 0
 
     # Validate auto-created snapshot
     snapshots = ec2.describe_snapshots()["Snapshots"]
@@ -163,12 +89,14 @@ def test_ami_create_and_delete_boto3():
     retrieved_image_snapshot_id = retrieved_image["BlockDeviceMappings"][0]["Ebs"][
         "SnapshotId"
     ]
-    [s["SnapshotId"] for s in snapshots].should.contain(retrieved_image_snapshot_id)
+    assert retrieved_image_snapshot_id in [s["SnapshotId"] for s in snapshots]
     snapshot = [s for s in snapshots if s["SnapshotId"] == retrieved_image_snapshot_id][
         0
     ]
-    snapshot["Description"].should.equal(
-        "Auto-created snapshot for AMI {0}".format(retrieved_image["ImageId"])
+    image_id = retrieved_image["ImageId"]
+    assert (
+        snapshot["Description"]
+        == f"Created by CreateImage({instance_id}) for {image_id}"
     )
 
     # root device should be in AMI's block device mappings
@@ -177,114 +105,57 @@ def test_ami_create_and_delete_boto3():
         for m in retrieved_image["BlockDeviceMappings"]
         if m["DeviceName"] == retrieved_image["RootDeviceName"]
     ]
-    root_mapping.should_not.equal([])
+    assert root_mapping != []
 
     # Deregister
     with pytest.raises(ClientError) as ex:
         ec2.deregister_image(ImageId=image_id, DryRun=True)
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(412)
-    err = ex.value.response["Error"]
-    err["Code"].should.equal("DryRunOperation")
-    err["Message"].should.equal(
-        "An error occurred (DryRunOperation) when calling the DeregisterImage operation: Request would have succeeded, but DryRun flag is set"
-    )
+    assert_dryrun_error(ex)
 
     success = ec2.deregister_image(ImageId=image_id)
-    success["ResponseMetadata"]["HTTPStatusCode"].should.equal(200)
+    assert success["ResponseMetadata"]["HTTPStatusCode"] == 200
 
     with pytest.raises(ClientError) as ex:
         ec2.deregister_image(ImageId=image_id)
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
     err = ex.value.response["Error"]
-    err["Code"].should.equal("InvalidAMIID.NotFound")
-    ex.value.response["ResponseMetadata"]["RequestId"].should_not.be.none
+    assert err["Code"] == "InvalidAMIID.Unavailable"
+    assert ex.value.response["ResponseMetadata"]["RequestId"] is not None
 
 
-# Has boto3 equivalent
-@requires_boto_gte("2.14.0")
-@mock_ec2_deprecated
-def test_ami_copy():
-    conn = boto.ec2.connect_to_region("us-west-1")
+@mock_aws
+def test_deregister_image__unknown():
+    ec2 = boto3.client("ec2", region_name="us-east-1")
 
-    initial_ami_count = len(AMIS)
-    conn.get_all_volumes().should.have.length_of(0)
-    conn.get_all_snapshots().should.have.length_of(initial_ami_count)
-
-    reservation = conn.run_instances(EXAMPLE_AMI_ID)
-    instance = reservation.instances[0]
-
-    source_image_id = conn.create_image(instance.id, "test-ami", "this is a test ami")
-    instance.terminate()
-    source_image = conn.get_all_images(image_ids=[source_image_id])[0]
-
-    # Boto returns a 'CopyImage' object with an image_id attribute here. Use
-    # the image_id to fetch the full info.
-    with pytest.raises(EC2ResponseError) as ex:
-        copy_image_ref = conn.copy_image(
-            source_image.region.name,
-            source_image.id,
-            "test-copy-ami",
-            "this is a test copy ami",
-            dry_run=True,
-        )
-    ex.value.error_code.should.equal("DryRunOperation")
-    ex.value.status.should.equal(412)
-    ex.value.message.should.equal(
-        "An error occurred (DryRunOperation) when calling the CopyImage operation: Request would have succeeded, but DryRun flag is set"
-    )
-
-    copy_image_ref = conn.copy_image(
-        source_image.region.name,
-        source_image.id,
-        "test-copy-ami",
-        "this is a test copy ami",
-    )
-    copy_image_id = copy_image_ref.image_id
-    copy_image = conn.get_all_images(image_ids=[copy_image_id])[0]
-
-    copy_image.id.should.equal(copy_image_id)
-    copy_image.virtualization_type.should.equal(source_image.virtualization_type)
-    copy_image.architecture.should.equal(source_image.architecture)
-    copy_image.kernel_id.should.equal(source_image.kernel_id)
-    copy_image.platform.should.equal(source_image.platform)
-
-    # Ensure we're no longer creating a volume
-    conn.get_all_volumes().should.have.length_of(0)
-
-    # Validate auto-created snapshot
-    conn.get_all_snapshots().should.have.length_of(initial_ami_count + 2)
-
-    copy_image.block_device_mapping.current_value.snapshot_id.should_not.equal(
-        source_image.block_device_mapping.current_value.snapshot_id
-    )
-
-    # Copy from non-existent source ID.
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.copy_image(
-            source_image.region.name,
-            "ami-abcd1234",
-            "test-copy-ami",
-            "this is a test copy ami",
-        )
-    cm.value.code.should.equal("InvalidAMIID.NotFound")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-    # Copy from non-existent source region.
-    with pytest.raises(EC2ResponseError) as cm:
-        invalid_region = (
-            "us-east-1" if (source_image.region.name != "us-east-1") else "us-west-1"
-        )
-        conn.copy_image(
-            invalid_region, source_image.id, "test-copy-ami", "this is a test copy ami"
-        )
-    cm.value.code.should.equal("InvalidAMIID.NotFound")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
+    with pytest.raises(ClientError) as ex:
+        ec2.deregister_image(ImageId="ami-unknown-ami")
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    err = ex.value.response["Error"]
+    assert err["Code"] == "InvalidAMIID.NotFound"
+    assert ex.value.response["ResponseMetadata"]["RequestId"] is not None
 
 
-@mock_ec2
-def test_ami_copy_boto3_dryrun():
+@mock_aws
+def test_deregister_image__and_describe():
+    ec2 = boto3.client("ec2", region_name="us-east-1")
+
+    reservation = ec2.run_instances(ImageId=EXAMPLE_AMI_ID, MinCount=1, MaxCount=1)
+    instance = reservation["Instances"][0]
+    instance_id = instance["InstanceId"]
+
+    image_id = ec2.create_image(
+        InstanceId=instance_id, Name="test-ami", Description="this is a test ami"
+    )["ImageId"]
+
+    ec2.deregister_image(ImageId=image_id)
+
+    # Searching for a deleted image ID should not throw an error
+    # It should simply not return this image
+    assert len(ec2.describe_images(ImageIds=[image_id])["Images"]) == 0
+
+
+@mock_aws
+def test_ami_copy_dryrun():
     ec2 = boto3.client("ec2", region_name="us-west-1")
 
     reservation = ec2.run_instances(ImageId=EXAMPLE_AMI_ID, MinCount=1, MaxCount=1)
@@ -305,16 +176,15 @@ def test_ami_copy_boto3_dryrun():
             Description="this is a test copy ami",
             DryRun=True,
         )
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(412)
-    err = ex.value.response["Error"]
-    err["Code"].should.equal("DryRunOperation")
-    err["Message"].should.equal(
-        "An error occurred (DryRunOperation) when calling the CopyImage operation: Request would have succeeded, but DryRun flag is set"
-    )
+    assert_dryrun_error(ex)
 
 
-@mock_ec2
-def test_ami_copy_boto3():
+@mock.patch.dict(os.environ, {"MOTO_EC2_LOAD_DEFAULT_AMIS": "true"})
+@mock_aws
+@pytest.mark.requires_clean_slate
+def test_ami_copy():
+    if settings.TEST_SERVER_MODE:
+        raise SkipTest("Can't set environment variables in ServerMode")
     ec2 = boto3.client("ec2", region_name="us-west-1")
 
     reservation = ec2.run_instances(ImageId=EXAMPLE_AMI_ID, MinCount=1, MaxCount=1)
@@ -337,13 +207,12 @@ def test_ami_copy_boto3():
     copy_image_id = copy_image_ref["ImageId"]
     copy_image = ec2.describe_images(ImageIds=[copy_image_id])["Images"][0]
 
-    copy_image["Name"].should.equal("test-copy-ami")
-    copy_image["Description"].should.equal("this is a test copy ami")
-    copy_image["ImageId"].should.equal(copy_image_id)
-    copy_image["VirtualizationType"].should.equal(source_image["VirtualizationType"])
-    copy_image["Architecture"].should.equal(source_image["Architecture"])
-    copy_image["KernelId"].should.equal(source_image["KernelId"])
-    copy_image["Platform"].should.equal(source_image["Platform"])
+    assert copy_image["Name"] == "test-copy-ami"
+    assert copy_image["Description"] == "this is a test copy ami"
+    assert copy_image["ImageId"] == copy_image_id
+    assert copy_image["VirtualizationType"] == source_image["VirtualizationType"]
+    assert copy_image["Architecture"] == source_image["Architecture"]
+    assert copy_image["Platform"] == source_image["Platform"]
 
     # Validate auto-created snapshot
     source_image_snapshot_id = source_image["BlockDeviceMappings"][0]["Ebs"][
@@ -352,13 +221,13 @@ def test_ami_copy_boto3():
     copied_image_snapshot_id = copy_image["BlockDeviceMappings"][0]["Ebs"]["SnapshotId"]
 
     snapshot_ids = [s["SnapshotId"] for s in ec2.describe_snapshots()["Snapshots"]]
-    snapshot_ids.should.contain(source_image_snapshot_id)
-    snapshot_ids.should.contain(copied_image_snapshot_id)
+    assert source_image_snapshot_id in snapshot_ids
+    assert copied_image_snapshot_id in snapshot_ids
 
-    copied_image_snapshot_id.shouldnt.equal(source_image_snapshot_id)
+    assert copied_image_snapshot_id != source_image_snapshot_id
 
 
-@mock_ec2
+@mock_aws
 def test_ami_copy_nonexistent_source_id():
     ec2 = boto3.client("ec2", region_name="us-west-1")
 
@@ -370,12 +239,12 @@ def test_ami_copy_nonexistent_source_id():
             Name="test-copy-ami",
             Description="this is a test copy ami",
         )
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidAMIID.NotFound")
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidAMIID.NotFound"
 
 
-@mock_ec2
+@mock_aws
 def test_ami_copy_nonexisting_source_region():
     ec2 = boto3.client("ec2", region_name="us-west-1")
 
@@ -397,13 +266,17 @@ def test_ami_copy_nonexisting_source_region():
             Name="test-copy-ami",
             Description="this is a test copy ami",
         )
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidAMIID.NotFound")
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidAMIID.NotFound"
 
 
-@mock_ec2
+@mock.patch.dict(os.environ, {"MOTO_EC2_LOAD_DEFAULT_AMIS": "true"})
+@mock_aws
+@pytest.mark.requires_clean_slate
 def test_copy_image_changes_owner_id():
+    if settings.TEST_SERVER_MODE:
+        raise SkipTest("Can't set environment variables in ServerMode")
     conn = boto3.client("ec2", region_name="us-east-1")
 
     # this source AMI ID is from moto/ec2/resources/amis.json
@@ -412,7 +285,7 @@ def test_copy_image_changes_owner_id():
     # confirm the source ami owner id is different from the default owner id.
     # if they're ever the same it means this test is invalid.
     check_resp = conn.describe_images(ImageIds=[source_ami_id])
-    check_resp["Images"][0]["OwnerId"].should_not.equal(OWNER_ID)
+    assert check_resp["Images"][0]["OwnerId"] != ACCOUNT_ID
 
     new_image_name = str(uuid4())[0:6]
 
@@ -426,42 +299,13 @@ def test_copy_image_changes_owner_id():
     describe_resp = conn.describe_images(
         Owners=["self"], Filters=[{"Name": "name", "Values": [new_image_name]}]
     )["Images"]
-    describe_resp.should.have.length_of(1)
-    describe_resp[0]["OwnerId"].should.equal(OWNER_ID)
-    describe_resp[0]["ImageId"].should.equal(copy_resp["ImageId"])
+    assert len(describe_resp) == 1
+    assert describe_resp[0]["OwnerId"] == ACCOUNT_ID
+    assert describe_resp[0]["ImageId"] == copy_resp["ImageId"]
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_ami_tagging():
-    conn = boto.connect_vpc("the_key", "the_secret")
-    reservation = conn.run_instances(EXAMPLE_AMI_ID)
-    instance = reservation.instances[0]
-    conn.create_image(instance.id, "test-ami", "this is a test ami")
-    image = conn.get_all_images()[0]
-
-    with pytest.raises(EC2ResponseError) as ex:
-        image.add_tag("a key", "some value", dry_run=True)
-    ex.value.error_code.should.equal("DryRunOperation")
-    ex.value.status.should.equal(412)
-    ex.value.message.should.equal(
-        "An error occurred (DryRunOperation) when calling the CreateTags operation: Request would have succeeded, but DryRun flag is set"
-    )
-
-    image.add_tag("a key", "some value")
-
-    tag = conn.get_all_tags()[0]
-    tag.name.should.equal("a key")
-    tag.value.should.equal("some value")
-
-    # Refresh the DHCP options
-    image = conn.get_all_images()[0]
-    image.tags.should.have.length_of(1)
-    image.tags["a key"].should.equal("some value")
-
-
-@mock_ec2
-def test_ami_tagging_boto3():
     ec2 = boto3.client("ec2", region_name="us-east-1")
     res = boto3.resource("ec2", region_name="us-east-1")
     reservation = ec2.run_instances(ImageId=EXAMPLE_AMI_ID, MinCount=1, MaxCount=1)
@@ -475,61 +319,30 @@ def test_ami_tagging_boto3():
 
     with pytest.raises(ClientError) as ex:
         image.create_tags(Tags=[{"Key": "a key", "Value": "some value"}], DryRun=True)
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(412)
-    err = ex.value.response["Error"]
-    err["Code"].should.equal("DryRunOperation")
-    err["Message"].should.equal(
-        "An error occurred (DryRunOperation) when calling the CreateTags operation: Request would have succeeded, but DryRun flag is set"
-    )
+    assert_dryrun_error(ex)
 
     image.create_tags(Tags=[{"Key": "a key", "Value": "some value"}])
-    image.tags.should.equal([{"Value": "some value", "Key": "a key"}])
+    assert image.tags == [{"Value": "some value", "Key": "a key"}]
 
     image = ec2.describe_images(ImageIds=[image_id])["Images"][0]
-    image["Tags"].should.equal([{"Value": "some value", "Key": "a key"}])
+    assert image["Tags"] == [{"Value": "some value", "Key": "a key"}]
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_ami_create_from_missing_instance():
-    conn = boto.connect_ec2("the_key", "the_secret")
-    args = ["i-abcdefg", "test-ami", "this is a test ami"]
-
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.create_image(*args)
-    cm.value.code.should.equal("InvalidInstanceID.NotFound")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-
-@mock_ec2
-def test_ami_create_from_missing_instance_boto3():
     ec2 = boto3.client("ec2", region_name="us-east-1")
 
     with pytest.raises(ClientError) as ex:
         ec2.create_image(
             InstanceId="i-abcdefg", Name="test-ami", Description="this is a test ami"
         )
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidInstanceID.NotFound")
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidInstanceID.NotFound"
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_ami_pulls_attributes_from_instance():
-    conn = boto.connect_ec2("the_key", "the_secret")
-    reservation = conn.run_instances(EXAMPLE_AMI_ID)
-    instance = reservation.instances[0]
-    instance.modify_attribute("kernel", "test-kernel")
-
-    image_id = conn.create_image(instance.id, "test-ami", "this is a test ami")
-    image = conn.get_image(image_id)
-    image.kernel_id.should.equal("test-kernel")
-
-
-@mock_ec2
-def test_ami_pulls_attributes_from_instance_boto3():
     ec2 = boto3.client("ec2", region_name="us-east-1")
     reservation = ec2.run_instances(ImageId=EXAMPLE_AMI_ID, MinCount=1, MaxCount=1)
     instance = reservation["Instances"][0]
@@ -541,25 +354,11 @@ def test_ami_pulls_attributes_from_instance_boto3():
         "ImageId"
     ]
     image = boto3.resource("ec2", region_name="us-east-1").Image(image_id)
-    image.kernel_id.should.equal("test-kernel")
+    assert image.kernel_id == "test-kernel"
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_ami_uses_account_id_if_valid_access_key_is_supplied():
-    access_key = "AKIAXXXXXXXXXXXXXXXX"
-    conn = boto.connect_ec2(access_key, "the_secret")
-    reservation = conn.run_instances(EXAMPLE_AMI_ID)
-    instance = reservation.instances[0]
-    instance.modify_attribute("kernel", "test-kernel")
-
-    image_id = conn.create_image(instance.id, "test-ami", "this is a test ami")
-    images = conn.get_all_images(owners=["self"])
-    [(ami.id, ami.owner_id) for ami in images].should.equal([(image_id, ACCOUNT_ID)])
-
-
-@mock_ec2
-def test_ami_uses_account_id_if_valid_access_key_is_supplied_boto3():
     # The boto-equivalent required an access_key to be passed in, but Moto will always mock this in boto3
     # So the only thing we're testing here, really.. is whether OwnerId is equal to ACCOUNT_ID?
     # TODO: Maybe patch account_id with multiple values, and verify it always  matches with OwnerId
@@ -571,75 +370,17 @@ def test_ami_uses_account_id_if_valid_access_key_is_supplied_boto3():
         "ImageId"
     ]
     images = ec2.describe_images(Owners=["self"])["Images"]
-    [(ami["ImageId"], ami["OwnerId"]) for ami in images].should.contain(
-        (image_id, ACCOUNT_ID)
-    )
+    assert (image_id, ACCOUNT_ID) in [
+        (ami["ImageId"], ami["OwnerId"]) for ami in images
+    ]
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock.patch.dict(os.environ, {"MOTO_EC2_LOAD_DEFAULT_AMIS": "true"})
+@mock_aws
+@pytest.mark.requires_clean_slate
 def test_ami_filters():
-    conn = boto.connect_ec2("the_key", "the_secret")
-
-    reservationA = conn.run_instances(EXAMPLE_AMI_ID)
-    instanceA = reservationA.instances[0]
-    instanceA.modify_attribute("architecture", "i386")
-    instanceA.modify_attribute("kernel", "k-1234abcd")
-    instanceA.modify_attribute("platform", "windows")
-    instanceA.modify_attribute("virtualization_type", "hvm")
-    imageA_id = conn.create_image(instanceA.id, "test-ami-A", "this is a test ami")
-    imageA = conn.get_image(imageA_id)
-
-    reservationB = conn.run_instances(EXAMPLE_AMI_ID)
-    instanceB = reservationB.instances[0]
-    instanceB.modify_attribute("architecture", "x86_64")
-    instanceB.modify_attribute("kernel", "k-abcd1234")
-    instanceB.modify_attribute("platform", "linux")
-    instanceB.modify_attribute("virtualization_type", "paravirtual")
-    imageB_id = conn.create_image(instanceB.id, "test-ami-B", "this is a test ami")
-    imageB = conn.get_image(imageB_id)
-    imageB.set_launch_permissions(group_names=("all"))
-
-    amis_by_architecture = conn.get_all_images(filters={"architecture": "x86_64"})
-    set([ami.id for ami in amis_by_architecture]).should.contain(imageB.id)
-    len(amis_by_architecture).should.equal(39)
-
-    amis_by_kernel = conn.get_all_images(filters={"kernel-id": "k-abcd1234"})
-    set([ami.id for ami in amis_by_kernel]).should.equal(set([imageB.id]))
-
-    amis_by_virtualization = conn.get_all_images(
-        filters={"virtualization-type": "paravirtual"}
-    )
-    set([ami.id for ami in amis_by_virtualization]).should.contain(imageB.id)
-    len(amis_by_virtualization).should.equal(3)
-
-    amis_by_platform = conn.get_all_images(filters={"platform": "windows"})
-    set([ami.id for ami in amis_by_platform]).should.contain(imageA.id)
-    len(amis_by_platform).should.equal(25)
-
-    amis_by_id = conn.get_all_images(filters={"image-id": imageA.id})
-    set([ami.id for ami in amis_by_id]).should.equal(set([imageA.id]))
-
-    amis_by_state = conn.get_all_images(filters={"state": "available"})
-    ami_ids_by_state = [ami.id for ami in amis_by_state]
-    ami_ids_by_state.should.contain(imageA.id)
-    ami_ids_by_state.should.contain(imageB.id)
-    len(amis_by_state).should.equal(40)
-
-    amis_by_name = conn.get_all_images(filters={"name": imageA.name})
-    set([ami.id for ami in amis_by_name]).should.equal(set([imageA.id]))
-
-    amis_by_public = conn.get_all_images(filters={"is-public": "true"})
-    set([ami.id for ami in amis_by_public]).should.contain(imageB.id)
-    len(amis_by_public).should.equal(39)
-
-    amis_by_nonpublic = conn.get_all_images(filters={"is-public": "false"})
-    set([ami.id for ami in amis_by_nonpublic]).should.contain(imageA.id)
-    len(amis_by_nonpublic).should.equal(1)
-
-
-@mock_ec2
-def test_ami_filters_boto3():
+    if settings.TEST_SERVER_MODE:
+        raise SkipTest("Can't set environment variables in ServerMode")
     image_name_A = f"test-ami-{str(uuid4())[0:6]}"
     kernel_value_A = f"k-{str(uuid4())[0:6]}"
     kernel_value_B = f"k-{str(uuid4())[0:6]}"
@@ -668,49 +409,52 @@ def test_ami_filters_boto3():
     ]
     imageB = boto3.resource("ec2", region_name="us-east-1").Image(imageB_id)
     imageB.modify_attribute(LaunchPermission={"Add": [{"Group": "all"}]})
+    assert imageB.describe_attribute(Attribute="launchPermission")[
+        "LaunchPermissions"
+    ] == [{"Group": "all"}]
 
     amis_by_architecture = ec2.describe_images(
         Filters=[{"Name": "architecture", "Values": ["x86_64"]}]
     )["Images"]
-    [ami["ImageId"] for ami in amis_by_architecture].should.contain(imageB_id)
-    assert (
-        len(amis_by_architecture) >= 40
-    ), "Should have at least 40 AMI's of type x86_64"
+    assert imageB_id in [ami["ImageId"] for ami in amis_by_architecture]
+    assert len(amis_by_architecture) >= 40, (
+        "Should have at least 40 AMI's of type x86_64"
+    )
 
     amis_by_kernel = ec2.describe_images(
         Filters=[{"Name": "kernel-id", "Values": [kernel_value_B]}]
     )["Images"]
-    [ami["ImageId"] for ami in amis_by_kernel].should.equal([imageB.id])
+    assert [ami["ImageId"] for ami in amis_by_kernel] == [imageB.id]
 
     amis_by_virtualization = ec2.describe_images(
         Filters=[{"Name": "virtualization-type", "Values": ["paravirtual"]}]
     )["Images"]
-    [ami["ImageId"] for ami in amis_by_virtualization].should.contain(imageB.id)
+    assert imageB.id in [ami["ImageId"] for ami in amis_by_virtualization]
     assert len(amis_by_virtualization) >= 3, "Should have at least 3 paravirtual AMI's"
 
     amis_by_platform = ec2.describe_images(
         Filters=[{"Name": "platform", "Values": ["windows"]}]
     )["Images"]
-    [ami["ImageId"] for ami in amis_by_platform].should.contain(imageA_id)
+    assert imageA_id in [ami["ImageId"] for ami in amis_by_platform]
     assert len(amis_by_platform) >= 25, "Should have at least 25 Windows images"
 
     amis_by_id = ec2.describe_images(
         Filters=[{"Name": "image-id", "Values": [imageA_id]}]
     )["Images"]
-    [ami["ImageId"] for ami in amis_by_id].should.equal([imageA_id])
+    assert [ami["ImageId"] for ami in amis_by_id] == [imageA_id]
 
     amis_by_state = ec2.describe_images(
         Filters=[{"Name": "state", "Values": ["available"]}]
     )["Images"]
     ami_ids_by_state = [ami["ImageId"] for ami in amis_by_state]
-    ami_ids_by_state.should.contain(imageA_id)
-    ami_ids_by_state.should.contain(imageB.id)
+    assert imageA_id in ami_ids_by_state
+    assert imageB.id in ami_ids_by_state
     assert len(amis_by_state) >= 40, "Should have at least 40 images available"
 
     amis_by_name = ec2.describe_images(
         Filters=[{"Name": "name", "Values": [imageA.name]}]
     )["Images"]
-    [ami["ImageId"] for ami in amis_by_name].should.equal([imageA.id])
+    assert [ami["ImageId"] for ami in amis_by_name] == [imageA.id]
 
     amis_by_public = ec2.describe_images(
         Filters=[{"Name": "is-public", "Values": ["true"]}]
@@ -720,36 +464,19 @@ def test_ami_filters_boto3():
     amis_by_nonpublic = ec2.describe_images(
         Filters=[{"Name": "is-public", "Values": ["false"]}]
     )["Images"]
-    [ami["ImageId"] for ami in amis_by_nonpublic].should.contain(imageA.id)
-    assert len(amis_by_nonpublic) >= 2, "Should have at least 2 non-public images"
+    assert imageA.id in [ami["ImageId"] for ami in amis_by_nonpublic]
+
+    amis_by_product_code = ec2.describe_images(
+        Filters=[
+            {"Name": "product-code", "Values": ["code123"]},
+            {"Name": "product-code.type", "Values": ["marketplace"]},
+        ]
+    )["Images"]
+    assert "ami-0b301ce3ce3475r4f" in [ami["ImageId"] for ami in amis_by_product_code]
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_ami_filtering_via_tag():
-    conn = boto.connect_vpc("the_key", "the_secret")
-
-    reservationA = conn.run_instances(EXAMPLE_AMI_ID)
-    instanceA = reservationA.instances[0]
-    imageA_id = conn.create_image(instanceA.id, "test-ami-A", "this is a test ami")
-    imageA = conn.get_image(imageA_id)
-    imageA.add_tag("a key", "some value")
-
-    reservationB = conn.run_instances(EXAMPLE_AMI_ID)
-    instanceB = reservationB.instances[0]
-    imageB_id = conn.create_image(instanceB.id, "test-ami-B", "this is a test ami")
-    imageB = conn.get_image(imageB_id)
-    imageB.add_tag("another key", "some other value")
-
-    amis_by_tagA = conn.get_all_images(filters={"tag:a key": "some value"})
-    set([ami.id for ami in amis_by_tagA]).should.equal(set([imageA.id]))
-
-    amis_by_tagB = conn.get_all_images(filters={"tag:another key": "some other value"})
-    set([ami.id for ami in amis_by_tagB]).should.equal(set([imageB.id]))
-
-
-@mock_ec2
-def test_ami_filtering_via_tag_boto3():
     tag_value = f"value {str(uuid4())}"
     other_value = f"value {str(uuid4())}"
     ec2 = boto3.client("ec2", region_name="us-east-1")
@@ -773,126 +500,38 @@ def test_ami_filtering_via_tag_boto3():
     amis_by_tagA = ec2.describe_images(
         Filters=[{"Name": "tag:a key", "Values": [tag_value]}]
     )["Images"]
-    [ami["ImageId"] for ami in amis_by_tagA].should.equal([imageA_id])
+    assert [ami["ImageId"] for ami in amis_by_tagA] == [imageA_id]
 
     amis_by_tagB = ec2.describe_images(
         Filters=[{"Name": "tag:another key", "Values": [other_value]}]
     )["Images"]
-    [ami["ImageId"] for ami in amis_by_tagB].should.equal([imageB_id])
+    assert [ami["ImageId"] for ami in amis_by_tagB] == [imageB_id]
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_getting_missing_ami():
-    conn = boto.connect_ec2("the_key", "the_secret")
-
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.get_image("ami-missing")
-    cm.value.code.should.equal("InvalidAMIID.NotFound")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-
-@mock_ec2
-def test_getting_missing_ami_boto3():
     ec2 = boto3.resource("ec2", region_name="us-east-1")
 
     with pytest.raises(ClientError) as ex:
         ec2.Image("ami-missing").load()
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidAMIID.NotFound")
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidAMIID.NotFound"
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_getting_malformed_ami():
-    conn = boto.connect_ec2("the_key", "the_secret")
-
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.get_image("foo-missing")
-    cm.value.code.should.equal("InvalidAMIID.Malformed")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-
-@mock_ec2
-def test_getting_malformed_ami_boto3():
     ec2 = boto3.resource("ec2", region_name="us-east-1")
 
     with pytest.raises(ClientError) as ex:
         ec2.Image("foo-missing").load()
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidAMIID.Malformed")
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidAMIID.Malformed"
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_ami_attribute_group_permissions():
-    conn = boto.connect_ec2("the_key", "the_secret")
-    reservation = conn.run_instances(EXAMPLE_AMI_ID)
-    instance = reservation.instances[0]
-    image_id = conn.create_image(instance.id, "test-ami", "this is a test ami")
-    image = conn.get_image(image_id)
-
-    # Baseline
-    attributes = conn.get_image_attribute(image.id, attribute="launchPermission")
-    attributes.name.should.equal("launch_permission")
-    attributes.attrs.should.have.length_of(0)
-
-    ADD_GROUP_ARGS = {
-        "image_id": image.id,
-        "attribute": "launchPermission",
-        "operation": "add",
-        "groups": "all",
-    }
-
-    REMOVE_GROUP_ARGS = {
-        "image_id": image.id,
-        "attribute": "launchPermission",
-        "operation": "remove",
-        "groups": "all",
-    }
-
-    # Add 'all' group and confirm
-    with pytest.raises(EC2ResponseError) as ex:
-        conn.modify_image_attribute(**dict(ADD_GROUP_ARGS, **{"dry_run": True}))
-    ex.value.error_code.should.equal("DryRunOperation")
-    ex.value.status.should.equal(412)
-    ex.value.message.should.equal(
-        "An error occurred (DryRunOperation) when calling the ModifyImageAttribute operation: Request would have succeeded, but DryRun flag is set"
-    )
-
-    conn.modify_image_attribute(**ADD_GROUP_ARGS)
-
-    attributes = conn.get_image_attribute(image.id, attribute="launchPermission")
-    attributes.attrs["groups"].should.have.length_of(1)
-    attributes.attrs["groups"].should.equal(["all"])
-    image = conn.get_image(image_id)
-    image.is_public.should.equal(True)
-
-    # Add is idempotent
-    conn.modify_image_attribute.when.called_with(**ADD_GROUP_ARGS).should_not.throw(
-        EC2ResponseError
-    )
-
-    # Remove 'all' group and confirm
-    conn.modify_image_attribute(**REMOVE_GROUP_ARGS)
-
-    attributes = conn.get_image_attribute(image.id, attribute="launchPermission")
-    attributes.attrs.should.have.length_of(0)
-    image = conn.get_image(image_id)
-    image.is_public.should.equal(False)
-
-    # Remove is idempotent
-    conn.modify_image_attribute.when.called_with(**REMOVE_GROUP_ARGS).should_not.throw(
-        EC2ResponseError
-    )
-
-
-@mock_ec2
-def test_ami_attribute_group_permissions_boto3():
     ec2 = boto3.client("ec2", region_name="us-east-1")
     reservation = ec2.run_instances(ImageId=EXAMPLE_AMI_ID, MinCount=1, MaxCount=1)
     instance = reservation["Instances"][0]
@@ -906,7 +545,7 @@ def test_ami_attribute_group_permissions_boto3():
     permissions = image.describe_attribute(Attribute="launchPermission")[
         "LaunchPermissions"
     ]
-    permissions.should.equal([])
+    assert permissions == []
 
     ADD_GROUP_ARGS = {
         "ImageId": image_id,
@@ -925,20 +564,16 @@ def test_ami_attribute_group_permissions_boto3():
     # Add 'all' group and confirm
     with pytest.raises(ClientError) as ex:
         image.modify_attribute(DryRun=True)
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(412)
-    ex.value.response["Error"]["Code"].should.equal("DryRunOperation")
-    ex.value.response["Error"]["Message"].should.equal(
-        "An error occurred (DryRunOperation) when calling the ModifyImageAttribute operation: Request would have succeeded, but DryRun flag is set"
-    )
+    assert_dryrun_error(ex)
 
     image.modify_attribute(**ADD_GROUP_ARGS)
 
     permissions = image.describe_attribute(Attribute="launchPermission")[
         "LaunchPermissions"
     ]
-    permissions.should.equal([{"Group": "all"}])
+    assert permissions == [{"Group": "all"}]
     image.reload()
-    image.public.should.equal(True)
+    assert image.public is True
 
     # Add is idempotent
     image.modify_attribute(**ADD_GROUP_ARGS)
@@ -949,92 +584,16 @@ def test_ami_attribute_group_permissions_boto3():
     permissions = image.describe_attribute(Attribute="launchPermission")[
         "LaunchPermissions"
     ]
-    permissions.should.equal([])
+    assert permissions == []
     image.reload()
-    image.public.should.equal(False)
+    assert image.public is False
 
     # Remove is idempotent
     image.modify_attribute(**REMOVE_GROUP_ARGS)
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_ami_attribute_user_permissions():
-    conn = boto.connect_ec2("the_key", "the_secret")
-    reservation = conn.run_instances(EXAMPLE_AMI_ID)
-    instance = reservation.instances[0]
-    image_id = conn.create_image(instance.id, "test-ami", "this is a test ami")
-    image = conn.get_image(image_id)
-
-    # Baseline
-    attributes = conn.get_image_attribute(image.id, attribute="launchPermission")
-    attributes.name.should.equal("launch_permission")
-    attributes.attrs.should.have.length_of(0)
-
-    # Both str and int values should work.
-    USER1 = "123456789011"
-    USER2 = 123456789022
-
-    ADD_USERS_ARGS = {
-        "image_id": image.id,
-        "attribute": "launchPermission",
-        "operation": "add",
-        "user_ids": [USER1, USER2],
-    }
-
-    REMOVE_USERS_ARGS = {
-        "image_id": image.id,
-        "attribute": "launchPermission",
-        "operation": "remove",
-        "user_ids": [USER1, USER2],
-    }
-
-    REMOVE_SINGLE_USER_ARGS = {
-        "image_id": image.id,
-        "attribute": "launchPermission",
-        "operation": "remove",
-        "user_ids": [USER1],
-    }
-
-    # Add multiple users and confirm
-    conn.modify_image_attribute(**ADD_USERS_ARGS)
-
-    attributes = conn.get_image_attribute(image.id, attribute="launchPermission")
-    attributes.attrs["user_ids"].should.have.length_of(2)
-    set(attributes.attrs["user_ids"]).should.equal(set([str(USER1), str(USER2)]))
-    image = conn.get_image(image_id)
-    image.is_public.should.equal(False)
-
-    # Add is idempotent
-    conn.modify_image_attribute.when.called_with(**ADD_USERS_ARGS).should_not.throw(
-        EC2ResponseError
-    )
-
-    # Remove single user and confirm
-    conn.modify_image_attribute(**REMOVE_SINGLE_USER_ARGS)
-
-    attributes = conn.get_image_attribute(image.id, attribute="launchPermission")
-    attributes.attrs["user_ids"].should.have.length_of(1)
-    set(attributes.attrs["user_ids"]).should.equal(set([str(USER2)]))
-    image = conn.get_image(image_id)
-    image.is_public.should.equal(False)
-
-    # Remove multiple users and confirm
-    conn.modify_image_attribute(**REMOVE_USERS_ARGS)
-
-    attributes = conn.get_image_attribute(image.id, attribute="launchPermission")
-    attributes.attrs.should.have.length_of(0)
-    image = conn.get_image(image_id)
-    image.is_public.should.equal(False)
-
-    # Remove is idempotent
-    conn.modify_image_attribute.when.called_with(**REMOVE_USERS_ARGS).should_not.throw(
-        EC2ResponseError
-    )
-
-
-@mock_ec2
-def test_ami_attribute_user_permissions_boto3():
     ec2 = boto3.client("ec2", region_name="us-east-1")
     reservation = ec2.run_instances(ImageId=EXAMPLE_AMI_ID, MinCount=1, MaxCount=1)
     instance = reservation["Instances"][0]
@@ -1048,10 +607,10 @@ def test_ami_attribute_user_permissions_boto3():
     permissions = image.describe_attribute(Attribute="launchPermission")[
         "LaunchPermissions"
     ]
-    permissions.should.equal([])
+    assert permissions == []
 
-    USER1 = "".join(["{}".format(random.randint(0, 9)) for _ in range(0, 12)])
-    USER2 = "".join(["{}".format(random.randint(0, 9)) for _ in range(0, 12)])
+    USER1 = "".join([f"{random.randint(0, 9)}" for _ in range(0, 12)])
+    USER2 = "".join([f"{random.randint(0, 9)}" for _ in range(0, 12)])
 
     ADD_USERS_ARGS = {
         "ImageId": image.id,
@@ -1080,11 +639,11 @@ def test_ami_attribute_user_permissions_boto3():
     permissions = image.describe_attribute(Attribute="launchPermission")[
         "LaunchPermissions"
     ]
-    permissions.should.have.length_of(2)
-    permissions.should.contain({"UserId": USER1})
-    permissions.should.contain({"UserId": USER2})
+    assert len(permissions) == 2
+    assert {"UserId": USER1} in permissions
+    assert {"UserId": USER2} in permissions
     image.reload()
-    image.public.should.equal(False)
+    assert image.public is False
 
     # Add is idempotent
     image.modify_attribute(**ADD_USERS_ARGS)
@@ -1095,9 +654,9 @@ def test_ami_attribute_user_permissions_boto3():
     permissions = image.describe_attribute(Attribute="launchPermission")[
         "LaunchPermissions"
     ]
-    permissions.should.equal([{"UserId": USER2}])
+    assert permissions == [{"UserId": USER2}]
     image.reload()
-    image.public.should.equal(False)
+    assert image.public is False
 
     # Remove multiple users and confirm
     image.modify_attribute(**REMOVE_USERS_ARGS)
@@ -1105,15 +664,62 @@ def test_ami_attribute_user_permissions_boto3():
     permissions = image.describe_attribute(Attribute="launchPermission")[
         "LaunchPermissions"
     ]
-    permissions.should.equal([])
+    assert permissions == []
     image.reload()
-    image.public.should.equal(False)
+    assert image.public is False
 
     # Remove is idempotent
     image.modify_attribute(**REMOVE_USERS_ARGS)
 
 
-@mock_ec2
+@mock_aws
+def test_ami_attribute_organizations():
+    ec2 = boto3.client("ec2", region_name="us-east-1")
+    reservation = ec2.run_instances(ImageId=EXAMPLE_AMI_ID, MinCount=1, MaxCount=1)
+    instance_id = reservation["Instances"][0]["InstanceId"]
+    image_id = ec2.create_image(InstanceId=instance_id, Name="test-ami-A")["ImageId"]
+    image = boto3.resource("ec2", "us-east-1").Image(image_id)
+    arn = "someOrganizationArn"
+    image.modify_attribute(
+        Attribute="launchPermission",
+        OperationType="add",
+        OrganizationArns=[arn],
+    )
+    image.modify_attribute(
+        Attribute="launchPermission",
+        OperationType="add",
+        OrganizationalUnitArns=["ou1"],
+    )
+
+    ec2.modify_image_attribute(
+        Attribute="launchPermission",
+        ImageId=image_id,
+        LaunchPermission={
+            "Add": [
+                {"UserId": "111122223333"},
+                {"UserId": "555566667777"},
+                {"Group": "all"},
+                {"OrganizationArn": "orgarn"},
+                {"OrganizationalUnitArn": "ou2"},
+            ]
+        },
+    )
+
+    launch_permissions = image.describe_attribute(Attribute="launchPermission")[
+        "LaunchPermissions"
+    ]
+    assert launch_permissions == [
+        {"OrganizationArn": "someOrganizationArn"},
+        {"OrganizationalUnitArn": "ou1"},
+        {"UserId": "111122223333"},
+        {"UserId": "555566667777"},
+        {"Group": "all"},
+        {"OrganizationArn": "orgarn"},
+        {"OrganizationalUnitArn": "ou2"},
+    ]
+
+
+@mock_aws
 def test_ami_describe_executable_users():
     conn = boto3.client("ec2", region_name="us-east-1")
     ec2 = boto3.resource("ec2", "us-east-1")
@@ -1124,7 +730,7 @@ def test_ami_describe_executable_users():
     instance_id = response["Reservations"][0]["Instances"][0]["InstanceId"]
     image_id = conn.create_image(InstanceId=instance_id, Name="TestImage")["ImageId"]
 
-    USER1 = "".join(["{}".format(random.randint(0, 9)) for _ in range(0, 12)])
+    USER1 = "".join([f"{random.randint(0, 9)}" for _ in range(0, 12)])
 
     ADD_USER_ARGS = {
         "ImageId": image_id,
@@ -1137,16 +743,15 @@ def test_ami_describe_executable_users():
     conn.modify_image_attribute(**ADD_USER_ARGS)
 
     attributes = conn.describe_image_attribute(
-        ImageId=image_id, Attribute="LaunchPermissions", DryRun=False
+        ImageId=image_id, Attribute="launchPermission", DryRun=False
     )
-    attributes["LaunchPermissions"].should.have.length_of(1)
-    attributes["LaunchPermissions"][0]["UserId"].should.equal(USER1)
+    assert len(attributes["LaunchPermissions"]) == 1
+    assert attributes["LaunchPermissions"][0]["UserId"] == USER1
     images = conn.describe_images(ExecutableUsers=[USER1])["Images"]
-    images.should.have.length_of(1)
-    images[0]["ImageId"].should.equal(image_id)
+    assert image_id in [image["ImageId"] for image in images]
 
 
-@mock_ec2
+@mock_aws
 def test_ami_describe_executable_users_negative():
     conn = boto3.client("ec2", region_name="us-east-1")
     ec2 = boto3.resource("ec2", "us-east-1")
@@ -1157,8 +762,8 @@ def test_ami_describe_executable_users_negative():
     instance_id = response["Reservations"][0]["Instances"][0]["InstanceId"]
     image_id = conn.create_image(InstanceId=instance_id, Name="TestImage")["ImageId"]
 
-    USER1 = "".join(["{}".format(random.randint(0, 9)) for _ in range(0, 12)])
-    USER2 = "".join(["{}".format(random.randint(0, 9)) for _ in range(0, 12)])
+    USER1 = "".join([f"{random.randint(0, 9)}" for _ in range(0, 12)])
+    USER2 = "".join([f"{random.randint(0, 9)}" for _ in range(0, 12)])
 
     ADD_USER_ARGS = {
         "ImageId": image_id,
@@ -1168,19 +773,18 @@ def test_ami_describe_executable_users_negative():
     }
 
     # Add users and get no images
-    # Add users and get no images
     conn.modify_image_attribute(**ADD_USER_ARGS)
 
     attributes = conn.describe_image_attribute(
-        ImageId=image_id, Attribute="LaunchPermissions", DryRun=False
+        ImageId=image_id, Attribute="launchPermission", DryRun=False
     )
-    attributes["LaunchPermissions"].should.have.length_of(1)
-    attributes["LaunchPermissions"][0]["UserId"].should.equal(USER1)
+    assert len(attributes["LaunchPermissions"]) == 1
+    assert attributes["LaunchPermissions"][0]["UserId"] == USER1
     images = conn.describe_images(ExecutableUsers=[USER2])["Images"]
-    images.should.have.length_of(0)
+    assert image_id not in [image["ImageId"] for image in images]
 
 
-@mock_ec2
+@mock_aws
 def test_ami_describe_executable_users_and_filter():
     conn = boto3.client("ec2", region_name="us-east-1")
     ec2 = boto3.resource("ec2", "us-east-1")
@@ -1193,7 +797,7 @@ def test_ami_describe_executable_users_and_filter():
         "ImageId"
     ]
 
-    USER1 = "".join(["{}".format(random.randint(0, 9)) for _ in range(0, 12)])
+    USER1 = "".join([f"{random.randint(0, 9)}" for _ in range(0, 12)])
 
     ADD_USER_ARGS = {
         "ImageId": image_id,
@@ -1206,76 +810,86 @@ def test_ami_describe_executable_users_and_filter():
     conn.modify_image_attribute(**ADD_USER_ARGS)
 
     attributes = conn.describe_image_attribute(
-        ImageId=image_id, Attribute="LaunchPermissions", DryRun=False
+        ImageId=image_id, Attribute="launchPermission", DryRun=False
     )
-    attributes["LaunchPermissions"].should.have.length_of(1)
-    attributes["LaunchPermissions"][0]["UserId"].should.equal(USER1)
+    assert len(attributes["LaunchPermissions"]) == 1
+    assert attributes["LaunchPermissions"][0]["UserId"] == USER1
     images = conn.describe_images(
         ExecutableUsers=[USER1], Filters=[{"Name": "state", "Values": ["available"]}]
     )["Images"]
-    images.should.have.length_of(1)
-    images[0]["ImageId"].should.equal(image_id)
+    assert image_id in [image["ImageId"] for image in images]
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
+def test_ami_describe_images_executable_user_public():
+    conn = boto3.client("ec2", region_name="us-east-1")
+    ec2 = boto3.resource("ec2", "us-east-1")
+    ec2.create_instances(ImageId=EXAMPLE_AMI_ID, MinCount=1, MaxCount=1)
+    response = conn.describe_instances(
+        Filters=[{"Name": "instance-state-name", "Values": ["running"]}]
+    )
+    instance_id = response["Reservations"][0]["Instances"][0]["InstanceId"]
+    public_image_id = conn.create_image(InstanceId=instance_id, Name="PublicImage")[
+        "ImageId"
+    ]
+    private_image_id = conn.create_image(InstanceId=instance_id, Name="PrivateImage")[
+        "ImageId"
+    ]
+
+    USER1 = "".join([f"{random.randint(0, 9)}" for _ in range(0, 12)])
+    USER2 = "".join([f"{random.randint(0, 9)}" for _ in range(0, 12)])
+
+    SET_IMAGE_PUBLIC = {
+        "ImageId": public_image_id,
+        "Attribute": "launchPermission",
+        "OperationType": "add",
+        "UserGroups": ["all"],
+    }
+    conn.modify_image_attribute(**SET_IMAGE_PUBLIC)
+
+    SET_IMAGE_PRIVATE = {
+        "ImageId": private_image_id,
+        "Attribute": "launchPermission",
+        "OperationType": "add",
+        "UserIds": [USER2],
+    }
+    conn.modify_image_attribute(**SET_IMAGE_PRIVATE)
+
+    images = conn.describe_images(
+        ExecutableUsers=[USER1],
+    )["Images"]
+
+    image_ids = [image["ImageId"] for image in images]
+    assert public_image_id in image_ids
+    assert private_image_id not in image_ids
+
+
+@mock_aws
+def test_ami_describe_images_executable_users_self():
+    conn = boto3.client("ec2", region_name="us-east-1")
+    ec2 = boto3.resource("ec2", "us-east-1")
+    ec2.create_instances(ImageId=EXAMPLE_AMI_ID, MinCount=1, MaxCount=1)
+    response = conn.describe_instances(
+        Filters=[{"Name": "instance-state-name", "Values": ["running"]}]
+    )
+    instance_id = response["Reservations"][0]["Instances"][0]["InstanceId"]
+    image_id = conn.create_image(InstanceId=instance_id, Name="PublicImage")["ImageId"]
+
+    SET_IMAGE_TO_SELF = {
+        "ImageId": image_id,
+        "Attribute": "launchPermission",
+        "OperationType": "add",
+        "UserIds": [ACCOUNT_ID],
+    }
+    conn.modify_image_attribute(**SET_IMAGE_TO_SELF)
+
+    images = conn.describe_images(ExecutableUsers=["self"])["Images"]
+
+    assert image_id in [image["ImageId"] for image in images]
+
+
+@mock_aws
 def test_ami_attribute_user_and_group_permissions():
-    """
-    Boto supports adding/removing both users and groups at the same time.
-    Just spot-check this -- input variations, idempotency, etc are validated
-      via user-specific and group-specific tests above.
-    """
-    conn = boto.connect_ec2("the_key", "the_secret")
-    reservation = conn.run_instances(EXAMPLE_AMI_ID)
-    instance = reservation.instances[0]
-    image_id = conn.create_image(instance.id, "test-ami", "this is a test ami")
-    image = conn.get_image(image_id)
-
-    # Baseline
-    attributes = conn.get_image_attribute(image.id, attribute="launchPermission")
-    attributes.name.should.equal("launch_permission")
-    attributes.attrs.should.have.length_of(0)
-
-    USER1 = "123456789011"
-    USER2 = "123456789022"
-
-    ADD_ARGS = {
-        "image_id": image.id,
-        "attribute": "launchPermission",
-        "operation": "add",
-        "groups": ["all"],
-        "user_ids": [USER1, USER2],
-    }
-
-    REMOVE_ARGS = {
-        "image_id": image.id,
-        "attribute": "launchPermission",
-        "operation": "remove",
-        "groups": ["all"],
-        "user_ids": [USER1, USER2],
-    }
-
-    # Add and confirm
-    conn.modify_image_attribute(**ADD_ARGS)
-
-    attributes = conn.get_image_attribute(image.id, attribute="launchPermission")
-    attributes.attrs["user_ids"].should.have.length_of(2)
-    set(attributes.attrs["user_ids"]).should.equal(set([USER1, USER2]))
-    set(attributes.attrs["groups"]).should.equal(set(["all"]))
-    image = conn.get_image(image_id)
-    image.is_public.should.equal(True)
-
-    # Remove and confirm
-    conn.modify_image_attribute(**REMOVE_ARGS)
-
-    attributes = conn.get_image_attribute(image.id, attribute="launchPermission")
-    attributes.attrs.should.have.length_of(0)
-    image = conn.get_image(image_id)
-    image.is_public.should.equal(False)
-
-
-@mock_ec2
-def test_ami_attribute_user_and_group_permissions_boto3():
     """
     Boto supports adding/removing both users and groups at the same time.
     Just spot-check this -- input variations, idempotency, etc are validated
@@ -1294,7 +908,7 @@ def test_ami_attribute_user_and_group_permissions_boto3():
     permissions = image.describe_attribute(Attribute="launchPermission")[
         "LaunchPermissions"
     ]
-    permissions.should.equal([])
+    assert permissions == []
 
     USER1 = "123456789011"
     USER2 = "123456789022"
@@ -1321,12 +935,12 @@ def test_ami_attribute_user_and_group_permissions_boto3():
     permissions = image.describe_attribute(Attribute="launchPermission")[
         "LaunchPermissions"
     ]
-    permissions.should.have.length_of(3)
-    permissions.should.contain({"Group": "all"})
-    permissions.should.contain({"UserId": "123456789022"})
-    permissions.should.contain({"UserId": "123456789011"})
+    assert len(permissions) == 3
+    assert {"Group": "all"} in permissions
+    assert {"UserId": "123456789022"} in permissions
+    assert {"UserId": "123456789011"} in permissions
     image.reload()
-    image.public.should.equal(True)
+    assert image.public is True
 
     # Remove and confirm
     image.modify_attribute(**REMOVE_ARGS)
@@ -1334,14 +948,18 @@ def test_ami_attribute_user_and_group_permissions_boto3():
     permissions = image.describe_attribute(Attribute="launchPermission")[
         "LaunchPermissions"
     ]
-    permissions.should.equal([])
+    assert permissions == []
     image.reload()
-    image.public.should.equal(False)
+    assert image.public is False
 
 
-@mock_ec2
+@mock.patch.dict(os.environ, {"MOTO_EC2_LOAD_DEFAULT_AMIS": "true"})
+@mock_aws
+@pytest.mark.requires_clean_slate
 def test_filter_description():
-    # https://github.com/spulec/moto/issues/4460
+    if settings.TEST_SERVER_MODE:
+        raise SkipTest("Can't set environment variables in ServerMode")
+    # https://github.com/getmoto/moto/issues/4460
     client = boto3.client("ec2", region_name="us-west-2")
 
     # Search for partial description
@@ -1349,7 +967,7 @@ def test_filter_description():
         Owners=["amazon"],
         Filters=[{"Name": "description", "Values": ["Amazon Linux AMI*"]}],
     )["Images"]
-    resp.should.have.length_of(4)
+    assert len(resp) > 9
 
     # Search for full description
     resp = client.describe_images(
@@ -1361,103 +979,11 @@ def test_filter_description():
             }
         ],
     )["Images"]
-    resp.should.have.length_of(1)
+    assert len(resp) == 1
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_ami_attribute_error_cases():
-    conn = boto.connect_ec2("the_key", "the_secret")
-    reservation = conn.run_instances(EXAMPLE_AMI_ID)
-    instance = reservation.instances[0]
-    image_id = conn.create_image(instance.id, "test-ami", "this is a test ami")
-    image = conn.get_image(image_id)
-
-    # Error: Add with group != 'all'
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.modify_image_attribute(
-            image.id, attribute="launchPermission", operation="add", groups="everyone"
-        )
-    cm.value.code.should.equal("InvalidAMIAttributeItemValue")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-    # Error: Add with user ID that isn't an integer.
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.modify_image_attribute(
-            image.id,
-            attribute="launchPermission",
-            operation="add",
-            user_ids="12345678901A",
-        )
-    cm.value.code.should.equal("InvalidAMIAttributeItemValue")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-    # Error: Add with user ID that is > length 12.
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.modify_image_attribute(
-            image.id,
-            attribute="launchPermission",
-            operation="add",
-            user_ids="1234567890123",
-        )
-    cm.value.code.should.equal("InvalidAMIAttributeItemValue")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-    # Error: Add with user ID that is < length 12.
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.modify_image_attribute(
-            image.id,
-            attribute="launchPermission",
-            operation="add",
-            user_ids="12345678901",
-        )
-    cm.value.code.should.equal("InvalidAMIAttributeItemValue")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-    # Error: Add with one invalid user ID among other valid IDs, ensure no
-    # partial changes.
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.modify_image_attribute(
-            image.id,
-            attribute="launchPermission",
-            operation="add",
-            user_ids=["123456789011", "foo", "123456789022"],
-        )
-    cm.value.code.should.equal("InvalidAMIAttributeItemValue")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-    attributes = conn.get_image_attribute(image.id, attribute="launchPermission")
-    attributes.attrs.should.have.length_of(0)
-
-    # Error: Add with invalid image ID
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.modify_image_attribute(
-            "ami-abcd1234", attribute="launchPermission", operation="add", groups="all"
-        )
-    cm.value.code.should.equal("InvalidAMIID.NotFound")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-    # Error: Remove with invalid image ID
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.modify_image_attribute(
-            "ami-abcd1234",
-            attribute="launchPermission",
-            operation="remove",
-            groups="all",
-        )
-    cm.value.code.should.equal("InvalidAMIID.NotFound")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-
-@mock_ec2
-def test_ami_attribute_error_cases_boto3():
     ec2 = boto3.client("ec2", region_name="us-east-1")
     reservation = ec2.run_instances(ImageId=EXAMPLE_AMI_ID, MinCount=1, MaxCount=1)
     instance = reservation["Instances"][0]
@@ -1475,9 +1001,9 @@ def test_ami_attribute_error_cases_boto3():
             OperationType="add",
             UserGroups=["everyone"],
         )
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidAMIAttributeItemValue")
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidAMIAttributeItemValue"
 
     # Error: Add with user ID that isn't an integer.
     with pytest.raises(ClientError) as ex:
@@ -1487,9 +1013,9 @@ def test_ami_attribute_error_cases_boto3():
             OperationType="add",
             UserIds=["12345678901A"],
         )
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidAMIAttributeItemValue")
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidAMIAttributeItemValue"
 
     # Error: Add with user ID that is > length 12.
     with pytest.raises(ClientError) as ex:
@@ -1499,9 +1025,9 @@ def test_ami_attribute_error_cases_boto3():
             OperationType="add",
             UserIds=["1234567890123"],
         )
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidAMIAttributeItemValue")
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidAMIAttributeItemValue"
 
     # Error: Add with user ID that is < length 12.
     with pytest.raises(ClientError) as ex:
@@ -1511,9 +1037,9 @@ def test_ami_attribute_error_cases_boto3():
             OperationType="add",
             UserIds=["12345678901"],
         )
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidAMIAttributeItemValue")
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidAMIAttributeItemValue"
 
     # Error: Add with one invalid user ID among other valid IDs, ensure no
     # partial changes.
@@ -1524,14 +1050,14 @@ def test_ami_attribute_error_cases_boto3():
             OperationType="add",
             UserIds=["123456789011", "foo", "123456789022"],
         )
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidAMIAttributeItemValue")
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidAMIAttributeItemValue"
 
     permissions = image.describe_attribute(Attribute="launchPermission")[
         "LaunchPermissions"
     ]
-    permissions.should.equal([])
+    assert permissions == []
 
     # Error: Add with invalid image ID
     with pytest.raises(ClientError) as ex:
@@ -1541,9 +1067,9 @@ def test_ami_attribute_error_cases_boto3():
             OperationType="add",
             UserGroups=["all"],
         )
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidAMIID.NotFound")
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidAMIID.NotFound"
 
     # Error: Remove with invalid image ID
     with pytest.raises(ClientError) as ex:
@@ -1553,25 +1079,56 @@ def test_ami_attribute_error_cases_boto3():
             OperationType="remove",
             UserGroups=["all"],
         )
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidAMIID.NotFound")
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidAMIID.NotFound"
 
 
-@mock_ec2
-def test_ami_describe_non_existent():
-    ec2 = boto3.resource("ec2", region_name="us-west-1")
+@ec2_aws_verified()
+@pytest.mark.aws_verified
+def test_ami_describe_non_existent(ec2_client=None):
     # Valid pattern but non-existent id
-    img = ec2.Image("ami-abcd1234")
-    with pytest.raises(ClientError):
-        img.load()
+    with pytest.raises(ClientError) as exc:
+        ec2_client.describe_images(ImageIds=["ami-abcd1234"])
+    assert exc.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert exc.value.response["Error"]["Code"] == "InvalidAMIID.NotFound"
+    assert (
+        exc.value.response["Error"]["Message"]
+        == "The image id '[ami-abcd1234]' does not exist"
+    )
+
+    # Valid pattern but non-existent id: With multiple IDs
+    with pytest.raises(ClientError) as exc:
+        ec2_client.describe_images(ImageIds=["ami-abcd1234", "ami-1234abcd"])
+    assert exc.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert exc.value.response["Error"]["Code"] == "InvalidAMIID.NotFound"
+    assert (
+        exc.value.response["Error"]["Message"]
+        == "The image ids '[ami-abcd1234, ami-1234abcd]' do not exist"
+    )
+
     # Invalid ami pattern
-    img = ec2.Image("not_an_ami_id")
-    with pytest.raises(ClientError):
-        img.load()
+    with pytest.raises(ClientError) as exc:
+        ec2_client.describe_images(ImageIds=["not_an_ami_id"])
+    assert exc.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert exc.value.response["Error"]["Code"] == "InvalidAMIID.Malformed"
+    assert (
+        exc.value.response["Error"]["Message"]
+        == 'Invalid id: "not_an_ami_id" (expecting "ami-...")'
+    )
+
+    # Invalid ami pattern: With multiple IDs
+    with pytest.raises(ClientError) as exc:
+        ec2_client.describe_images(ImageIds=["not_an_ami_id", "another_bad_ami_id"])
+    assert exc.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert exc.value.response["Error"]["Code"] == "InvalidAMIID.Malformed"
+    assert (
+        exc.value.response["Error"]["Message"]
+        == 'Invalid id: "not_an_ami_id" (expecting "ami-...")'
+    )
 
 
-@mock_ec2
+@mock_aws
 def test_ami_registration():
     ec2 = boto3.client("ec2", region_name="us-east-1")
     image_id = ec2.register_image(Name="test-register-image").get("ImageId", "")
@@ -1581,12 +1138,12 @@ def test_ami_registration():
     assert images[0]["State"] == "available", "State should be available."
 
 
-@mock_ec2
+@mock_aws
 def test_ami_filter_wildcard():
     ec2_resource = boto3.resource("ec2", region_name="us-west-1")
     ec2_client = boto3.client("ec2", region_name="us-west-1")
 
-    image_name = str(uuid4())[0:6]
+    image_name = str(uuid4())[0:12]
 
     instance = ec2_resource.create_instances(
         ImageId=EXAMPLE_AMI_ID, MinCount=1, MaxCount=1
@@ -1598,13 +1155,17 @@ def test_ami_filter_wildcard():
 
     my_images = ec2_client.describe_images(
         Owners=[ACCOUNT_ID],
-        Filters=[{"Name": "name", "Values": [f"{image_name[0:4]}*"]}],
+        Filters=[{"Name": "name", "Values": [f"{image_name[0:8]}*"]}],
     )["Images"]
-    my_images.should.have.length_of(1)
+    assert len(my_images) == 1
 
 
-@mock_ec2
+@mock.patch.dict(os.environ, {"MOTO_EC2_LOAD_DEFAULT_AMIS": "true"})
+@mock_aws
+@pytest.mark.requires_clean_slate
 def test_ami_filter_by_owner_id():
+    if settings.TEST_SERVER_MODE:
+        raise SkipTest("Can't set environment variables in ServerMode")
     client = boto3.client("ec2", region_name="us-east-1")
 
     ubuntu_id = "099720109477"
@@ -1621,7 +1182,7 @@ def test_ami_filter_by_owner_id():
     assert len(ubuntu_ids) < len(all_ids)
 
 
-@mock_ec2
+@mock_aws
 def test_ami_filter_by_self():
     ec2_resource = boto3.resource("ec2", region_name="us-west-1")
     ec2_client = boto3.client("ec2", region_name="us-west-1")
@@ -1630,7 +1191,7 @@ def test_ami_filter_by_self():
 
     images = ec2_client.describe_images(Owners=["self"])["Images"]
     image_names = [i["Name"] for i in images]
-    image_names.shouldnt.contain(unique_name)
+    assert unique_name not in image_names
 
     # Create a new image
     instance = ec2_resource.create_instances(
@@ -1640,10 +1201,10 @@ def test_ami_filter_by_self():
 
     images = ec2_client.describe_images(Owners=["self"])["Images"]
     image_names = [i["Name"] for i in images]
-    image_names.should.contain(unique_name)
+    assert unique_name in image_names
 
 
-@mock_ec2
+@mock_aws
 def test_ami_snapshots_have_correct_owner():
     ec2_client = boto3.client("ec2", region_name="us-west-1")
 
@@ -1672,7 +1233,7 @@ def test_ami_snapshots_have_correct_owner():
             assert owner_id == snapshot["OwnerId"]
 
 
-@mock_ec2
+@mock_aws
 def test_create_image_with_tag_specification():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
     client = boto3.client("ec2", region_name="us-west-1")
@@ -1684,7 +1245,7 @@ def test_create_image_with_tag_specification():
                     "Key": "Base_AMI_Name",
                     "Value": "Deep Learning Base AMI (Amazon Linux 2) Version 31.0",
                 },
-                {"Key": "OS_Version", "Value": "AWS Linux 2",},
+                {"Key": "OS_Version", "Value": "AWS Linux 2"},
             ],
         },
     ]
@@ -1697,7 +1258,7 @@ def test_create_image_with_tag_specification():
     )["ImageId"]
 
     image = client.describe_images(ImageIds=[image_id])["Images"][0]
-    image["Tags"].should.equal(tag_specifications[0]["Tags"])
+    assert image["Tags"] == tag_specifications[0]["Tags"]
 
     with pytest.raises(ClientError) as ex:
         client.create_image(
@@ -1711,13 +1272,14 @@ def test_create_image_with_tag_specification():
                 }
             ],
         )
-    ex.value.response["Error"]["Code"].should.equal("InvalidParameterValue")
-    ex.value.response["Error"]["Message"].should.equal(
-        "'invalid-resource-type' is not a valid taggable resource type for this operation."
+    assert ex.value.response["Error"]["Code"] == "InvalidParameterValue"
+    assert (
+        ex.value.response["Error"]["Message"]
+        == "'invalid-resource-type' is not a valid taggable resource type for this operation."
     )
 
 
-@mock_ec2
+@mock_aws
 def test_ami_filter_by_empty_tag():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
     client = boto3.client("ec2", region_name="us-west-1")
@@ -1727,7 +1289,7 @@ def test_ami_filter_by_empty_tag():
     for i in range(10):
         image = client.create_image(
             InstanceId=instance.instance_id,
-            Name="MyAMI{}".format(i),
+            Name=f"MyAMI{i}",
             Description="Test",
         )
 
@@ -1760,37 +1322,315 @@ def test_ami_filter_by_empty_tag():
     assert len(client.describe_images(Filters=images_filter)["Images"]) == 3
 
 
-@mock_ec2
+@mock_aws
+def test_ami_filter_by_source_instance_id():
+    ec2 = boto3.resource("ec2", region_name="us-west-1")
+    client = boto3.client("ec2", region_name="us-west-1")
+
+    instance_ids = [
+        i.instance_id
+        for i in ec2.create_instances(ImageId=EXAMPLE_AMI_ID, MinCount=2, MaxCount=2)
+    ]
+    for i in range(2):
+        client.create_image(
+            InstanceId=instance_ids[i],
+            Name=f"MyAMI{i}",
+            Description=f"Image from instance {i}",
+        )
+    for i in range(2):
+        images_filter = [
+            {
+                "Name": "source-instance-id",
+                "Values": [instance_ids[i]],
+            },
+        ]
+        resp = client.describe_images(Filters=images_filter)
+        images = resp["Images"]
+        assert len(images) == 1
+        assert images[0]["SourceInstanceId"] == instance_ids[i]
+
+
+@mock.patch.dict(os.environ, {"MOTO_EC2_LOAD_DEFAULT_AMIS": "true"})
+@mock_aws
+@pytest.mark.requires_clean_slate
 def test_ami_filter_by_ownerid():
+    if settings.TEST_SERVER_MODE:
+        raise SkipTest("Can't set environment variables in ServerMode")
     ec2_connection = boto3.client("ec2", region_name="us-east-1")
 
     images = ec2_connection.describe_images(
         Filters=[
-            {"Name": "name", "Values": ["amzn-ami-*",]},
-            {"Name": "owner-alias", "Values": ["amazon",]},
+            {"Name": "name", "Values": ["amzn-ami-*"]},
+            {"Name": "owner-alias", "Values": ["amazon"]},
         ]
     )["Images"]
     assert len(images) > 0, "We should have at least 1 image created by amazon"
 
 
-@mock_ec2
+@mock_aws
 def test_ami_filter_by_unknown_ownerid():
     ec2_connection = boto3.client("ec2", region_name="us-east-1")
 
     images = ec2_connection.describe_images(
-        Filters=[{"Name": "owner-alias", "Values": ["unknown",]},]
+        Filters=[{"Name": "owner-alias", "Values": ["unknown"]}]
     )["Images"]
-    images.should.have.length_of(0)
+    assert len(images) == 0
 
 
-@mock_ec2
+@mock_aws()
+def test_ami_filter_without_value():
+    client = boto3.client("ec2", region_name="us-east-1")
+    ec2_resource = boto3.resource("ec2", region_name="us-west-1")
+
+    image_name = str(uuid4())[0:12]
+
+    instance = ec2_resource.create_instances(
+        ImageId=EXAMPLE_AMI_ID, MinCount=1, MaxCount=1
+    )[0]
+    instance.create_image(Name=image_name)
+
+    images = client.describe_images(Filters=[{"Name": "owner-alias", "Values": []}])[
+        "Images"
+    ]
+    assert len(images) == 0
+
+    images = client.describe_images(Filters=[{"Name": "owner-alias"}])["Images"]
+    assert len(images) == 0
+
+    with pytest.raises(ClientError) as err:
+        client.describe_images(Filters=[{"Values": ["123"]}])
+
+    assert err.value.response["Error"]["Code"] == "InvalidParameterValue"
+
+
+@mock_aws
 def test_describe_images_dryrun():
     client = boto3.client("ec2", region_name="us-east-1")
 
     with pytest.raises(ClientError) as ex:
         client.describe_images(DryRun=True)
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(412)
-    ex.value.response["Error"]["Code"].should.equal("DryRunOperation")
-    ex.value.response["Error"]["Message"].should.equal(
-        "An error occurred (DryRunOperation) when calling the DescribeImages operation: Request would have succeeded, but DryRun flag is set"
+    assert_dryrun_error(ex)
+
+
+@mock_aws
+def test_delete_snapshot_from_create_image():
+    ec2_client = boto3.client("ec2", region_name="us-east-1")
+    resp = ec2_client.run_instances(ImageId=EXAMPLE_AMI_ID, MinCount=1, MaxCount=1)
+    instance_id = resp["Instances"][0]["InstanceId"]
+    ami = ec2_client.create_image(InstanceId=instance_id, Name="test")
+    ami_id = ami["ImageId"]
+
+    snapshots = ec2_client.describe_snapshots(
+        Filters=[
+            {
+                "Name": "description",
+                "Values": ["Created by CreateImage(" + instance_id + "*"],
+            }
+        ]
+    )["Snapshots"]
+    snapshot_id = snapshots[0]["SnapshotId"]
+    with pytest.raises(ClientError) as exc:
+        ec2_client.delete_snapshot(SnapshotId=snapshot_id)
+    err = exc.value.response["Error"]
+    assert err["Code"] == "InvalidSnapshot.InUse"
+    assert (
+        err["Message"] == f"The snapshot {snapshot_id} is currently in use by {ami_id}"
     )
+
+    # Deregister the Ami first
+    ec2_client.deregister_image(ImageId=ami_id)
+
+    # Now we can delete the snapshot without problems
+    ec2_client.delete_snapshot(SnapshotId=snapshot_id)
+
+    with pytest.raises(ClientError) as exc:
+        ec2_client.describe_snapshots(SnapshotIds=[snapshot_id])
+    assert exc.value.response["Error"]["Code"] == "InvalidSnapshot.NotFound"
+
+
+@mock.patch.dict(os.environ, {"MOTO_EC2_LOAD_DEFAULT_AMIS": "true"})
+@mock_aws
+@pytest.mark.requires_clean_slate
+def test_ami_describe_image_attribute_product_codes():
+    if settings.TEST_SERVER_MODE:
+        raise SkipTest("Can't set environment variables in ServerMode")
+    # Setup
+    conn = boto3.client("ec2", region_name="us-east-1")
+
+    # test ami loaded from moto/ec2/resources/ami.json
+    test_image = conn.describe_images(
+        Filters=[{"Name": "name", "Values": ["product_codes_test"]}]
+    )
+    image_id = test_image["Images"][0]["ImageId"]
+    expected_codes = [
+        {"ProductCodeId": "code123", "ProductCodeType": "marketplace"},
+        {"ProductCodeId": "code456", "ProductCodeType": "marketplace"},
+    ]
+    # Execute
+    attributes = conn.describe_image_attribute(
+        ImageId=image_id, Attribute="productCodes", DryRun=False
+    )
+
+    # Verify
+    assert "ProductCodes" in attributes
+    assert len(attributes["ProductCodes"]) == 2
+    assert attributes["ProductCodes"] == expected_codes
+
+
+@mock.patch.dict(os.environ, {"MOTO_EC2_LOAD_DEFAULT_AMIS": "true"})
+@mock_aws
+@pytest.mark.requires_clean_slate
+def test_ami_describe_image_attribute():
+    if settings.TEST_SERVER_MODE:
+        raise SkipTest("Can't set environment variables in ServerMode")
+    # Setup
+    conn = boto3.client("ec2", region_name="us-east-1")
+
+    # test ami loaded from moto/ec2/resources/ami.json
+    test_image = conn.describe_images(
+        Filters=[{"Name": "name", "Values": ["product_codes_test"]}]
+    )
+    image_id = test_image["Images"][0]["ImageId"]
+
+    # Execute
+    description = conn.describe_image_attribute(
+        ImageId=image_id, Attribute="description", DryRun=False
+    )
+    boot_mode = conn.describe_image_attribute(
+        ImageId=image_id, Attribute="bootMode", DryRun=False
+    )
+    sriov = conn.describe_image_attribute(
+        ImageId=image_id, Attribute="sriovNetSupport", DryRun=False
+    )
+
+    # Verify
+    assert "Description" in description
+    assert description["Description"]["Value"] == "Test ami for product codes"
+    assert "BootMode" in boot_mode
+    assert boot_mode["BootMode"]["Value"] == "uefi"
+    assert "SriovNetSupport" in sriov
+    assert sriov["SriovNetSupport"]["Value"] == "simple"
+
+
+@mock.patch.dict(os.environ, {"MOTO_EC2_LOAD_DEFAULT_AMIS": "true"})
+@mock_aws
+@pytest.mark.requires_clean_slate
+def test_ami_describe_image_attribute_block_device_fail():
+    if settings.TEST_SERVER_MODE:
+        raise SkipTest("Can't set environment variables in ServerMode")
+    # Setup
+    conn = boto3.client("ec2", region_name="us-east-1")
+    test_image = conn.describe_images()
+    image_id = test_image["Images"][0]["ImageId"]
+
+    # Execute
+    with pytest.raises(ClientError) as e:
+        conn.describe_image_attribute(
+            ImageId=image_id, Attribute="blockDeviceMapping", DryRun=False
+        )
+
+    # Verify
+    assert e.value.response["Error"]["Code"] == "AuthFailure"
+    assert (
+        e.value.response["Error"]["Message"]
+        == "Unauthorized attempt to access restricted resource"
+    )
+    assert e.value.response["ResponseMetadata"]["HTTPStatusCode"] == 401
+
+
+@mock.patch.dict(os.environ, {"MOTO_EC2_LOAD_DEFAULT_AMIS": "true"})
+@mock_aws
+@pytest.mark.requires_clean_slate
+def test_ami_describe_image_attribute_invalid_param():
+    if settings.TEST_SERVER_MODE:
+        raise SkipTest("Can't set environment variables in ServerMode")
+    # Setup
+    conn = boto3.client("ec2", region_name="us-east-1")
+    test_image = conn.describe_images()
+    image_id = test_image["Images"][0]["ImageId"]
+
+    # Execute
+    with pytest.raises(ClientError) as e:
+        conn.describe_image_attribute(
+            ImageId=image_id, Attribute="invalid", DryRun=False
+        )
+
+    # Verify
+    assert e.value.response["Error"]["Code"] == "InvalidRequest"
+    assert e.value.response["Error"]["Message"] == "The request received was invalid"
+
+
+@mock.patch.dict(os.environ, {"MOTO_EC2_LOAD_DEFAULT_AMIS": "true"})
+@mock_aws
+@pytest.mark.requires_clean_slate
+def test_ami_enable_disable():
+    if settings.TEST_SERVER_MODE:
+        raise SkipTest("Can't set environment variables in ServerMode")
+    conn = boto3.client("ec2", region_name="us-east-1")
+    images = conn.describe_images().get("Images", [])
+    image_id = images[0]["ImageId"]
+    assert images[0]["State"] == "available", "State should be available."
+
+    conn.disable_image(ImageId=image_id)
+    images = conn.describe_images(ImageIds=[image_id])["Images"]
+    assert images[0]["State"] == "disabled", "State should be disabled."
+
+    conn.enable_image(ImageId=image_id)
+    images = conn.describe_images(ImageIds=[image_id])["Images"]
+    assert images[0]["State"] == "available", "State should be available."
+
+
+@mock.patch.dict(os.environ, {"MOTO_EC2_LOAD_DEFAULT_AMIS": "true"})
+@mock_aws
+@pytest.mark.requires_clean_slate
+def test_ami_enable_unavailable_error():
+    if settings.TEST_SERVER_MODE:
+        raise SkipTest("Can't set environment variables in ServerMode")
+    conn = boto3.client("ec2", region_name="us-east-1")
+    images = conn.describe_images().get("Images", [])
+    image_id = images[0]["ImageId"]
+    conn.deregister_image(ImageId=image_id)
+
+    with pytest.raises(ClientError) as e:
+        conn.enable_image(ImageId=image_id)
+
+    assert e.value.response["Error"]["Code"] == "InvalidAMIID.Unavailable"
+
+
+@mock.patch.dict(os.environ, {"MOTO_EC2_LOAD_DEFAULT_AMIS": "true"})
+@mock_aws
+@pytest.mark.requires_clean_slate
+def test_ami_disable_unavailable_error():
+    if settings.TEST_SERVER_MODE:
+        raise SkipTest("Can't set environment variables in ServerMode")
+    conn = boto3.client("ec2", region_name="us-east-1")
+    images = conn.describe_images().get("Images", [])
+    image_id = images[0]["ImageId"]
+    conn.deregister_image(ImageId=image_id)
+
+    with pytest.raises(ClientError) as e:
+        conn.disable_image(ImageId=image_id)
+
+    assert e.value.response["Error"]["Code"] == "InvalidAMIID.Unavailable"
+
+
+@mock_aws
+def test_ami_enable_invalid_error():
+    if settings.TEST_SERVER_MODE:
+        raise SkipTest("Can't set environment variables in ServerMode")
+    conn = boto3.client("ec2", region_name="us-east-1")
+    with pytest.raises(ClientError) as e:
+        conn.enable_image(ImageId="invalid")
+
+    assert e.value.response["Error"]["Code"] == "InvalidAMIID.NotFound"
+
+
+@mock_aws
+def test_ami_disable_invalid_error():
+    if settings.TEST_SERVER_MODE:
+        raise SkipTest("Can't set environment variables in ServerMode")
+    conn = boto3.client("ec2", region_name="us-east-1")
+    with pytest.raises(ClientError) as e:
+        conn.disable_image(ImageId="invalid")
+
+    assert e.value.response["Error"]["Code"] == "InvalidAMIID.NotFound"

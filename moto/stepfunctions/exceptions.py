@@ -1,47 +1,70 @@
-from moto.core.exceptions import AWSError
+from moto.core.exceptions import ServiceException
 
 
-class ExecutionAlreadyExists(AWSError):
-    TYPE = "ExecutionAlreadyExists"
-    STATUS = 400
+class StepFunctionsException(ServiceException):
+    pass
 
 
-class ExecutionDoesNotExist(AWSError):
-    TYPE = "ExecutionDoesNotExist"
-    STATUS = 400
+class ExecutionAlreadyExists(StepFunctionsException):
+    code = "ExecutionAlreadyExists"
 
 
-class InvalidArn(AWSError):
-    TYPE = "InvalidArn"
-    STATUS = 400
+class ExecutionDoesNotExist(StepFunctionsException):
+    code = "ExecutionDoesNotExist"
 
 
-class InvalidName(AWSError):
-    TYPE = "InvalidName"
-    STATUS = 400
+class InvalidArn(StepFunctionsException):
+    code = "InvalidArn"
 
 
-class InvalidExecutionInput(AWSError):
-    TYPE = "InvalidExecutionInput"
-    STATUS = 400
+class InvalidName(StepFunctionsException):
+    code = "InvalidName"
 
 
-class StateMachineDoesNotExist(AWSError):
-    TYPE = "StateMachineDoesNotExist"
-    STATUS = 400
+class InvalidExecutionInput(StepFunctionsException):
+    code = "InvalidExecutionInput"
 
 
-class InvalidToken(AWSError):
-    TYPE = "InvalidToken"
-    STATUS = 400
-
-    def __init__(self, message="Invalid token"):
-        super(InvalidToken, self).__init__("Invalid Token: {}".format(message))
+class StateMachineDoesNotExist(StepFunctionsException):
+    code = "StateMachineDoesNotExist"
 
 
-class ResourceNotFound(AWSError):
-    TYPE = "ResourceNotFound"
-    STATUS = 400
+class InvalidToken(StepFunctionsException):
+    code = "InvalidToken"
 
-    def __init__(self, arn):
-        super(ResourceNotFound, self).__init__("Resource not found: '{}'".format(arn))
+    def __init__(self, message: str = "Invalid token"):
+        super().__init__(f"Invalid Token: {message}")
+
+
+class ResourceNotFound(StepFunctionsException):
+    code = "ResourceNotFound"
+
+    def __init__(self, arn: str):
+        super().__init__(f"Resource not found: '{arn}'")
+
+
+class ValidationException(StepFunctionsException):
+    code = "ValidationException"
+
+    def __init__(self, msg: str):
+        super().__init__(msg)
+
+
+class NameTooLongException(ValidationException):
+    def __init__(self, name: str):
+        super().__init__(
+            f"1 validation error detected: Value '{name}' at 'name' "
+            "failed to satisfy constraint: Member must have length less than or equal to 80"
+        )
+
+
+class InvalidEncryptionConfiguration(StepFunctionsException):
+    code = "InvalidEncryptionConfiguration"
+
+
+class ActivityDoesNotExist(StepFunctionsException):
+    code = "ActivityDoesNotExist"
+
+
+class ActivityAlreadyExists(StepFunctionsException):
+    code = "ActivityAlreadyExists"

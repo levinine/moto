@@ -1,96 +1,71 @@
 """EMRContainersBackend class with methods for supported APIs."""
+
 import re
 from datetime import datetime
-from boto3 import Session
+from typing import Any
 
-from moto.core import BaseBackend, BaseModel, ACCOUNT_ID
-from moto.core.utils import iso_8601_datetime_without_milliseconds
-
-from .utils import random_cluster_id, random_job_id, get_partition, paginated_list
-from .exceptions import ResourceNotFoundException
+from moto.core.base_backend import BackendDict, BaseBackend
+from moto.core.common_models import BaseModel
+from moto.core.utils import utcnow
+from moto.utilities.utils import get_partition
 
 from ..config.exceptions import ValidationException
+from .exceptions import ResourceNotFoundException
+from .utils import random_cluster_id, random_job_id
 
-VIRTUAL_CLUSTER_ARN_TEMPLATE = (
-    "arn:{partition}:emr-containers:{region}:"
-    + str(ACCOUNT_ID)
-    + ":/virtualclusters/{virtual_cluster_id}"
-)
+VIRTUAL_CLUSTER_ARN_TEMPLATE = "arn:{partition}:emr-containers:{region}:{account_id}:/virtualclusters/{virtual_cluster_id}"
 
-JOB_ARN_TEMPLATE = (
-    "arn:{partition}:emr-containers:{region}:"
-    + str(ACCOUNT_ID)
-    + ":/virtualclusters/{virtual_cluster_id}/jobruns/{job_id}"
-)
+JOB_ARN_TEMPLATE = "arn:{partition}:emr-containers:{region}:{account_id}:/virtualclusters/{virtual_cluster_id}/jobruns/{job_id}"
 
 # Defaults used for creating a Virtual cluster
 VIRTUAL_CLUSTER_STATUS = "RUNNING"
 JOB_STATUS = "RUNNING"
 
 
-class FakeCluster(BaseModel):
+class VirtualCluster(BaseModel):
     def __init__(
         self,
-        name,
-        container_provider,
-        client_token,
-        region_name,
-        aws_partition,
-        tags=None,
-        virtual_cluster_id=None,
+        name: str,
+        container_provider: dict[str, Any],
+        client_token: str,
+        account_id: str,
+        region_name: str,
+        aws_partition: str,
+        tags: dict[str, str] | None = None,
+        virtual_cluster_id: str | None = None,
     ):
         self.id = virtual_cluster_id or random_cluster_id()
 
         self.name = name
         self.client_token = client_token
         self.arn = VIRTUAL_CLUSTER_ARN_TEMPLATE.format(
-            partition=aws_partition, region=region_name, virtual_cluster_id=self.id
+            partition=aws_partition,
+            region=region_name,
+            account_id=account_id,
+            virtual_cluster_id=self.id,
         )
         self.state = VIRTUAL_CLUSTER_STATUS
         self.container_provider = container_provider
         self.container_provider_id = container_provider["id"]
         self.namespace = container_provider["info"]["eksInfo"]["namespace"]
-        self.creation_date = iso_8601_datetime_without_milliseconds(
-            datetime.today().replace(hour=0, minute=0, second=0, microsecond=0)
-        )
+        self.created_at = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
         self.tags = tags
 
-    def __iter__(self):
-        yield "id", self.id
-        yield "name", self.name
-        yield "arn", self.arn
-        yield "state", self.state
-        yield "containerProvider", self.container_provider
-        yield "createdAt", self.creation_date
-        yield "tags", self.tags
 
-    def to_dict(self):
-        # Format for summary https://docs.aws.amazon.com/emr-on-eks/latest/APIReference/API_DescribeVirtualCluster.html
-        # (response syntax section)
-        return {
-            "id": self.id,
-            "name": self.name,
-            "arn": self.arn,
-            "state": self.state,
-            "containerProvider": self.container_provider,
-            "createdAt": self.creation_date,
-            "tags": self.tags,
-        }
-
-
-class FakeJob(BaseModel):
+class JobRun(BaseModel):
     def __init__(
         self,
-        name,
-        virtual_cluster_id,
-        client_token,
-        execution_role_arn,
-        release_label,
-        job_driver,
-        configuration_overrides,
-        region_name,
-        aws_partition,
-        tags,
+        name: str,
+        virtual_cluster_id: str,
+        client_token: str,
+        execution_role_arn: str,
+        release_label: str,
+        job_driver: str,
+        configuration_overrides: dict[str, Any],
+        account_id: str,
+        region_name: str,
+        aws_partition: str,
+        tags: dict[str, str] | None,
     ):
         self.id = random_job_id()
         self.name = name
@@ -98,6 +73,7 @@ class FakeJob(BaseModel):
         self.arn = JOB_ARN_TEMPLATE.format(
             partition=aws_partition,
             region=region_name,
+            account_id=account_id,
             virtual_cluster_id=self.virtual_cluster_id,
             job_id=self.id,
         )
@@ -107,75 +83,32 @@ class FakeJob(BaseModel):
         self.release_label = release_label
         self.job_driver = job_driver
         self.configuration_overrides = configuration_overrides
-        self.created_at = iso_8601_datetime_without_milliseconds(
-            datetime.today().replace(hour=0, minute=0, second=0, microsecond=0)
-        )
+        self.created_at = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
         self.created_by = None
-        self.finished_at = None
-        self.state_details = None
+        self.finished_at: datetime | None = None
+        self.state_details: str | None = None
         self.failure_reason = None
         self.tags = tags
-
-    def __iter__(self):
-        yield "id", self.id
-        yield "name", self.name
-        yield "virtualClusterId", self.virtual_cluster_id
-        yield "arn", self.arn
-        yield "state", self.state
-        yield "clientToken", self.client_token
-        yield "executionRoleArn", self.execution_role_arn
-        yield "releaseLabel", self.release_label
-        yield "configurationOverrides", self.release_label
-        yield "jobDriver", self.job_driver
-        yield "createdAt", self.created_at
-        yield "createdBy", self.created_by
-        yield "finishedAt", self.finished_at
-        yield "stateDetails", self.state_details
-        yield "failureReason", self.failure_reason
-        yield "tags", self.tags
-
-    def to_dict(self):
-        # Format for summary https://docs.aws.amazon.com/emr-on-eks/latest/APIReference/API_DescribeJobRun.html
-        # (response syntax section)
-        return {
-            "id": self.id,
-            "name": self.name,
-            "virtualClusterId": self.virtual_cluster_id,
-            "arn": self.arn,
-            "state": self.state,
-            "clientToken": self.client_token,
-            "executionRoleArn": self.execution_role_arn,
-            "releaseLabel": self.release_label,
-            "configurationOverrides": self.configuration_overrides,
-            "jobDriver": self.job_driver,
-            "createdAt": self.created_at,
-            "createdBy": self.created_by,
-            "finishedAt": self.finished_at,
-            "stateDetails": self.state_details,
-            "failureReason": self.failure_reason,
-            "tags": self.tags,
-        }
 
 
 class EMRContainersBackend(BaseBackend):
     """Implementation of EMRContainers APIs."""
 
-    def __init__(self, region_name=None):
-        super(EMRContainersBackend, self).__init__()
-        self.virtual_clusters = dict()
+    def __init__(self, region_name: str, account_id: str):
+        super().__init__(region_name, account_id)
+        self.virtual_clusters: dict[str, VirtualCluster] = {}
         self.virtual_cluster_count = 0
-        self.jobs = dict()
+        self.job_runs: dict[str, JobRun] = {}
         self.job_count = 0
-        self.region_name = region_name
         self.partition = get_partition(region_name)
 
-    def reset(self):
-        """Re-initialize all attributes for this instance."""
-        region_name = self.region_name
-        self.__dict__ = {}
-        self.__init__(region_name)
-
-    def create_virtual_cluster(self, name, container_provider, client_token, tags=None):
+    def create_virtual_cluster(
+        self,
+        name: str,
+        container_provider: dict[str, Any],
+        client_token: str,
+        tags: dict[str, str] | None = None,
+    ) -> VirtualCluster:
         occupied_namespaces = [
             virtual_cluster.namespace
             for virtual_cluster in self.virtual_clusters.values()
@@ -186,11 +119,12 @@ class EMRContainersBackend(BaseBackend):
                 "A virtual cluster already exists in the given namespace"
             )
 
-        virtual_cluster = FakeCluster(
+        virtual_cluster = VirtualCluster(
             name=name,
             container_provider=container_provider,
             client_token=client_token,
             tags=tags,
+            account_id=self.account_id,
             region_name=self.region_name,
             aws_partition=self.partition,
         )
@@ -199,84 +133,76 @@ class EMRContainersBackend(BaseBackend):
         self.virtual_cluster_count += 1
         return virtual_cluster
 
-    def delete_virtual_cluster(self, id):
-        if id not in self.virtual_clusters:
+    def delete_virtual_cluster(self, cluster_id: str) -> VirtualCluster:
+        if cluster_id not in self.virtual_clusters:
             raise ValidationException("VirtualCluster does not exist")
 
-        self.virtual_clusters[id].state = "TERMINATED"
-        return self.virtual_clusters[id]
+        self.virtual_clusters[cluster_id].state = "TERMINATED"
+        return self.virtual_clusters[cluster_id]
 
-    def describe_virtual_cluster(self, id):
-        if id not in self.virtual_clusters:
-            raise ValidationException(f"Virtual cluster {id} doesn't exist.")
+    def describe_virtual_cluster(self, cluster_id: str) -> VirtualCluster:
+        if cluster_id not in self.virtual_clusters:
+            raise ValidationException(f"Virtual cluster {cluster_id} doesn't exist.")
 
-        return self.virtual_clusters[id].to_dict()
+        return self.virtual_clusters[cluster_id]
 
     def list_virtual_clusters(
         self,
-        container_provider_id,
-        container_provider_type,
-        created_after,
-        created_before,
-        states,
-        max_results,
-        next_token,
-    ):
-        virtual_clusters = [
-            virtual_cluster.to_dict()
-            for virtual_cluster in self.virtual_clusters.values()
-        ]
+        container_provider_id: str,
+        container_provider_type: str,
+        created_after: datetime,
+        created_before: datetime,
+        states: list[str] | None,
+    ) -> list[VirtualCluster]:
+        virtual_clusters = list(self.virtual_clusters.values())
 
         if container_provider_id:
             virtual_clusters = [
                 virtual_cluster
                 for virtual_cluster in virtual_clusters
-                if virtual_cluster["containerProvider"]["id"] == container_provider_id
+                if virtual_cluster.container_provider["id"] == container_provider_id
             ]
 
         if container_provider_type:
             virtual_clusters = [
                 virtual_cluster
                 for virtual_cluster in virtual_clusters
-                if virtual_cluster["containerProvider"]["type"]
-                == container_provider_type
+                if virtual_cluster.container_provider["type"] == container_provider_type
             ]
 
         if created_after:
             virtual_clusters = [
                 virtual_cluster
                 for virtual_cluster in virtual_clusters
-                if virtual_cluster["createdAt"] >= created_after
+                if virtual_cluster.created_at >= created_after
             ]
 
         if created_before:
             virtual_clusters = [
                 virtual_cluster
                 for virtual_cluster in virtual_clusters
-                if virtual_cluster["createdAt"] <= created_before
+                if virtual_cluster.created_at <= created_before
             ]
 
         if states:
             virtual_clusters = [
                 virtual_cluster
                 for virtual_cluster in virtual_clusters
-                if virtual_cluster["state"] in states
+                if virtual_cluster.state in states
             ]
-        sort_key = "name"
-        return paginated_list(virtual_clusters, sort_key, max_results, next_token)
+        return virtual_clusters
 
     def start_job_run(
         self,
-        name,
-        virtual_cluster_id,
-        client_token,
-        execution_role_arn,
-        release_label,
-        job_driver,
-        configuration_overrides,
-        tags,
-    ):
-
+        name: str,
+        virtual_cluster_id: str,
+        client_token: str,
+        execution_role_arn: str,
+        release_label: str,
+        job_driver: str,
+        configuration_overrides: dict[str, Any],
+        tags: dict[str, str],
+    ) -> JobRun:
         if virtual_cluster_id not in self.virtual_clusters.keys():
             raise ResourceNotFoundException(
                 f"Virtual cluster {virtual_cluster_id} doesn't exist."
@@ -287,7 +213,7 @@ class EMRContainersBackend(BaseBackend):
         ):
             raise ResourceNotFoundException(f"Release {release_label} doesn't exist.")
 
-        job = FakeJob(
+        job_run = JobRun(
             name=name,
             virtual_cluster_id=virtual_cluster_id,
             client_token=client_token,
@@ -296,92 +222,81 @@ class EMRContainersBackend(BaseBackend):
             job_driver=job_driver,
             configuration_overrides=configuration_overrides,
             tags=tags,
+            account_id=self.account_id,
             region_name=self.region_name,
             aws_partition=self.partition,
         )
 
-        self.jobs[job.id] = job
+        self.job_runs[job_run.id] = job_run
         self.job_count += 1
-        return job
+        return job_run
 
-    def cancel_job_run(self, id, virtual_cluster_id):
-
-        if not re.match(r"[a-z,A-Z,0-9]{19}", id):
+    def cancel_job_run(self, job_run_id: str, virtual_cluster_id: str) -> JobRun:
+        if not re.match(r"[a-z,A-Z,0-9]{19}", job_run_id):
             raise ValidationException("Invalid job run short id")
 
-        if id not in self.jobs.keys():
-            raise ResourceNotFoundException(f"Job run {id} doesn't exist.")
+        if job_run_id not in self.job_runs.keys():
+            raise ResourceNotFoundException(f"Job run {job_run_id} doesn't exist.")
 
-        if virtual_cluster_id != self.jobs[id].virtual_cluster_id:
-            raise ResourceNotFoundException(f"Job run {id} doesn't exist.")
+        if virtual_cluster_id != self.job_runs[job_run_id].virtual_cluster_id:
+            raise ResourceNotFoundException(f"Job run {job_run_id} doesn't exist.")
 
-        if self.jobs[id].state in [
+        if self.job_runs[job_run_id].state in [
             "FAILED",
             "CANCELLED",
             "CANCEL_PENDING",
             "COMPLETED",
         ]:
-            raise ValidationException(f"Job run {id} is not in a cancellable state")
+            raise ValidationException(
+                f"Job run {job_run_id} is not in a cancellable state"
+            )
 
-        job = self.jobs[id]
-        job.state = "CANCELLED"
-        job.finished_at = iso_8601_datetime_without_milliseconds(
-            datetime.today().replace(hour=0, minute=1, second=0, microsecond=0)
+        job_run = self.job_runs[job_run_id]
+        job_run.state = "CANCELLED"
+        job_run.finished_at = utcnow().replace(
+            hour=0, minute=1, second=0, microsecond=0
         )
-        job.state_details = "JobRun CANCELLED successfully."
+        job_run.state_details = "JobRun CANCELLED successfully."
 
-        return job
+        return job_run
 
     def list_job_runs(
         self,
-        virtual_cluster_id,
-        created_before,
-        created_after,
-        name,
-        states,
-        max_results,
-        next_token,
-    ):
-        jobs = [job.to_dict() for job in self.jobs.values()]
+        virtual_cluster_id: str,
+        created_before: datetime,
+        created_after: datetime,
+        name: str,
+        states: list[str] | None,
+    ) -> list[JobRun]:
+        jobs = list(self.job_runs.values())
 
-        jobs = [job for job in jobs if job["virtualClusterId"] == virtual_cluster_id]
+        jobs = [job for job in jobs if job.virtual_cluster_id == virtual_cluster_id]
 
         if created_after:
-            jobs = [job for job in jobs if job["createdAt"] >= created_after]
+            jobs = [job for job in jobs if job.created_at >= created_after]
 
         if created_before:
-            jobs = [job for job in jobs if job["createdAt"] <= created_before]
+            jobs = [job for job in jobs if job.created_at <= created_before]
 
         if states:
-            jobs = [job for job in jobs if job["state"] in states]
+            jobs = [job for job in jobs if job.state in states]
 
         if name:
-            jobs = [job for job in jobs if job["name"] in name]
+            jobs = [job for job in jobs if job.name in name]
 
-        sort_key = "id"
-        return paginated_list(jobs, sort_key, max_results, next_token)
+        return jobs
 
-    def describe_job_run(self, id, virtual_cluster_id):
-        if not re.match(r"[a-z,A-Z,0-9]{19}", id):
+    def describe_job_run(self, job_run_id: str, virtual_cluster_id: str) -> JobRun:
+        if not re.match(r"[a-z,A-Z,0-9]{19}", job_run_id):
             raise ValidationException("Invalid job run short id")
 
-        if id not in self.jobs.keys():
-            raise ResourceNotFoundException(f"Job run {id} doesn't exist.")
+        if job_run_id not in self.job_runs.keys():
+            raise ResourceNotFoundException(f"Job run {job_run_id} doesn't exist.")
 
-        if virtual_cluster_id != self.jobs[id].virtual_cluster_id:
-            raise ResourceNotFoundException(f"Job run {id} doesn't exist.")
+        if virtual_cluster_id != self.job_runs[job_run_id].virtual_cluster_id:
+            raise ResourceNotFoundException(f"Job run {job_run_id} doesn't exist.")
 
-        return self.jobs[id].to_dict()
+        return self.job_runs[job_run_id]
 
 
-emrcontainers_backends = {}
-for available_region in Session().get_available_regions("emr-containers"):
-    emrcontainers_backends[available_region] = EMRContainersBackend(available_region)
-for available_region in Session().get_available_regions(
-    "emr-containers", partition_name="aws-us-gov"
-):
-    emrcontainers_backends[available_region] = EMRContainersBackend(available_region)
-for available_region in Session().get_available_regions(
-    "emr-containers", partition_name="aws-cn"
-):
-    emrcontainers_backends[available_region] = EMRContainersBackend(available_region)
+emrcontainers_backends = BackendDict(EMRContainersBackend, "emr-containers")

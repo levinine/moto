@@ -1,17 +1,11 @@
-import sure  # noqa # pylint: disable=unused-import
-
 import moto.server as server
-from moto import mock_kinesisvideoarchivedmedia
-
-"""
-Test the different server responses
-"""
+from moto import mock_aws
 
 
-@mock_kinesisvideoarchivedmedia
+@mock_aws
 def test_kinesisvideoarchivedmedia_server_is_up():
     backend = server.create_backend_app("kinesis-video-archived-media")
     test_client = backend.test_client()
     res = test_client.post("/getHLSStreamingSessionURL")
     # Just checking server is up
-    res.status_code.should.equal(404)
+    assert res.status_code == 404

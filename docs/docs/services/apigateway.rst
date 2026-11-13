@@ -12,16 +12,7 @@
 apigateway
 ==========
 
-|start-h3| Example usage |end-h3|
-
-.. sourcecode:: python
-
-            @mock_apigateway
-            def test_apigateway_behaviour:
-                boto3.client("apigateway")
-                ...
-
-
+.. autoclass:: moto.apigateway.models.APIGatewayBackend
 
 |start-h3| Implemented features for this service |end-h3|
 
@@ -32,6 +23,7 @@ apigateway
 - [ ] create_documentation_part
 - [ ] create_documentation_version
 - [X] create_domain_name
+- [ ] create_domain_name_access_association
 - [X] create_model
 - [X] create_request_validator
 - [X] create_resource
@@ -39,7 +31,7 @@ apigateway
 - [X] create_stage
 - [X] create_usage_plan
 - [X] create_usage_plan_key
-- [ ] create_vpc_link
+- [X] create_vpc_link
 - [X] delete_api_key
 - [X] delete_authorizer
 - [X] delete_base_path_mapping
@@ -48,23 +40,24 @@ apigateway
 - [ ] delete_documentation_part
 - [ ] delete_documentation_version
 - [X] delete_domain_name
-- [ ] delete_gateway_response
+- [ ] delete_domain_name_access_association
+- [X] delete_gateway_response
 - [X] delete_integration
 - [X] delete_integration_response
 - [X] delete_method
 - [X] delete_method_response
-- [ ] delete_model
+- [X] delete_model
 - [X] delete_request_validator
 - [X] delete_resource
 - [X] delete_rest_api
 - [X] delete_stage
 - [X] delete_usage_plan
 - [X] delete_usage_plan_key
-- [ ] delete_vpc_link
+- [X] delete_vpc_link
 - [ ] flush_stage_authorizers_cache
 - [ ] flush_stage_cache
 - [ ] generate_client_certificate
-- [ ] get_account
+- [X] get_account
 - [X] get_api_key
 - [X] get_api_keys
 - [X] get_authorizer
@@ -80,10 +73,15 @@ apigateway
 - [ ] get_documentation_version
 - [ ] get_documentation_versions
 - [X] get_domain_name
+- [ ] get_domain_name_access_associations
 - [X] get_domain_names
 - [ ] get_export
-- [ ] get_gateway_response
-- [ ] get_gateway_responses
+- [X] get_gateway_response
+- [X] get_gateway_responses
+  
+Pagination is not yet implemented
+
+
 - [X] get_integration
 - [X] get_integration_response
 - [X] get_method
@@ -94,7 +92,7 @@ apigateway
 - [X] get_request_validator
 - [X] get_request_validators
 - [X] get_resource
-- [ ] get_resources
+- [X] get_resources
 - [X] get_rest_api
 - [ ] get_rest_apis
 - [ ] get_sdk
@@ -108,35 +106,48 @@ apigateway
 - [X] get_usage_plan_key
 - [X] get_usage_plan_keys
 - [X] get_usage_plans
-- [ ] get_vpc_link
-- [ ] get_vpc_links
+- [X] get_vpc_link
+- [X] get_vpc_links
+  
+Pagination has not yet been implemented
+
+
 - [ ] import_api_keys
 - [ ] import_documentation_parts
-- [ ] import_rest_api
-- [ ] put_gateway_response
-- [ ] put_integration
-- [ ] put_integration_response
-- [ ] put_method
-- [ ] put_method_response
-- [ ] put_rest_api
+- [X] import_rest_api
+  
+Only a subset of the OpenAPI spec 3.x is currently implemented.
+
+
+- [X] put_gateway_response
+- [X] put_integration
+- [X] put_integration_response
+- [X] put_method
+- [X] put_method_response
+- [X] put_rest_api
+  
+Only a subset of the OpenAPI spec 3.x is currently implemented.
+
+
+- [ ] reject_domain_name_access_association
 - [ ] tag_resource
 - [ ] test_invoke_authorizer
 - [ ] test_invoke_method
 - [ ] untag_resource
-- [ ] update_account
+- [X] update_account
 - [X] update_api_key
 - [X] update_authorizer
-- [ ] update_base_path_mapping
+- [X] update_base_path_mapping
 - [ ] update_client_certificate
 - [ ] update_deployment
 - [ ] update_documentation_part
 - [ ] update_documentation_version
-- [X] update_domain_name
+- [ ] update_domain_name
 - [ ] update_gateway_response
 - [ ] update_integration
 - [ ] update_integration_response
-- [X] update_method
-- [X] update_method_response
+- [ ] update_method
+- [ ] update_method_response
 - [ ] update_model
 - [X] update_request_validator
 - [ ] update_resource
@@ -144,5 +155,13 @@ apigateway
 - [X] update_stage
 - [ ] update_usage
 - [X] update_usage_plan
+  
+The following PatchOperations are currently supported:
+add    : Everything except /apiStages/{apidId:stageName}/throttle/ and children
+replace: Everything except /apiStages/{apidId:stageName}/throttle/ and children
+remove : Everything except /apiStages/{apidId:stageName}/throttle/ and children
+copy   : Nothing yet
+
+
 - [ ] update_vpc_link
 

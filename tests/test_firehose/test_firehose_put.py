@@ -1,21 +1,19 @@
 """Unit tests verifying put-related delivery stream APIs."""
-import boto3
-import sure  # noqa pylint: disable=unused-import
 
-from moto import mock_firehose
-from moto import mock_s3
-from moto.core import ACCOUNT_ID
-from moto.core.utils import get_random_hex
-from tests.test_firehose.test_firehose import TEST_REGION
-from tests.test_firehose.test_firehose import sample_s3_dest_config
+import re
+
+import boto3
+
+from moto import mock_aws
+from moto.core import DEFAULT_ACCOUNT_ID as ACCOUNT_ID
+from moto.moto_api._internal import mock_random
+from tests.test_firehose.test_firehose import TEST_REGION, sample_s3_dest_config
 from tests.test_firehose.test_firehose_destination_types import (
     create_redshift_delivery_stream,
 )
 
-S3_LOCATION_CONSTRAINT = "us-west-1"
 
-
-@mock_firehose
+@mock_aws
 def test_put_record_redshift_destination():
     """Test invocations of put_record() to a Redshift destination.
 
@@ -24,7 +22,7 @@ def test_put_record_redshift_destination():
     """
     client = boto3.client("firehose", region_name=TEST_REGION)
 
-    stream_name = f"test_put_record_{get_random_hex(6)}"
+    stream_name = f"test_put_record_{mock_random.get_random_hex(6)}"
     create_redshift_delivery_stream(client, stream_name)
     result = client.put_record(
         DeliveryStreamName=stream_name, Record={"Data": "some test data"}
@@ -32,7 +30,7 @@ def test_put_record_redshift_destination():
     assert set(result.keys()) == {"RecordId", "Encrypted", "ResponseMetadata"}
 
 
-@mock_firehose
+@mock_aws
 def test_put_record_batch_redshift_destination():
     """Test invocations of put_record_batch() to a Redshift destination.
 
@@ -41,7 +39,7 @@ def test_put_record_batch_redshift_destination():
     """
     client = boto3.client("firehose", region_name=TEST_REGION)
 
-    stream_name = f"test_put_record_{get_random_hex(6)}"
+    stream_name = f"test_put_record_{mock_random.get_random_hex(6)}"
     create_redshift_delivery_stream(client, stream_name)
     records = [{"Data": "one"}, {"Data": "two"}, {"Data": "three"}]
     result = client.put_record_batch(DeliveryStreamName=stream_name, Records=records)
@@ -57,13 +55,13 @@ def test_put_record_batch_redshift_destination():
         assert set(response.keys()) == {"RecordId"}
 
 
-@mock_firehose
+@mock_aws
 def test_put_record_http_destination():
     """Test invocations of put_record() to a Http destination."""
     client = boto3.client("firehose", region_name=TEST_REGION)
     s3_dest_config = sample_s3_dest_config()
 
-    stream_name = f"test_put_record_{get_random_hex(6)}"
+    stream_name = f"test_put_record_{mock_random.get_random_hex(6)}"
     client.create_delivery_stream(
         DeliveryStreamName=stream_name,
         HttpEndpointDestinationConfiguration={
@@ -77,13 +75,13 @@ def test_put_record_http_destination():
     assert set(result.keys()) == {"RecordId", "Encrypted", "ResponseMetadata"}
 
 
-@mock_firehose
+@mock_aws
 def test_put_record_batch_http_destination():
     """Test invocations of put_record_batch() to a Http destination."""
     client = boto3.client("firehose", region_name=TEST_REGION)
     s3_dest_config = sample_s3_dest_config()
 
-    stream_name = f"test_put_record_{get_random_hex(6)}"
+    stream_name = f"test_put_record_{mock_random.get_random_hex(6)}"
     client.create_delivery_stream(
         DeliveryStreamName=stream_name,
         HttpEndpointDestinationConfiguration={
@@ -105,8 +103,7 @@ def test_put_record_batch_http_destination():
         assert set(response.keys()) == {"RecordId"}
 
 
-@mock_s3
-@mock_firehose
+@mock_aws
 def test_put_record_batch_extended_s3_destination():
     """Test invocations of put_record_batch() to a S3 destination."""
     client = boto3.client("firehose", region_name=TEST_REGION)
@@ -114,12 +111,15 @@ def test_put_record_batch_extended_s3_destination():
     # Create a S3 bucket.
     bucket_name = "firehosetestbucket"
     s3_client = boto3.client("s3", region_name=TEST_REGION)
-    s3_client.create_bucket(
-        Bucket=bucket_name,
-        CreateBucketConfiguration={"LocationConstraint": S3_LOCATION_CONSTRAINT},
-    )
+    if TEST_REGION == "us-east-1":
+        s3_client.create_bucket(Bucket=bucket_name)
+    else:
+        s3_client.create_bucket(
+            Bucket=bucket_name,
+            CreateBucketConfiguration={"LocationConstraint": TEST_REGION},
+        )
 
-    stream_name = f"test_put_record_{get_random_hex(6)}"
+    stream_name = f"test_put_record_{mock_random.get_random_hex(6)}"
     client.create_delivery_stream(
         DeliveryStreamName=stream_name,
         ExtendedS3DestinationConfiguration={
@@ -146,3 +146,72 @@ def test_put_record_batch_extended_s3_destination():
         Bucket=bucket_name, Key=bucket_objects["Contents"][0]["Key"]
     )
     assert response["Body"].read() == b"onetwothree"
+    assert re.match(
+        r"^[0-9]{4}/[0-9]{2}/[0-9]{2}/[0-9]{2}/", bucket_objects["Contents"][0]["Key"]
+    )
+
+
+@mock_aws
+def test_put_record_snowflake_destination():
+    """Test invocations of put_record() to a Snowflake destination."""
+    client = boto3.client("firehose", region_name=TEST_REGION)
+
+    stream_name = f"test_put_record_{mock_random.get_random_hex(6)}"
+    client.create_delivery_stream(
+        DeliveryStreamName=stream_name,
+        SnowflakeDestinationConfiguration={
+            "RoleARN": f"arn:aws:iam::{ACCOUNT_ID}:role/firehose_delivery_role",
+            "AccountUrl": f"fake-account.{TEST_REGION}.snowflakecomputing.com",
+            "Database": "myDatabase",
+            "Schema": "mySchema",
+            "Table": "myTable",
+            "S3BackupMode": "FailedDataOnly",
+            "S3Configuration": {
+                "RoleARN": f"arn:aws:iam::{ACCOUNT_ID}:role/firehose_delivery_role",
+                "BucketARN": "arn:aws:s3:::firehose-test",
+            },
+        },
+    )
+    result = client.put_record(
+        DeliveryStreamName=stream_name, Record={"Data": "some test data"}
+    )
+
+    assert set(result.keys()) == {"RecordId", "Encrypted", "ResponseMetadata"}
+    assert result["Encrypted"] is False
+    assert result["ResponseMetadata"]["HTTPStatusCode"] == 200
+
+
+@mock_aws
+def test_put_record_batch_snowflake_destination():
+    """Test invocations of put_record_batch() to a Snowflake destination."""
+    client = boto3.client("firehose", region_name=TEST_REGION)
+
+    stream_name = f"test_put_record_{mock_random.get_random_hex(6)}"
+    client.create_delivery_stream(
+        DeliveryStreamName=stream_name,
+        SnowflakeDestinationConfiguration={
+            "RoleARN": f"arn:aws:iam::{ACCOUNT_ID}:role/firehose_delivery_role",
+            "AccountUrl": f"fake-account.{TEST_REGION}.snowflakecomputing.com",
+            "Database": "myDatabase",
+            "Schema": "mySchema",
+            "Table": "myTable",
+            "S3BackupMode": "FailedDataOnly",
+            "S3Configuration": {
+                "RoleARN": f"arn:aws:iam::{ACCOUNT_ID}:role/firehose_delivery_role",
+                "BucketARN": "arn:aws:s3:::firehose-test",
+            },
+        },
+    )
+
+    records = [{"Data": "one"}, {"Data": "two"}, {"Data": "three"}]
+    result = client.put_record_batch(DeliveryStreamName=stream_name, Records=records)
+
+    assert set(result.keys()) == {
+        "RequestResponses",
+        "FailedPutCount",
+        "ResponseMetadata",
+        "Encrypted",
+    }
+    assert len(result["RequestResponses"]) == 3
+    assert result["Encrypted"] is False
+    assert result["ResponseMetadata"]["HTTPStatusCode"] == 200

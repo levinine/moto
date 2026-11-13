@@ -1,10 +1,12 @@
-from moto.core.exceptions import RESTError
+from typing import Any
+
+from moto.core.exceptions import ServiceException
 
 
-class STSClientError(RESTError):
-    code = 400
+class STSClientError(ServiceException):
+    pass
 
 
 class STSValidationError(STSClientError):
-    def __init__(self, *args, **kwargs):
-        super(STSValidationError, self).__init__("ValidationError", *args, **kwargs)
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__("ValidationError", *args, **kwargs)

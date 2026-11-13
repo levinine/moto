@@ -1,6 +1,13 @@
-def make_arn_for_dashboard(account_id, name):
-    return "arn:aws:cloudwatch::{0}dashboard/{1}".format(account_id, name)
+from moto.utilities.utils import get_partition
 
 
-def make_arn_for_alarm(region, account_id, alarm_name):
-    return "arn:aws:cloudwatch:{0}:{1}:alarm:{2}".format(region, account_id, alarm_name)
+def make_arn_for_dashboard(account_id: str, region_name: str, name: str) -> str:
+    return f"arn:{get_partition(region_name)}:cloudwatch::{account_id}:dashboard/{name}"
+
+
+def make_arn_for_alarm(region: str, account_id: str, alarm_name: str) -> str:
+    return f"arn:{get_partition(region)}:cloudwatch:{region}:{account_id}:alarm:{alarm_name}"
+
+
+def make_arn_for_rule(region: str, account_id: str, rule_name: str) -> str:
+    return f"arn:{get_partition(region)}:cloudwatch:{region}:{account_id}:insight-rule/{rule_name}"

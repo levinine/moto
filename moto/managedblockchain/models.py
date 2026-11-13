@@ -1,31 +1,29 @@
-from __future__ import division
-
 import datetime
 import re
+from typing import Any
 
-from boto3 import Session
-
-from moto.core import BaseBackend, BaseModel
+from moto.core.base_backend import BackendDict, BaseBackend
+from moto.core.common_models import BaseModel
+from moto.core.utils import utcnow
 
 from .exceptions import (
     BadRequestException,
-    ResourceNotFoundException,
     InvalidRequestException,
-    ResourceLimitExceededException,
     ResourceAlreadyExistsException,
+    ResourceLimitExceededException,
+    ResourceNotFoundException,
 )
-
 from .utils import (
-    get_network_id,
-    get_member_id,
-    get_proposal_id,
-    get_invitation_id,
-    member_name_exist_in_network,
-    number_of_members_in_network,
     admin_password_ok,
+    get_invitation_id,
+    get_member_id,
+    get_network_id,
     get_node_id,
-    number_of_nodes_in_member,
+    get_proposal_id,
+    member_name_exist_in_network,
     nodes_in_member,
+    number_of_members_in_network,
+    number_of_nodes_in_member,
 )
 
 FRAMEWORKS = [
@@ -36,7 +34,7 @@ FRAMEWORKVERSIONS = [
     "1.2",
 ]
 
-EDITIONS = {
+EDITIONS: dict[str, Any] = {
     "STARTER": {
         "MaxMembers": 5,
         "MaxNodesPerMember": 2,
@@ -55,203 +53,130 @@ VOTEVALUES = ["YES", "NO"]
 class ManagedBlockchainNetwork(BaseModel):
     def __init__(
         self,
-        id,
-        name,
-        framework,
-        frameworkversion,
-        frameworkconfiguration,
-        voting_policy,
-        member_configuration,
-        region,
-        description=None,
+        network_id: str,
+        name: str,
+        framework: str,
+        frameworkversion: str,
+        frameworkconfiguration: dict[str, Any],
+        voting_policy: dict[str, Any],
+        member_configuration: dict[str, Any],
+        region: str,
+        description: str | None = None,
     ):
-        self.creationdate = datetime.datetime.utcnow()
-        self.id = id
+        self.creationdate = utcnow()
+        self.id = network_id
         self.name = name
         self.description = description
         self.framework = framework
-        self.frameworkversion = frameworkversion
-        self.frameworkconfiguration = frameworkconfiguration
+        self.framework_version = frameworkversion
+        self.framework_configuration = frameworkconfiguration
         self.voting_policy = voting_policy
         self.member_configuration = member_configuration
         self.region = region
 
-    @property
-    def network_name(self):
-        return self.name
-
-    @property
-    def network_framework(self):
-        return self.framework
-
-    @property
-    def network_framework_version(self):
-        return self.frameworkversion
-
-    @property
-    def network_creationdate(self):
-        return self.creationdate.strftime("%Y-%m-%dT%H:%M:%S.%f%z")
-
-    @property
-    def network_description(self):
-        return self.description
-
-    @property
-    def network_edition(self):
-        return self.frameworkconfiguration["Fabric"]["Edition"]
-
-    @property
-    def vote_pol_proposal_duration(self):
-        return self.voting_policy["ApprovalThresholdPolicy"]["ProposalDurationInHours"]
-
-    @property
-    def vote_pol_threshold_percentage(self):
-        return self.voting_policy["ApprovalThresholdPolicy"]["ThresholdPercentage"]
-
-    @property
-    def vote_pol_threshold_comparator(self):
-        return self.voting_policy["ApprovalThresholdPolicy"]["ThresholdComparator"]
-
-    def to_dict(self):
-        # Format for list_networks
-        d = {
-            "Id": self.id,
-            "Name": self.name,
-            "Framework": self.framework,
-            "FrameworkVersion": self.frameworkversion,
-            "Status": "AVAILABLE",
-            "CreationDate": self.creationdate.strftime("%Y-%m-%dT%H:%M:%S.%f%z"),
-        }
-        if self.description is not None:
-            d["Description"] = self.description
-        return d
-
-    def get_format(self):
-        # Format for get_network
-        frameworkattributes = {
+        self.framework_attributes = {
             "Fabric": {
-                "OrderingServiceEndpoint": "orderer.{0}.managedblockchain.{1}.amazonaws.com:30001".format(
-                    self.id.lower(), self.region
-                ),
-                "Edition": self.frameworkconfiguration["Fabric"]["Edition"],
+                "OrderingServiceEndpoint": f"orderer.{self.id.lower()}.managedblockchain.{self.region}.amazonaws.com:30001",
+                "Edition": self.framework_configuration["Fabric"]["Edition"],
             }
         }
 
-        vpcendpointname = "com.amazonaws.{0}.managedblockchain.{1}".format(
-            self.region, self.id.lower()
-        )
+    @property
+    def network_name(self) -> str:
+        return self.name
 
-        d = {
-            "Id": self.id,
-            "Name": self.name,
-            "Framework": self.framework,
-            "FrameworkVersion": self.frameworkversion,
-            "FrameworkAttributes": frameworkattributes,
-            "VpcEndpointServiceName": vpcendpointname,
-            "VotingPolicy": self.voting_policy,
-            "Status": "AVAILABLE",
-            "CreationDate": self.creationdate.strftime("%Y-%m-%dT%H:%M:%S.%f%z"),
-        }
-        if self.description is not None:
-            d["Description"] = self.description
-        return d
+    @property
+    def network_framework(self) -> str:
+        return self.framework
+
+    @property
+    def network_creationdate(self) -> str:
+        return self.creationdate.strftime("%Y-%m-%dT%H:%M:%S.%f%z")
+
+    @property
+    def network_description(self) -> str | None:
+        return self.description
+
+    @property
+    def network_edition(self) -> str:
+        return self.framework_configuration["Fabric"]["Edition"]
+
+    @property
+    def vote_pol_proposal_duration(self) -> float:
+        return self.voting_policy["ApprovalThresholdPolicy"]["ProposalDurationInHours"]
+
+    @property
+    def vote_pol_threshold_percentage(self) -> float:
+        return self.voting_policy["ApprovalThresholdPolicy"]["ThresholdPercentage"]
+
+    @property
+    def vote_pol_threshold_comparator(self) -> str:
+        return self.voting_policy["ApprovalThresholdPolicy"]["ThresholdComparator"]
 
 
 class ManagedBlockchainProposal(BaseModel):
     def __init__(
         self,
-        id,
-        networkid,
-        memberid,
-        membername,
-        numofmembers,
-        actions,
-        network_expirtation,
-        network_threshold,
-        network_threshold_comp,
-        description=None,
+        proposal_id: str,
+        networkid: str,
+        memberid: str,
+        membername: str,
+        numofmembers: int,
+        actions: dict[str, Any],
+        network_expiration: float,
+        network_threshold: float,
+        network_threshold_comp: str,
+        description: str | None = None,
     ):
         # In general, passing all values instead of creating
         # an apparatus to look them up
-        self.id = id
+        self.proposal_id = proposal_id
         self.networkid = networkid
         self.memberid = memberid
         self.membername = membername
         self.numofmembers = numofmembers
         self.actions = actions
-        self.network_expirtation = network_expirtation
+        self.network_expiration = network_expiration
         self.network_threshold = network_threshold
         self.network_threshold_comp = network_threshold_comp
         self.description = description
 
-        self.creationdate = datetime.datetime.utcnow()
-        self.expirtationdate = self.creationdate + datetime.timedelta(
-            hours=network_expirtation
+        self.creationdate = utcnow()
+        self.expirationdate = self.creationdate + datetime.timedelta(
+            hours=network_expiration
         )
         self.yes_vote_count = 0
         self.no_vote_count = 0
         self.outstanding_vote_count = self.numofmembers
         self.status = "IN_PROGRESS"
-        self.votes = {}
+        self.votes: dict[str, dict[str, str]] = {}
 
     @property
-    def network_id(self):
+    def network_id(self) -> str:
         return self.networkid
 
     @property
-    def proposal_status(self):
+    def proposal_status(self) -> str:
         return self.status
 
     @property
-    def proposal_votes(self):
+    def proposal_votes(self) -> dict[str, Any]:  # type: ignore[misc]
         return self.votes
 
-    def proposal_actions(self, action_type):
-        default_return = []
+    def proposal_actions(self, action_type: str) -> list[dict[str, Any]]:
         if action_type.lower() == "invitations":
             if "Invitations" in self.actions:
                 return self.actions["Invitations"]
         elif action_type.lower() == "removals":
             if "Removals" in self.actions:
                 return self.actions["Removals"]
-        return default_return
+        return []
 
-    def check_to_expire_proposal(self):
-        if datetime.datetime.utcnow() > self.expirtationdate:
+    def check_to_expire_proposal(self) -> None:
+        if utcnow() > self.expirationdate:
             self.status = "EXPIRED"
 
-    def to_dict(self):
-        # Format for list_proposals
-        d = {
-            "ProposalId": self.id,
-            "ProposedByMemberId": self.memberid,
-            "ProposedByMemberName": self.membername,
-            "Status": self.status,
-            "CreationDate": self.creationdate.strftime("%Y-%m-%dT%H:%M:%S.%f%z"),
-            "ExpirationDate": self.expirtationdate.strftime("%Y-%m-%dT%H:%M:%S.%f%z"),
-        }
-        return d
-
-    def get_format(self):
-        # Format for get_proposal
-        d = {
-            "ProposalId": self.id,
-            "NetworkId": self.networkid,
-            "Actions": self.actions,
-            "ProposedByMemberId": self.memberid,
-            "ProposedByMemberName": self.membername,
-            "Status": self.status,
-            "CreationDate": self.creationdate.strftime("%Y-%m-%dT%H:%M:%S.%f%z"),
-            "ExpirationDate": self.expirtationdate.strftime("%Y-%m-%dT%H:%M:%S.%f%z"),
-            "YesVoteCount": self.yes_vote_count,
-            "NoVoteCount": self.no_vote_count,
-            "OutstandingVoteCount": self.outstanding_vote_count,
-        }
-        if self.description is not None:
-            d["Description"] = self.description
-        return d
-
-    def set_vote(self, votermemberid, votermembername, vote):
+    def set_vote(self, votermemberid: str, votermembername: str, vote: str) -> None:
         if vote.upper() == "YES":
             self.yes_vote_count += 1
         else:
@@ -287,246 +212,171 @@ class ManagedBlockchainProposal(BaseModel):
             self.status = "REJECTED"
 
 
+class ManagedBlockchainNetworkSummary(BaseModel):
+    def __init__(
+        self,
+        networkid: str,
+        networkname: str,
+        networkdescription: str | None,
+        networkframework: str,
+        networkframeworkversion: str,
+        networkcreationdate: str,
+    ):
+        self.id = networkid
+        self.name = networkname
+        self.networkdescription = networkdescription
+        self.framework = networkframework
+        self.framework_workversion = networkframeworkversion
+        self.status = "AVAILABLE"
+        self.creation_date = networkcreationdate
+
+
 class ManagedBlockchainInvitation(BaseModel):
     def __init__(
         self,
-        id,
-        networkid,
-        networkname,
-        networkframework,
-        networkframeworkversion,
-        networkcreationdate,
-        region,
-        networkdescription=None,
+        invitation_id: str,
+        networkid: str,
+        networkname: str,
+        networkframework: str,
+        networkframeworkversion: str,
+        networkcreationdate: str,
+        region: str,
+        networkdescription: str | None = None,
     ):
-        self.id = id
-        self.networkid = networkid
-        self.networkname = networkname
-        self.networkdescription = networkdescription
-        self.networkframework = networkframework
-        self.networkframeworkversion = networkframeworkversion
-        self.networkstatus = "AVAILABLE"
-        self.networkcreationdate = networkcreationdate
+        self.id = invitation_id
+        self.network_summary = ManagedBlockchainNetworkSummary(
+            networkid=networkid,
+            networkname=networkname,
+            networkdescription=networkdescription,
+            networkframework=networkframework,
+            networkframeworkversion=networkframeworkversion,
+            networkcreationdate=networkcreationdate,
+        )
+
         self.status = "PENDING"
         self.region = region
 
-        self.creationdate = datetime.datetime.utcnow()
-        self.expirtationdate = self.creationdate + datetime.timedelta(days=7)
+        self.creationdate = utcnow()
+        self.expirationdate = self.creationdate + datetime.timedelta(days=7)
 
     @property
-    def invitation_status(self):
+    def invitation_status(self) -> str:
         return self.status
 
     @property
-    def invitation_networkid(self):
-        return self.networkid
+    def invitation_networkid(self) -> str:
+        return self.network_summary.id
 
-    def to_dict(self):
-        d = {
-            "InvitationId": self.id,
-            "CreationDate": self.creationdate.strftime("%Y-%m-%dT%H:%M:%S.%f%z"),
-            "ExpirationDate": self.expirtationdate.strftime("%Y-%m-%dT%H:%M:%S.%f%z"),
-            "Status": self.status,
-            "NetworkSummary": {
-                "Id": self.networkid,
-                "Name": self.networkname,
-                "Framework": self.networkframework,
-                "FrameworkVersion": self.networkframeworkversion,
-                "Status": self.networkstatus,
-                "CreationDate": self.networkcreationdate,
-            },
-        }
-        if self.networkdescription is not None:
-            d["NetworkSummary"]["Description"] = self.networkdescription
-        return d
-
-    def accept_invitation(self):
+    def accept_invitation(self) -> None:
         self.status = "ACCEPTED"
 
-    def reject_invitation(self):
+    def reject_invitation(self) -> None:
         self.status = "REJECTED"
 
-    def set_network_status(self, network_status):
-        self.networkstatus = network_status
+    def set_network_status(self, network_status: str) -> None:
+        self.network_summary.status = network_status
 
 
 class ManagedBlockchainMember(BaseModel):
     def __init__(
-        self, id, networkid, member_configuration, region,
+        self,
+        member_id: str,
+        networkid: str,
+        member_configuration: dict[str, Any],
+        region: str,
     ):
-        self.creationdate = datetime.datetime.utcnow()
-        self.id = id
-        self.networkid = networkid
+        self.creationdate = utcnow()
+        self.id = member_id
+        self.network_id = networkid
         self.member_configuration = member_configuration
+        self.log_publishing_configuration = member_configuration[
+            "LogPublishingConfiguration"
+        ]
+        self.description = member_configuration.get("Description")
         self.status = "AVAILABLE"
         self.region = region
-        self.description = None
 
-    @property
-    def network_id(self):
-        return self.networkid
-
-    @property
-    def name(self):
-        return self.member_configuration["Name"]
-
-    @property
-    def member_status(self):
-        return self.status
-
-    def to_dict(self):
-        # Format for list_members
-        d = {
-            "Id": self.id,
-            "Name": self.member_configuration["Name"],
-            "Status": self.status,
-            "CreationDate": self.creationdate.strftime("%Y-%m-%dT%H:%M:%S.%f%z"),
-            "IsOwned": True,
-        }
-        if "Description" in self.member_configuration:
-            self.description = self.member_configuration["Description"]
-        return d
-
-    def get_format(self):
-        # Format for get_member
-        frameworkattributes = {
+        self.framework_attributes = {
             "Fabric": {
                 "AdminUsername": self.member_configuration["FrameworkConfiguration"][
                     "Fabric"
                 ]["AdminUsername"],
-                "CaEndpoint": "ca.{0}.{1}.managedblockchain.{2}.amazonaws.com:30002".format(
-                    self.id.lower(), self.networkid.lower(), self.region
-                ),
+                "CaEndpoint": f"ca.{self.id.lower()}.{self.network_id.lower()}.managedblockchain.{self.region}.amazonaws.com:30002",
             }
         }
 
-        d = {
-            "NetworkId": self.networkid,
-            "Id": self.id,
-            "Name": self.name,
-            "FrameworkAttributes": frameworkattributes,
-            "LogPublishingConfiguration": self.member_configuration[
-                "LogPublishingConfiguration"
-            ],
-            "Status": self.status,
-            "CreationDate": self.creationdate.strftime("%Y-%m-%dT%H:%M:%S.%f%z"),
-        }
-        if "Description" in self.member_configuration:
-            d["Description"] = self.description
-        return d
+    @property
+    def name(self) -> str:
+        return self.member_configuration["Name"]
 
-    def delete(self):
+    @property
+    def member_status(self) -> str:
+        return self.status
+
+    def delete(self) -> None:
         self.status = "DELETED"
 
-    def update(self, logpublishingconfiguration):
-        self.member_configuration[
-            "LogPublishingConfiguration"
-        ] = logpublishingconfiguration
+    def update(self, logpublishingconfiguration: dict[str, Any]) -> None:
+        self.log_publishing_configuration = logpublishingconfiguration
 
 
 class ManagedBlockchainNode(BaseModel):
     def __init__(
         self,
-        id,
-        networkid,
-        memberid,
-        availabilityzone,
-        instancetype,
-        logpublishingconfiguration,
-        region,
+        node_id: str,
+        networkid: str,
+        memberid: str,
+        availabilityzone: str,
+        instancetype: str,
+        logpublishingconfiguration: dict[str, Any],
+        region: str,
     ):
-        self.creationdate = datetime.datetime.utcnow()
-        self.id = id
-        self.instancetype = instancetype
-        self.networkid = networkid
-        self.memberid = memberid
-        self.logpublishingconfiguration = logpublishingconfiguration
+        self.creation_date = utcnow()
+        self.id = node_id
+        self.instance_type = instancetype
+        self.network_id = networkid
+        self.member_id = memberid
+        self.log_publishing_configuration = logpublishingconfiguration
         self.region = region
         self.status = "AVAILABLE"
-        self.availabilityzone = availabilityzone
-
-    @property
-    def member_id(self):
-        return self.memberid
-
-    @property
-    def node_status(self):
-        return self.status
-
-    def to_dict(self):
-        # Format for list_nodes
-        d = {
-            "Id": self.id,
-            "Status": self.status,
-            "CreationDate": self.creationdate.strftime("%Y-%m-%dT%H:%M:%S.%f%z"),
-            "AvailabilityZone": self.availabilityzone,
-            "InstanceType": self.instancetype,
-        }
-        return d
-
-    def get_format(self):
-        # Format for get_node
-        frameworkattributes = {
+        self.availability_zone = availabilityzone
+        self.framework_attributes = {
             "Fabric": {
-                "PeerEndpoint": "{0}.{1}.{2}.managedblockchain.{3}.amazonaws.com:30003".format(
-                    self.id.lower(),
-                    self.networkid.lower(),
-                    self.memberid.lower(),
-                    self.region,
-                ),
-                "PeerEventEndpoint": "{0}.{1}.{2}.managedblockchain.{3}.amazonaws.com:30004".format(
-                    self.id.lower(),
-                    self.networkid.lower(),
-                    self.memberid.lower(),
-                    self.region,
-                ),
+                "PeerEndpoint": f"{self.id.lower()}.{self.network_id.lower()}.{self.member_id.lower()}.managedblockchain.{self.region}.amazonaws.com:30003",
+                "PeerEventEndpoint": f"{self.id.lower()}.{self.network_id.lower()}.{self.member_id.lower()}.managedblockchain.{self.region}.amazonaws.com:30004",
             }
         }
 
-        d = {
-            "NetworkId": self.networkid,
-            "MemberId": self.memberid,
-            "Id": self.id,
-            "InstanceType": self.instancetype,
-            "AvailabilityZone": self.availabilityzone,
-            "FrameworkAttributes": frameworkattributes,
-            "LogPublishingConfiguration": self.logpublishingconfiguration,
-            "Status": self.status,
-            "CreationDate": self.creationdate.strftime("%Y-%m-%dT%H:%M:%S.%f%z"),
-        }
-        return d
+    @property
+    def node_status(self) -> str:
+        return self.status
 
-    def delete(self):
+    def delete(self) -> None:
         self.status = "DELETED"
 
-    def update(self, logpublishingconfiguration):
+    def update(self, logpublishingconfiguration: dict[str, Any]) -> None:
         self.logpublishingconfiguration = logpublishingconfiguration
 
 
 class ManagedBlockchainBackend(BaseBackend):
-    def __init__(self, region_name):
-        self.networks = {}
-        self.members = {}
-        self.proposals = {}
-        self.invitations = {}
-        self.nodes = {}
-        self.region_name = region_name
-
-    def reset(self):
-        region_name = self.region_name
-        self.__dict__ = {}
-        self.__init__(region_name)
+    def __init__(self, region_name: str, account_id: str):
+        super().__init__(region_name, account_id)
+        self.networks: dict[str, ManagedBlockchainNetwork] = {}
+        self.members: dict[str, ManagedBlockchainMember] = {}
+        self.proposals: dict[str, ManagedBlockchainProposal] = {}
+        self.invitations: dict[str, ManagedBlockchainInvitation] = {}
+        self.nodes: dict[str, ManagedBlockchainNode] = {}
 
     def create_network(
         self,
-        name,
-        framework,
-        frameworkversion,
-        frameworkconfiguration,
-        voting_policy,
-        member_configuration,
-        description=None,
-    ):
+        name: str,
+        framework: str,
+        frameworkversion: str,
+        frameworkconfiguration: dict[str, Any],
+        voting_policy: dict[str, Any],
+        member_configuration: dict[str, Any],
+        description: str | None = None,
+    ) -> dict[str, str]:
         # Check framework
         if framework not in FRAMEWORKS:
             raise BadRequestException("CreateNetwork", "Invalid request body")
@@ -535,9 +385,7 @@ class ManagedBlockchainBackend(BaseBackend):
         if frameworkversion not in FRAMEWORKVERSIONS:
             raise BadRequestException(
                 "CreateNetwork",
-                "Invalid version {0} requested for framework HYPERLEDGER_FABRIC".format(
-                    frameworkversion
-                ),
+                f"Invalid version {frameworkversion} requested for framework HYPERLEDGER_FABRIC",
             )
 
         # Check edition
@@ -550,14 +398,14 @@ class ManagedBlockchainBackend(BaseBackend):
         # Generate memberid ID and initial member
         member_id = get_member_id()
         self.members[member_id] = ManagedBlockchainMember(
-            id=member_id,
+            member_id=member_id,
             networkid=network_id,
             member_configuration=member_configuration,
             region=self.region_name,
         )
 
         self.networks[network_id] = ManagedBlockchainNetwork(
-            id=network_id,
+            network_id=network_id,
             name=name,
             framework=framework,
             frameworkversion=frameworkversion,
@@ -569,32 +417,35 @@ class ManagedBlockchainBackend(BaseBackend):
         )
 
         # Return the network and member ID
-        d = {"NetworkId": network_id, "MemberId": member_id}
-        return d
+        return {"NetworkId": network_id, "MemberId": member_id}
 
-    def list_networks(self):
-        return self.networks.values()
+    def list_networks(self) -> list[ManagedBlockchainNetwork]:
+        return list(self.networks.values())
 
-    def get_network(self, network_id):
+    def get_network(self, network_id: str) -> ManagedBlockchainNetwork:
         if network_id not in self.networks:
             raise ResourceNotFoundException(
-                "GetNetwork", "Network {0} not found.".format(network_id)
+                "GetNetwork", f"Network {network_id} not found."
             )
-        return self.networks.get(network_id)
+        return self.networks[network_id]
 
     def create_proposal(
-        self, networkid, memberid, actions, description=None,
-    ):
+        self,
+        networkid: str,
+        memberid: str,
+        actions: dict[str, Any],
+        description: str | None = None,
+    ) -> dict[str, str]:
         # Check if network exists
         if networkid not in self.networks:
             raise ResourceNotFoundException(
-                "CreateProposal", "Network {0} not found.".format(networkid)
+                "CreateProposal", f"Network {networkid} not found."
             )
 
         # Check if member exists
         if memberid not in self.members:
             raise ResourceNotFoundException(
-                "CreateProposal", "Member {0} not found.".format(memberid)
+                "CreateProposal", f"Member {memberid} not found."
             )
 
         # CLI docs say that Invitations and Removals cannot both be passed - but it does
@@ -619,211 +470,191 @@ class ManagedBlockchainBackend(BaseBackend):
         proposal_id = get_proposal_id()
 
         self.proposals[proposal_id] = ManagedBlockchainProposal(
-            id=proposal_id,
+            proposal_id=proposal_id,
             networkid=networkid,
             memberid=memberid,
-            membername=self.members.get(memberid).name,
+            membername=self.members[memberid].name,
             numofmembers=number_of_members_in_network(self.members, networkid),
             actions=actions,
-            network_expirtation=self.networks.get(networkid).vote_pol_proposal_duration,
-            network_threshold=self.networks.get(
+            network_expiration=self.networks[networkid].vote_pol_proposal_duration,
+            network_threshold=self.networks[networkid].vote_pol_threshold_percentage,
+            network_threshold_comp=self.networks[
                 networkid
-            ).vote_pol_threshold_percentage,
-            network_threshold_comp=self.networks.get(
-                networkid
-            ).vote_pol_threshold_comparator,
+            ].vote_pol_threshold_comparator,
             description=description,
         )
 
         # Return the proposal ID
-        d = {"ProposalId": proposal_id}
-        return d
+        return {"ProposalId": proposal_id}
 
-    def list_proposals(self, networkid):
+    def list_proposals(self, networkid: str) -> list[ManagedBlockchainProposal]:
         # Check if network exists
         if networkid not in self.networks:
             raise ResourceNotFoundException(
-                "ListProposals", "Network {0} not found.".format(networkid)
+                "ListProposals", f"Network {networkid} not found."
             )
 
         proposalsfornetwork = []
         for proposal_id in self.proposals:
-            if self.proposals.get(proposal_id).network_id == networkid:
+            if self.proposals[proposal_id].network_id == networkid:
                 # See if any are expired
-                self.proposals.get(proposal_id).check_to_expire_proposal()
+                self.proposals[proposal_id].check_to_expire_proposal()
                 proposalsfornetwork.append(self.proposals[proposal_id])
         return proposalsfornetwork
 
-    def get_proposal(self, networkid, proposalid):
+    def get_proposal(
+        self, networkid: str, proposalid: str
+    ) -> ManagedBlockchainProposal:
         # Check if network exists
         if networkid not in self.networks:
             raise ResourceNotFoundException(
-                "GetProposal", "Network {0} not found.".format(networkid)
+                "GetProposal", f"Network {networkid} not found."
             )
 
         if proposalid not in self.proposals:
             raise ResourceNotFoundException(
-                "GetProposal", "Proposal {0} not found.".format(proposalid)
+                "GetProposal", f"Proposal {proposalid} not found."
             )
 
         # See if it needs to be set to expipred
-        self.proposals.get(proposalid).check_to_expire_proposal()
-        return self.proposals.get(proposalid)
+        self.proposals[proposalid].check_to_expire_proposal()
+        return self.proposals[proposalid]
 
-    def vote_on_proposal(self, networkid, proposalid, votermemberid, vote):
+    def vote_on_proposal(
+        self, networkid: str, proposalid: str, votermemberid: str, vote: str
+    ) -> None:
         # Check if network exists
         if networkid not in self.networks:
             raise ResourceNotFoundException(
-                "VoteOnProposal", "Network {0} not found.".format(networkid)
+                "VoteOnProposal", f"Network {networkid} not found."
             )
 
         if proposalid not in self.proposals:
             raise ResourceNotFoundException(
-                "VoteOnProposal", "Proposal {0} not found.".format(proposalid)
+                "VoteOnProposal", f"Proposal {proposalid} not found."
             )
 
         if votermemberid not in self.members:
             raise ResourceNotFoundException(
-                "VoteOnProposal", "Member {0} not found.".format(votermemberid)
+                "VoteOnProposal", f"Member {votermemberid} not found."
             )
 
         if vote.upper() not in VOTEVALUES:
             raise BadRequestException("VoteOnProposal", "Invalid request body")
 
         # See if it needs to be set to expipred
-        self.proposals.get(proposalid).check_to_expire_proposal()
+        self.proposals[proposalid].check_to_expire_proposal()
 
         # Exception if EXPIRED
-        if self.proposals.get(proposalid).proposal_status == "EXPIRED":
+        if self.proposals[proposalid].proposal_status == "EXPIRED":
             raise InvalidRequestException(
                 "VoteOnProposal",
-                "Proposal {0} is expired and you cannot vote on it.".format(proposalid),
+                f"Proposal {proposalid} is expired and you cannot vote on it.",
             )
 
         # Check if IN_PROGRESS
-        if self.proposals.get(proposalid).proposal_status != "IN_PROGRESS":
+        if self.proposals[proposalid].proposal_status != "IN_PROGRESS":
             raise InvalidRequestException(
                 "VoteOnProposal",
-                "Proposal {0} has status {1} and you cannot vote on it.".format(
-                    proposalid, self.proposals.get(proposalid).proposal_status
-                ),
+                f"Proposal {proposalid} has status {self.proposals[proposalid].proposal_status} and you cannot vote on it.",
             )
 
         # Check to see if this member already voted
-        if votermemberid in self.proposals.get(proposalid).proposal_votes:
+        if votermemberid in self.proposals[proposalid].proposal_votes:
             raise ResourceAlreadyExistsException(
                 "VoteOnProposal",
-                "Member {0} has already voted on proposal {1}.".format(
-                    votermemberid, proposalid
-                ),
+                f"Member {votermemberid} has already voted on proposal {proposalid}.",
             )
 
         # Cast vote
-        self.proposals.get(proposalid).set_vote(
-            votermemberid, self.members.get(votermemberid).name, vote.upper()
+        self.proposals[proposalid].set_vote(
+            votermemberid, self.members[votermemberid].name, vote.upper()
         )
 
-        if self.proposals.get(proposalid).proposal_status == "APPROVED":
+        if self.proposals[proposalid].proposal_status == "APPROVED":
             # Generate invitations
-            for propinvitation in self.proposals.get(proposalid).proposal_actions(
-                "Invitations"
-            ):
+            for _ in self.proposals[proposalid].proposal_actions("Invitations"):
                 invitation_id = get_invitation_id()
                 self.invitations[invitation_id] = ManagedBlockchainInvitation(
-                    id=invitation_id,
+                    invitation_id=invitation_id,
                     networkid=networkid,
-                    networkname=self.networks.get(networkid).network_name,
-                    networkframework=self.networks.get(networkid).network_framework,
-                    networkframeworkversion=self.networks.get(
-                        networkid
-                    ).network_framework_version,
-                    networkcreationdate=self.networks.get(
-                        networkid
-                    ).network_creationdate,
+                    networkname=self.networks[networkid].network_name,
+                    networkframework=self.networks[networkid].network_framework,
+                    networkframeworkversion=self.networks[networkid].framework_version,
+                    networkcreationdate=self.networks[networkid].network_creationdate,
                     region=self.region_name,
-                    networkdescription=self.networks.get(networkid).network_description,
+                    networkdescription=self.networks[networkid].network_description,
                 )
 
             # Delete members
-            for propmember in self.proposals.get(proposalid).proposal_actions(
-                "Removals"
-            ):
+            for propmember in self.proposals[proposalid].proposal_actions("Removals"):
                 self.delete_member(networkid, propmember["MemberId"])
 
-    def list_proposal_votes(self, networkid, proposalid):
+    def list_proposal_votes(self, networkid: str, proposalid: str) -> list[str]:
         # Check if network exists
         if networkid not in self.networks:
             raise ResourceNotFoundException(
-                "ListProposalVotes", "Network {0} not found.".format(networkid)
+                "ListProposalVotes", f"Network {networkid} not found."
             )
 
         if proposalid not in self.proposals:
             raise ResourceNotFoundException(
-                "ListProposalVotes", "Proposal {0} not found.".format(proposalid)
+                "ListProposalVotes", f"Proposal {proposalid} not found."
             )
 
         # Output the vote summaries
         proposalvotesfornetwork = []
-        for proposal_id in self.proposals:
-            if self.proposals.get(proposal_id).network_id == networkid:
-                for pvmemberid in self.proposals.get(proposal_id).proposal_votes:
-                    proposalvotesfornetwork.append(
-                        self.proposals.get(proposal_id).proposal_votes[pvmemberid]
-                    )
+        for proposal in self.proposals.values():
+            if proposal.network_id == networkid:
+                for proposal_vote in proposal.proposal_votes.values():
+                    proposalvotesfornetwork.append(proposal_vote)
         return proposalvotesfornetwork
 
-    def list_invitations(self):
-        return self.invitations.values()
+    def list_invitations(self) -> list[ManagedBlockchainInvitation]:
+        return list(self.invitations.values())
 
-    def reject_invitation(self, invitationid):
+    def reject_invitation(self, invitationid: str) -> None:
         if invitationid not in self.invitations:
             raise ResourceNotFoundException(
-                "RejectInvitation", "InvitationId {0} not found.".format(invitationid)
+                "RejectInvitation", f"InvitationId {invitationid} not found."
             )
-        self.invitations.get(invitationid).reject_invitation()
+        self.invitations[invitationid].reject_invitation()
 
     def create_member(
-        self, invitationid, networkid, member_configuration,
-    ):
+        self, invitationid: str, networkid: str, member_configuration: dict[str, Any]
+    ) -> dict[str, str]:
         # Check if network exists
         if networkid not in self.networks:
             raise ResourceNotFoundException(
-                "CreateMember", "Network {0} not found.".format(networkid)
+                "CreateMember", f"Network {networkid} not found."
             )
 
         if invitationid not in self.invitations:
             raise InvalidRequestException(
-                "CreateMember", "Invitation {0} not valid".format(invitationid)
+                "CreateMember", f"Invitation {invitationid} not valid"
             )
 
-        if self.invitations.get(invitationid).invitation_status != "PENDING":
+        if self.invitations[invitationid].invitation_status != "PENDING":
             raise InvalidRequestException(
-                "CreateMember", "Invitation {0} not valid".format(invitationid)
+                "CreateMember", f"Invitation {invitationid} not valid"
             )
 
-        if (
-            member_name_exist_in_network(
-                self.members, networkid, member_configuration["Name"]
-            )
-            is True
+        if member_name_exist_in_network(
+            self.members, networkid, member_configuration["Name"]
         ):
             raise InvalidRequestException(
                 "CreateMember",
-                "Member name {0} already exists in network {1}.".format(
-                    member_configuration["Name"], networkid
-                ),
+                f"Member name {member_configuration['Name']} already exists in network {networkid}.",
             )
 
-        networkedition = self.networks.get(networkid).network_edition
+        networkedition = self.networks[networkid].network_edition
         if (
             number_of_members_in_network(self.members, networkid)
             >= EDITIONS[networkedition]["MaxMembers"]
         ):
             raise ResourceLimitExceededException(
                 "CreateMember",
-                "You cannot create a member in network {0}.{1} is the maximum number of members allowed in a {2} Edition network.".format(
-                    networkid, EDITIONS[networkedition]["MaxMembers"], networkedition
-                ),
+                f"You cannot create a member in network {networkid}.{EDITIONS[networkedition]['MaxMembers']} is the maximum number of members allowed in a {networkedition} Edition network.",
             )
 
         memberadminpassword = member_configuration["FrameworkConfiguration"]["Fabric"][
@@ -834,77 +665,73 @@ class ManagedBlockchainBackend(BaseBackend):
 
         member_id = get_member_id()
         self.members[member_id] = ManagedBlockchainMember(
-            id=member_id,
+            member_id=member_id,
             networkid=networkid,
             member_configuration=member_configuration,
             region=self.region_name,
         )
 
         # Accept the invitaiton
-        self.invitations.get(invitationid).accept_invitation()
+        self.invitations[invitationid].accept_invitation()
 
         # Return the member ID
-        d = {"MemberId": member_id}
-        return d
+        return {"MemberId": member_id}
 
-    def list_members(self, networkid):
+    def list_members(self, networkid: str) -> list[ManagedBlockchainMember]:
         # Check if network exists
         if networkid not in self.networks:
             raise ResourceNotFoundException(
-                "ListMembers", "Network {0} not found.".format(networkid)
+                "ListMembers", f"Network {networkid} not found."
             )
 
         membersfornetwork = []
-        for member_id in self.members:
-            if self.members.get(member_id).network_id == networkid:
-                membersfornetwork.append(self.members[member_id])
+        for member in self.members.values():
+            if member.network_id == networkid:
+                membersfornetwork.append(member)
         return membersfornetwork
 
-    def get_member(self, networkid, memberid):
+    def get_member(self, networkid: str, memberid: str) -> ManagedBlockchainMember:
         # Check if network exists
         if networkid not in self.networks:
             raise ResourceNotFoundException(
-                "GetMember", "Network {0} not found.".format(networkid)
+                "GetMember", f"Network {networkid} not found."
             )
 
         if memberid not in self.members:
             raise ResourceNotFoundException(
-                "GetMember", "Member {0} not found.".format(memberid)
+                "GetMember", f"Member {memberid} not found."
             )
 
         # Cannot get a member than has been deleted (it does show up in the list)
-        if self.members.get(memberid).member_status == "DELETED":
+        if self.members[memberid].member_status == "DELETED":
             raise ResourceNotFoundException(
-                "GetMember", "Member {0} not found.".format(memberid)
+                "GetMember", f"Member {memberid} not found."
             )
 
-        return self.members.get(memberid)
+        return self.members[memberid]
 
-    def delete_member(self, networkid, memberid):
+    def delete_member(self, networkid: str, memberid: str) -> None:
         # Check if network exists
         if networkid not in self.networks:
             raise ResourceNotFoundException(
-                "DeleteMember", "Network {0} not found.".format(networkid)
+                "DeleteMember", f"Network {networkid} not found."
             )
 
         if memberid not in self.members:
             raise ResourceNotFoundException(
-                "DeleteMember", "Member {0} not found.".format(memberid)
+                "DeleteMember", f"Member {memberid} not found."
             )
 
-        self.members.get(memberid).delete()
+        self.members[memberid].delete()
 
         # Is this the last member in the network? (all set to DELETED)
         if number_of_members_in_network(
             self.members, networkid, member_status="DELETED"
         ) == len(self.members):
             # Set network status to DELETED for all invitations
-            for invitation_id in self.invitations:
-                if (
-                    self.invitations.get(invitation_id).invitation_networkid
-                    == networkid
-                ):
-                    self.invitations.get(invitation_id).set_network_status("DELETED")
+            for invitation in self.invitations.values():
+                if invitation.invitation_networkid == networkid:
+                    invitation.set_network_status("DELETED")
 
             # Remove network
             del self.networks[networkid]
@@ -913,51 +740,49 @@ class ManagedBlockchainBackend(BaseBackend):
         for nodeid in nodes_in_member(self.nodes, memberid):
             del self.nodes[nodeid]
 
-    def update_member(self, networkid, memberid, logpublishingconfiguration):
+    def update_member(
+        self, networkid: str, memberid: str, logpublishingconfiguration: dict[str, Any]
+    ) -> None:
         # Check if network exists
         if networkid not in self.networks:
             raise ResourceNotFoundException(
-                "UpdateMember", "Network {0} not found.".format(networkid)
+                "UpdateMember", f"Network {networkid} not found."
             )
 
         if memberid not in self.members:
             raise ResourceNotFoundException(
-                "UpdateMember", "Member {0} not found.".format(memberid)
+                "UpdateMember", f"Member {memberid} not found."
             )
 
-        self.members.get(memberid).update(logpublishingconfiguration)
+        self.members[memberid].update(logpublishingconfiguration)
 
     def create_node(
         self,
-        networkid,
-        memberid,
-        availabilityzone,
-        instancetype,
-        logpublishingconfiguration,
-    ):
+        networkid: str,
+        memberid: str,
+        availabilityzone: str,
+        instancetype: str,
+        logpublishingconfiguration: dict[str, Any],
+    ) -> dict[str, str]:
         # Check if network exists
         if networkid not in self.networks:
             raise ResourceNotFoundException(
-                "CreateNode", "Network {0} not found.".format(networkid)
+                "CreateNode", f"Network {networkid} not found."
             )
 
         if memberid not in self.members:
             raise ResourceNotFoundException(
-                "CreateNode", "Member {0} not found.".format(memberid)
+                "CreateNode", f"Member {memberid} not found."
             )
 
-        networkedition = self.networks.get(networkid).network_edition
+        networkedition = self.networks[networkid].network_edition
         if (
             number_of_nodes_in_member(self.nodes, memberid)
             >= EDITIONS[networkedition]["MaxNodesPerMember"]
         ):
             raise ResourceLimitExceededException(
                 "CreateNode",
-                "Maximum number of nodes exceeded in member {0}. The maximum number of nodes you can have in a member in a {1} Edition network is {2}".format(
-                    memberid,
-                    networkedition,
-                    EDITIONS[networkedition]["MaxNodesPerMember"],
-                ),
+                f"Maximum number of nodes exceeded in member {memberid}. The maximum number of nodes you can have in a member in a {networkedition} Edition network is {EDITIONS[networkedition]['MaxNodesPerMember']}",
             )
 
         # See if the instance family is correct
@@ -971,7 +796,7 @@ class ManagedBlockchainBackend(BaseBackend):
         if correctinstancefamily is False:
             raise InvalidRequestException(
                 "CreateNode",
-                "Requested instance {0} isn't supported.".format(instancetype),
+                f"Requested instance {instancetype} isn't supported.",
             )
 
         # Check for specific types for starter
@@ -979,21 +804,19 @@ class ManagedBlockchainBackend(BaseBackend):
             if instancetype not in EDITIONS["STARTER"]["AllowedNodeInstanceTypes"]:
                 raise InvalidRequestException(
                     "CreateNode",
-                    "Instance type {0} is not supported with STARTER Edition networks.".format(
-                        instancetype
-                    ),
+                    f"Instance type {instancetype} is not supported with STARTER Edition networks.",
                 )
 
         # Simple availability zone check
         chkregionpreregex = self.region_name + "[a-z]"
         if re.match(chkregionpreregex, availabilityzone, re.IGNORECASE) is None:
             raise InvalidRequestException(
-                "CreateNode", "Availability Zone is not valid",
+                "CreateNode", "Availability Zone is not valid"
             )
 
         node_id = get_node_id()
         self.nodes[node_id] = ManagedBlockchainNode(
-            id=node_id,
+            node_id=node_id,
             networkid=networkid,
             memberid=memberid,
             availabilityzone=availabilityzone,
@@ -1003,98 +826,95 @@ class ManagedBlockchainBackend(BaseBackend):
         )
 
         # Return the node ID
-        d = {"NodeId": node_id}
-        return d
+        return {"NodeId": node_id}
 
-    def list_nodes(self, networkid, memberid, status=None):
+    def list_nodes(
+        self, networkid: str, memberid: str, status: str | None = None
+    ) -> list[ManagedBlockchainNode]:
         if networkid not in self.networks:
             raise ResourceNotFoundException(
-                "ListNodes", "Network {0} not found.".format(networkid)
+                "ListNodes", f"Network {networkid} not found."
             )
 
         if memberid not in self.members:
             raise ResourceNotFoundException(
-                "ListNodes", "Member {0} not found.".format(memberid)
+                "ListNodes", f"Member {memberid} not found."
             )
 
         # If member is deleted, cannot list nodes
-        if self.members.get(memberid).member_status == "DELETED":
+        if self.members[memberid].member_status == "DELETED":
             raise ResourceNotFoundException(
-                "ListNodes", "Member {0} not found.".format(memberid)
+                "ListNodes", f"Member {memberid} not found."
             )
 
         nodesformember = []
-        for node_id in self.nodes:
-            if self.nodes.get(node_id).member_id == memberid and (
-                status is None or self.nodes.get(node_id).node_status == status
+        for node in self.nodes.values():
+            if node.member_id == memberid and (
+                status is None or node.node_status == status
             ):
-                nodesformember.append(self.nodes[node_id])
+                nodesformember.append(node)
         return nodesformember
 
-    def get_node(self, networkid, memberid, nodeid):
+    def get_node(
+        self, networkid: str, memberid: str, nodeid: str
+    ) -> ManagedBlockchainNode:
         # Check if network exists
         if networkid not in self.networks:
             raise ResourceNotFoundException(
-                "GetNode", "Network {0} not found.".format(networkid)
+                "GetNode", f"Network {networkid} not found."
             )
 
         if memberid not in self.members:
-            raise ResourceNotFoundException(
-                "GetNode", "Member {0} not found.".format(memberid)
-            )
+            raise ResourceNotFoundException("GetNode", f"Member {memberid} not found.")
 
         if nodeid not in self.nodes:
-            raise ResourceNotFoundException(
-                "GetNode", "Node {0} not found.".format(nodeid)
-            )
+            raise ResourceNotFoundException("GetNode", f"Node {nodeid} not found.")
 
         # Cannot get a node than has been deleted (it does show up in the list)
-        if self.nodes.get(nodeid).node_status == "DELETED":
-            raise ResourceNotFoundException(
-                "GetNode", "Node {0} not found.".format(nodeid)
-            )
+        if self.nodes[nodeid].node_status == "DELETED":
+            raise ResourceNotFoundException("GetNode", f"Node {nodeid} not found.")
 
-        return self.nodes.get(nodeid)
+        return self.nodes[nodeid]
 
-    def delete_node(self, networkid, memberid, nodeid):
+    def delete_node(self, networkid: str, memberid: str, nodeid: str) -> None:
         # Check if network exists
         if networkid not in self.networks:
             raise ResourceNotFoundException(
-                "DeleteNode", "Network {0} not found.".format(networkid)
+                "DeleteNode", f"Network {networkid} not found."
             )
 
         if memberid not in self.members:
             raise ResourceNotFoundException(
-                "DeleteNode", "Member {0} not found.".format(memberid)
+                "DeleteNode", f"Member {memberid} not found."
             )
 
         if nodeid not in self.nodes:
-            raise ResourceNotFoundException(
-                "DeleteNode", "Node {0} not found.".format(nodeid)
-            )
+            raise ResourceNotFoundException("DeleteNode", f"Node {nodeid} not found.")
 
-        self.nodes.get(nodeid).delete()
+        self.nodes[nodeid].delete()
 
-    def update_node(self, networkid, memberid, nodeid, logpublishingconfiguration):
+    def update_node(
+        self,
+        networkid: str,
+        memberid: str,
+        nodeid: str,
+        logpublishingconfiguration: dict[str, Any],
+    ) -> None:
         # Check if network exists
         if networkid not in self.networks:
             raise ResourceNotFoundException(
-                "UpdateNode", "Network {0} not found.".format(networkid)
+                "UpdateNode", f"Network {networkid} not found."
             )
 
         if memberid not in self.members:
             raise ResourceNotFoundException(
-                "UpdateNode", "Member {0} not found.".format(memberid)
+                "UpdateNode", f"Member {memberid} not found."
             )
 
         if nodeid not in self.nodes:
-            raise ResourceNotFoundException(
-                "UpdateNode", "Node {0} not found.".format(nodeid)
-            )
+            raise ResourceNotFoundException("UpdateNode", f"Node {nodeid} not found.")
 
-        self.nodes.get(nodeid).update(logpublishingconfiguration)
+        self.nodes[nodeid].update(logpublishingconfiguration)
 
 
-managedblockchain_backends = {}
-for region in Session().get_available_regions("managedblockchain"):
-    managedblockchain_backends[region] = ManagedBlockchainBackend(region)
+managedblockchain_backends = BackendDict(ManagedBlockchainBackend, "managedblockchain")

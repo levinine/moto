@@ -1,21 +1,42 @@
 import copy
+import json
 
-from .fixtures.datacatalog import TABLE_INPUT, PARTITION_INPUT, DATABASE_INPUT
+import requests
+
+from moto import settings
+from moto.moto_api import state_manager
+
+from .fixtures.datacatalog import DATABASE_INPUT, PARTITION_INPUT, TABLE_INPUT
+from .fixtures.schema_registry import (
+    TEST_AVRO_DATA_FORMAT,
+    TEST_AVRO_SCHEMA_DEFINITION,
+    TEST_BACKWARD_COMPATIBILITY,
+    TEST_NEW_AVRO_SCHEMA_DEFINITION,
+    TEST_REGISTRY_NAME,
+    TEST_SCHEMA_ID,
+    TEST_SCHEMA_NAME,
+)
 
 
 def create_database_input(database_name):
     database_input = copy.deepcopy(DATABASE_INPUT)
     database_input["Name"] = database_name
-    database_input["LocationUri"] = "s3://my-bucket/{database_name}".format(
-        database_name=database_name
-    )
+    database_input["LocationUri"] = f"s3://my-bucket/{database_name}"
     return database_input
 
 
-def create_database(client, database_name, database_input=None):
+def create_database(
+    client, database_name, database_input=None, catalog_id=None, tags=None
+):
     if database_input is None:
         database_input = create_database_input(database_name)
-    return client.create_database(DatabaseInput=database_input)
+
+    database_kwargs = {"DatabaseInput": database_input}
+    if catalog_id is not None:
+        database_kwargs["CatalogId"] = catalog_id
+    if tags is not None:
+        database_kwargs["Tags"] = tags
+    return client.create_database(**database_kwargs)
 
 
 def get_database(client, database_name):
@@ -27,10 +48,8 @@ def create_table_input(database_name, table_name, columns=None, partition_keys=N
     table_input["Name"] = table_name
     table_input["PartitionKeys"] = partition_keys or []
     table_input["StorageDescriptor"]["Columns"] = columns or []
-    table_input["StorageDescriptor"][
-        "Location"
-    ] = "s3://my-bucket/{database_name}/{table_name}".format(
-        database_name=database_name, table_name=table_name
+    table_input["StorageDescriptor"]["Location"] = (
+        f"s3://my-bucket/{database_name}/{table_name}"
     )
     return table_input
 
@@ -53,8 +72,11 @@ def get_table(client, database_name, table_name):
     return client.get_table(DatabaseName=database_name, Name=table_name)
 
 
-def get_tables(client, database_name):
-    return client.get_tables(DatabaseName=database_name)
+def get_tables(client, database_name, expression=None):
+    if expression:
+        return client.get_tables(DatabaseName=database_name, Expression=expression)
+    else:
+        return client.get_tables(DatabaseName=database_name)
 
 
 def get_table_versions(client, database_name, table_name):
@@ -67,10 +89,17 @@ def get_table_version(client, database_name, table_name, version_id):
     )
 
 
+def create_column(name, type_, comment=None, parameters=None):
+    column = {"Name": name, "Type": type_}
+    if comment is not None:
+        column["Comment"] = comment
+    if parameters is not None:
+        column["Parameters"] = parameters
+    return column
+
+
 def create_partition_input(database_name, table_name, values=None, columns=None):
-    root_path = "s3://my-bucket/{database_name}/{table_name}".format(
-        database_name=database_name, table_name=table_name
-    )
+    root_path = f"s3://my-bucket/{database_name}/{table_name}"
 
     part_input = copy.deepcopy(PARTITION_INPUT)
     part_input["Values"] = values or []
@@ -142,5 +171,43 @@ def create_crawler(
         }
 
     return client.create_crawler(
-        Name=crawler_name, Role=crawler_role, Targets=crawler_targets, **params,
+        Name=crawler_name, Role=crawler_role, Targets=crawler_targets, **params
     )
+
+
+def create_registry(client, registry_name=TEST_REGISTRY_NAME):
+    return client.create_registry(RegistryName=registry_name)
+
+
+def create_schema(
+    client,
+    registry_id,
+    data_format=TEST_AVRO_DATA_FORMAT,
+    compatibility=TEST_BACKWARD_COMPATIBILITY,
+    schema_definition=TEST_AVRO_SCHEMA_DEFINITION,
+):
+    return client.create_schema(
+        RegistryId=registry_id,
+        SchemaName=TEST_SCHEMA_NAME,
+        DataFormat=data_format,
+        Compatibility=compatibility,
+        SchemaDefinition=schema_definition,
+    )
+
+
+def register_schema_version(client):
+    return client.register_schema_version(
+        SchemaId=TEST_SCHEMA_ID, SchemaDefinition=TEST_NEW_AVRO_SCHEMA_DEFINITION
+    )
+
+
+def set_transition(model_name, transition=None):
+    transition = transition or {"progression": "immediate"}
+    if settings.TEST_DECORATOR_MODE:
+        state_manager.set_transition(model_name=model_name, transition=transition)
+    else:
+        post_body = {"model_name": model_name, "transition": transition}
+        requests.post(
+            "http://localhost:5000/moto-api/state-manager/set-transition",
+            data=json.dumps(post_body),
+        )

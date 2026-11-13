@@ -1,16 +1,15 @@
 from copy import deepcopy
-from unittest import SkipTest
+from datetime import datetime, timezone
+from unittest import SkipTest, mock
+from unittest.mock import PropertyMock
 
 import boto3
-import mock
 import pytest
-import sure  # noqa # pylint: disable=unused-import
 from botocore.exceptions import ClientError
 from freezegun import freeze_time
 
-from moto import mock_eks, settings
-from moto.core import ACCOUNT_ID
-from moto.core.utils import iso_8601_datetime_without_milliseconds
+from moto import mock_aws, settings
+from moto.core import DEFAULT_ACCOUNT_ID as ACCOUNT_ID
 from moto.eks.exceptions import (
     InvalidParameterException,
     InvalidRequestException,
@@ -33,32 +32,31 @@ from moto.eks.models import (
     NODEGROUP_NOT_FOUND_MSG,
 )
 from moto.eks.responses import DEFAULT_MAX_RESULTS
-from moto.utilities.utils import random_string
+from moto.moto_api._internal import mock_random
 
 from .test_eks_constants import (
-    BatchCountSize,
-    ClusterAttributes,
-    ClusterInputs,
     DEFAULT_NAMESPACE,
     DISK_SIZE,
-    ErrorAttributes,
-    FargateProfileAttributes,
-    FargateProfileInputs,
-    FROZEN_TIME,
     INSTANCE_TYPES,
     LAUNCH_TEMPLATE,
     MAX_FARGATE_LABELS,
+    PARTITIONS,
+    POD_EXECUTION_ROLE_ARN,
+    REGION,
+    REMOTE_ACCESS,
+    SERVICE,
+    BatchCountSize,
+    ClusterAttributes,
+    ClusterInputs,
+    ErrorAttributes,
+    FargateProfileAttributes,
+    FargateProfileInputs,
     NodegroupAttributes,
     NodegroupInputs,
     PageCount,
-    PARTITIONS,
-    POD_EXECUTION_ROLE_ARN,
     PossibleTestResults,
     RegExTemplates,
-    REGION,
-    REMOTE_ACCESS,
     ResponseAttributes,
-    SERVICE,
 )
 from .test_eks_utils import (
     attributes_to_test,
@@ -72,8 +70,8 @@ from .test_eks_utils import (
 )
 
 
-@pytest.fixture(scope="function")
-def ClusterBuilder():
+@pytest.fixture(scope="function", name="ClusterBuilder")
+def fixture_ClusterBuilder():
     class ClusterTestDataFactory:
         def __init__(self, client, count, minimal):
             # Generate 'count' number of random Cluster objects.
@@ -104,8 +102,8 @@ def ClusterBuilder():
     yield _execute
 
 
-@pytest.fixture(scope="function")
-def FargateProfileBuilder(ClusterBuilder):
+@pytest.fixture(scope="function", name="FargateProfileBuilder")
+def fixture_FargateProfileBuilder(ClusterBuilder):
     class FargateProfileTestDataFactory:
         def __init__(self, client, cluster, count, minimal):
             self.cluster_name = cluster.existing_cluster_name
@@ -142,8 +140,8 @@ def FargateProfileBuilder(ClusterBuilder):
     return _execute
 
 
-@pytest.fixture(scope="function")
-def NodegroupBuilder(ClusterBuilder):
+@pytest.fixture(scope="function", name="NodegroupBuilder")
+def fixture_NodegroupBuilder(ClusterBuilder):
     class NodegroupTestDataFactory:
         def __init__(self, client, cluster, count, minimal):
             self.cluster_name = cluster.existing_cluster_name
@@ -186,16 +184,47 @@ def NodegroupBuilder(ClusterBuilder):
 # in the list at initialization, which means the mock
 # decorator must be used manually in this one case.
 ###
-@mock_eks
+
+
+@mock_aws
 def test_list_clusters_returns_empty_by_default():
     client = boto3.client(SERVICE, region_name=REGION)
 
     result = client.list_clusters()[ResponseAttributes.CLUSTERS]
 
-    result.should.be.empty
+    assert result == []
 
 
-@mock_eks
+@mock_aws
+def test_list_tags_returns_empty_by_default(ClusterBuilder):
+    client, generated_test_data = ClusterBuilder(BatchCountSize.SINGLE)
+    cluster_arn = generated_test_data.cluster_describe_output[ClusterAttributes.ARN]
+    result = client.list_tags_for_resource(resourceArn=cluster_arn)
+    assert len(result["tags"]) == 0
+
+
+@mock_aws
+def test_list_tags_returns_all(ClusterBuilder):
+    client, generated_test_data = ClusterBuilder(BatchCountSize.SINGLE)
+    cluster_arn = generated_test_data.cluster_describe_output[ClusterAttributes.ARN]
+    client.tag_resource(resourceArn=cluster_arn, tags={"key1": "val1", "key2": "val2"})
+    result = client.list_tags_for_resource(resourceArn=cluster_arn)
+    assert len(result["tags"]) == 2
+    assert result["tags"] == {"key1": "val1", "key2": "val2"}
+
+
+@mock_aws
+def test_list_tags_returns_all_after_delete(ClusterBuilder):
+    client, generated_test_data = ClusterBuilder(BatchCountSize.SINGLE)
+    cluster_arn = generated_test_data.cluster_describe_output[ClusterAttributes.ARN]
+    client.tag_resource(resourceArn=cluster_arn, tags={"key1": "val1", "key2": "val2"})
+    client.untag_resource(resourceArn=cluster_arn, tagKeys=["key1"])
+    result = client.list_tags_for_resource(resourceArn=cluster_arn)
+    assert len(result["tags"]) == 1
+    assert result["tags"] == {"key2": "val2"}
+
+
+@mock_aws
 def test_list_clusters_returns_sorted_cluster_names(ClusterBuilder):
     client, generated_test_data = ClusterBuilder(BatchCountSize.SMALL)
     expected_result = sorted(generated_test_data.cluster_names)
@@ -205,7 +234,7 @@ def test_list_clusters_returns_sorted_cluster_names(ClusterBuilder):
     assert_result_matches_expected_list(result, expected_result, BatchCountSize.SMALL)
 
 
-@mock_eks
+@mock_aws
 def test_list_clusters_returns_default_max_results(ClusterBuilder):
     client, generated_test_data = ClusterBuilder(BatchCountSize.LARGE)
     expected_len = DEFAULT_MAX_RESULTS
@@ -216,7 +245,7 @@ def test_list_clusters_returns_default_max_results(ClusterBuilder):
     assert_result_matches_expected_list(result, expected_result, expected_len)
 
 
-@mock_eks
+@mock_aws
 def test_list_clusters_returns_custom_max_results(ClusterBuilder):
     client, generated_test_data = ClusterBuilder(BatchCountSize.MEDIUM)
     expected_len = PageCount.LARGE
@@ -227,7 +256,7 @@ def test_list_clusters_returns_custom_max_results(ClusterBuilder):
     assert_result_matches_expected_list(result, expected_result, expected_len)
 
 
-@mock_eks
+@mock_aws
 def test_list_clusters_returns_second_page_results(ClusterBuilder):
     client, generated_test_data = ClusterBuilder(BatchCountSize.MEDIUM)
     page1_len = PageCount.LARGE
@@ -240,7 +269,7 @@ def test_list_clusters_returns_second_page_results(ClusterBuilder):
     assert_result_matches_expected_list(result, expected_result, expected_len)
 
 
-@mock_eks
+@mock_aws
 def test_list_clusters_returns_custom_second_page_results(ClusterBuilder):
     client, generated_test_data = ClusterBuilder(BatchCountSize.MEDIUM)
     page1_len = PageCount.LARGE
@@ -257,26 +286,26 @@ def test_list_clusters_returns_custom_second_page_results(ClusterBuilder):
     assert_result_matches_expected_list(result, expected_result, expected_len)
 
 
-@mock_eks
+@mock_aws
 def test_create_cluster_throws_exception_when_cluster_exists(ClusterBuilder):
     client, generated_test_data = ClusterBuilder(BatchCountSize.SMALL)
     expected_exception = ResourceInUseException
     expected_msg = CLUSTER_EXISTS_MSG.format(
-        clusterName=generated_test_data.existing_cluster_name,
+        clusterName=generated_test_data.existing_cluster_name
     )
 
     with pytest.raises(ClientError) as raised_exception:
         client.create_cluster(
             name=generated_test_data.existing_cluster_name,
-            **dict(ClusterInputs.REQUIRED)
+            **dict(ClusterInputs.REQUIRED),
         )
     count_clusters_after_test = len(client.list_clusters()[ResponseAttributes.CLUSTERS])
 
-    count_clusters_after_test.should.equal(BatchCountSize.SMALL)
+    assert count_clusters_after_test == BatchCountSize.SMALL
     assert_expected_exception(raised_exception, expected_exception, expected_msg)
 
 
-@mock_eks
+@mock_aws
 def test_create_cluster_generates_valid_cluster_arn(ClusterBuilder):
     _, generated_test_data = ClusterBuilder()
     expected_arn_values = [
@@ -295,22 +324,19 @@ def test_create_cluster_generates_valid_cluster_arn(ClusterBuilder):
     )
 
 
-@freeze_time(FROZEN_TIME)
-@mock_eks
+@mock_aws
 def test_create_cluster_generates_valid_cluster_created_timestamp(ClusterBuilder):
-    _, generated_test_data = ClusterBuilder()
-
-    result_time = iso_8601_datetime_without_milliseconds(
-        generated_test_data.cluster_describe_output[ClusterAttributes.CREATED_AT]
-    )
-
-    if settings.TEST_SERVER_MODE:
-        RegExTemplates.ISO8601_FORMAT.match(result_time).should.be.true
-    else:
-        result_time.should.equal(FROZEN_TIME)
+    cluster_create_time = datetime(2013, 11, 27, 1, 42, tzinfo=timezone.utc)
+    with freeze_time(cluster_create_time):
+        _, generated_test_data = ClusterBuilder()
+    result_time = generated_test_data.cluster_describe_output[
+        ClusterAttributes.CREATED_AT
+    ]
+    if not settings.TEST_SERVER_MODE:
+        assert result_time == cluster_create_time
 
 
-@mock_eks
+@mock_aws
 def test_create_cluster_generates_valid_cluster_endpoint(ClusterBuilder):
     _, generated_test_data = ClusterBuilder()
 
@@ -318,11 +344,11 @@ def test_create_cluster_generates_valid_cluster_endpoint(ClusterBuilder):
         ClusterAttributes.ENDPOINT
     ]
 
-    is_valid_uri(result_endpoint).should.be.true
-    result_endpoint.should.contain(REGION)
+    assert is_valid_uri(result_endpoint) is True
+    assert REGION in result_endpoint
 
 
-@mock_eks
+@mock_aws
 def test_create_cluster_generates_valid_oidc_identity(ClusterBuilder):
     _, generated_test_data = ClusterBuilder()
 
@@ -330,24 +356,24 @@ def test_create_cluster_generates_valid_oidc_identity(ClusterBuilder):
         ClusterAttributes.IDENTITY
     ][ClusterAttributes.OIDC][ClusterAttributes.ISSUER]
 
-    is_valid_uri(result_issuer).should.be.true
-    result_issuer.should.contain(REGION)
+    assert is_valid_uri(result_issuer) is True
+    assert REGION in result_issuer
 
 
-@mock_eks
+@mock_aws
 def test_create_cluster_saves_provided_parameters(ClusterBuilder):
     _, generated_test_data = ClusterBuilder(minimal=False)
 
     for key, expected_value in generated_test_data.attributes_to_test:
-        generated_test_data.cluster_describe_output[key].should.equal(expected_value)
+        assert generated_test_data.cluster_describe_output[key] == expected_value
 
 
-@mock_eks
+@mock_aws
 def test_describe_cluster_throws_exception_when_cluster_not_found(ClusterBuilder):
     client, generated_test_data = ClusterBuilder(BatchCountSize.SMALL)
     expected_exception = ResourceNotFoundException
     expected_msg = CLUSTER_NOT_FOUND_MSG.format(
-        clusterName=generated_test_data.nonexistent_cluster_name,
+        clusterName=generated_test_data.nonexistent_cluster_name
     )
 
     with pytest.raises(ClientError) as raised_exception:
@@ -356,7 +382,7 @@ def test_describe_cluster_throws_exception_when_cluster_not_found(ClusterBuilder
     assert_expected_exception(raised_exception, expected_exception, expected_msg)
 
 
-@mock_eks
+@mock_aws
 def test_delete_cluster_returns_deleted_cluster(ClusterBuilder):
     client, generated_test_data = ClusterBuilder(BatchCountSize.SMALL, False)
 
@@ -365,37 +391,37 @@ def test_delete_cluster_returns_deleted_cluster(ClusterBuilder):
     ]
 
     for key, expected_value in generated_test_data.attributes_to_test:
-        result[key].should.equal(expected_value)
+        assert result[key] == expected_value
 
 
-@mock_eks
+@mock_aws
 def test_delete_cluster_removes_deleted_cluster(ClusterBuilder):
     client, generated_test_data = ClusterBuilder(BatchCountSize.SMALL, False)
 
     client.delete_cluster(name=generated_test_data.existing_cluster_name)
     result_cluster_list = client.list_clusters()[ResponseAttributes.CLUSTERS]
 
-    len(result_cluster_list).should.equal(BatchCountSize.SMALL - 1)
-    result_cluster_list.should_not.contain(generated_test_data.existing_cluster_name)
+    assert len(result_cluster_list) == BatchCountSize.SMALL - 1
+    assert generated_test_data.existing_cluster_name not in result_cluster_list
 
 
-@mock_eks
+@mock_aws
 def test_delete_cluster_throws_exception_when_cluster_not_found(ClusterBuilder):
     client, generated_test_data = ClusterBuilder(BatchCountSize.SMALL)
     expected_exception = ResourceNotFoundException
     expected_msg = CLUSTER_NOT_FOUND_MSG.format(
-        clusterName=generated_test_data.nonexistent_cluster_name,
+        clusterName=generated_test_data.nonexistent_cluster_name
     )
 
     with pytest.raises(ClientError) as raised_exception:
         client.delete_cluster(name=generated_test_data.nonexistent_cluster_name)
     count_clusters_after_test = len(client.list_clusters()[ResponseAttributes.CLUSTERS])
 
-    count_clusters_after_test.should.equal(BatchCountSize.SMALL)
+    assert count_clusters_after_test == BatchCountSize.SMALL
     assert_expected_exception(raised_exception, expected_exception, expected_msg)
 
 
-@mock_eks
+@mock_aws
 def test_list_nodegroups_returns_empty_by_default(ClusterBuilder):
     client, generated_test_data = ClusterBuilder()
 
@@ -403,10 +429,10 @@ def test_list_nodegroups_returns_empty_by_default(ClusterBuilder):
         clusterName=generated_test_data.existing_cluster_name
     )[ResponseAttributes.NODEGROUPS]
 
-    result.should.be.empty
+    assert result == []
 
 
-@mock_eks
+@mock_aws
 def test_list_nodegroups_returns_sorted_nodegroup_names(NodegroupBuilder):
     client, generated_test_data = NodegroupBuilder(BatchCountSize.SMALL)
     expected_result = sorted(generated_test_data.nodegroup_names)
@@ -418,7 +444,7 @@ def test_list_nodegroups_returns_sorted_nodegroup_names(NodegroupBuilder):
     assert_result_matches_expected_list(result, expected_result, BatchCountSize.SMALL)
 
 
-@mock_eks
+@mock_aws
 def test_list_nodegroups_returns_default_max_results(NodegroupBuilder):
     client, generated_test_data = NodegroupBuilder(BatchCountSize.LARGE)
     expected_len = DEFAULT_MAX_RESULTS
@@ -431,7 +457,7 @@ def test_list_nodegroups_returns_default_max_results(NodegroupBuilder):
     assert_result_matches_expected_list(result, expected_result, expected_len)
 
 
-@mock_eks
+@mock_aws
 def test_list_nodegroups_returns_custom_max_results(NodegroupBuilder):
     client, generated_test_data = NodegroupBuilder(BatchCountSize.LARGE)
     expected_len = BatchCountSize.LARGE
@@ -444,7 +470,7 @@ def test_list_nodegroups_returns_custom_max_results(NodegroupBuilder):
     assert_result_matches_expected_list(result, expected_result, expected_len)
 
 
-@mock_eks
+@mock_aws
 def test_list_nodegroups_returns_second_page_results(NodegroupBuilder):
     client, generated_test_data = NodegroupBuilder(BatchCountSize.MEDIUM)
     page1_len = PageCount.LARGE
@@ -461,7 +487,7 @@ def test_list_nodegroups_returns_second_page_results(NodegroupBuilder):
     assert_result_matches_expected_list(result, expected_result, expected_len)
 
 
-@mock_eks
+@mock_aws
 def test_list_nodegroups_returns_custom_second_page_results(NodegroupBuilder):
     client, generated_test_data = NodegroupBuilder(BatchCountSize.MEDIUM)
     page1_len = PageCount.LARGE
@@ -482,24 +508,24 @@ def test_list_nodegroups_returns_custom_second_page_results(NodegroupBuilder):
     assert_result_matches_expected_list(result, expected_result, expected_len)
 
 
-@mock_eks
+@mock_aws
 def test_create_nodegroup_throws_exception_when_cluster_not_found():
     client = boto3.client(SERVICE, region_name=REGION)
-    non_existent_cluster_name = random_string()
+    non_existent_cluster_name = mock_random.get_random_string()
     expected_exception = ResourceNotFoundException
-    expected_msg = CLUSTER_NOT_FOUND_MSG.format(clusterName=non_existent_cluster_name,)
+    expected_msg = CLUSTER_NOT_FOUND_MSG.format(clusterName=non_existent_cluster_name)
 
     with pytest.raises(ClientError) as raised_exception:
         client.create_nodegroup(
             clusterName=non_existent_cluster_name,
-            nodegroupName=random_string(),
-            **dict(NodegroupInputs.REQUIRED)
+            nodegroupName=mock_random.get_random_string(),
+            **dict(NodegroupInputs.REQUIRED),
         )
 
     assert_expected_exception(raised_exception, expected_exception, expected_msg)
 
 
-@mock_eks
+@mock_aws
 def test_create_nodegroup_throws_exception_when_nodegroup_already_exists(
     NodegroupBuilder,
 ):
@@ -514,7 +540,7 @@ def test_create_nodegroup_throws_exception_when_nodegroup_already_exists(
         client.create_nodegroup(
             clusterName=generated_test_data.cluster_name,
             nodegroupName=generated_test_data.existing_nodegroup_name,
-            **dict(NodegroupInputs.REQUIRED)
+            **dict(NodegroupInputs.REQUIRED),
         )
     count_nodegroups_after_test = len(
         client.list_nodegroups(clusterName=generated_test_data.cluster_name)[
@@ -522,28 +548,30 @@ def test_create_nodegroup_throws_exception_when_nodegroup_already_exists(
         ]
     )
 
-    count_nodegroups_after_test.should.equal(BatchCountSize.SMALL)
+    assert count_nodegroups_after_test == BatchCountSize.SMALL
     assert_expected_exception(raised_exception, expected_exception, expected_msg)
 
 
-@mock_eks
-def test_create_nodegroup_throws_exception_when_cluster_not_active(
-    NodegroupBuilder, monkeypatch
-):
+@mock_aws
+def test_create_nodegroup_throws_exception_when_cluster_not_active(NodegroupBuilder):
     if settings.TEST_SERVER_MODE:
         raise SkipTest("Cant patch Cluster attributes in server mode.")
     client, generated_test_data = NodegroupBuilder(BatchCountSize.SMALL)
     expected_exception = InvalidRequestException
     expected_msg = CLUSTER_NOT_READY_MSG.format(
-        clusterName=generated_test_data.cluster_name,
+        clusterName=generated_test_data.cluster_name
     )
 
-    with mock.patch("moto.eks.models.Cluster.isActive", return_value=False):
+    with mock.patch(
+        "moto.eks.models.Cluster.is_active",
+        new_callable=PropertyMock,
+        return_value=False,
+    ):
         with pytest.raises(ClientError) as raised_exception:
             client.create_nodegroup(
                 clusterName=generated_test_data.cluster_name,
-                nodegroupName=random_string(),
-                **dict(NodegroupInputs.REQUIRED)
+                nodegroupName=mock_random.get_random_string(),
+                **dict(NodegroupInputs.REQUIRED),
             )
     count_nodegroups_after_test = len(
         client.list_nodegroups(clusterName=generated_test_data.cluster_name)[
@@ -551,11 +579,11 @@ def test_create_nodegroup_throws_exception_when_cluster_not_active(
         ]
     )
 
-    count_nodegroups_after_test.should.equal(BatchCountSize.SMALL)
+    assert count_nodegroups_after_test == BatchCountSize.SMALL
     assert_expected_exception(raised_exception, expected_exception, expected_msg)
 
 
-@mock_eks
+@mock_aws
 def test_create_nodegroup_generates_valid_nodegroup_arn(NodegroupBuilder):
     _, generated_test_data = NodegroupBuilder()
     expected_arn_values = [
@@ -576,39 +604,34 @@ def test_create_nodegroup_generates_valid_nodegroup_arn(NodegroupBuilder):
     )
 
 
-@freeze_time(FROZEN_TIME)
-@mock_eks
+@mock_aws
 def test_create_nodegroup_generates_valid_nodegroup_created_timestamp(NodegroupBuilder):
-    _, generated_test_data = NodegroupBuilder()
+    ng_create_time = datetime(2013, 11, 27, 1, 42, tzinfo=timezone.utc)
+    with freeze_time(ng_create_time):
+        _, generated_test_data = NodegroupBuilder()
 
-    result_time = iso_8601_datetime_without_milliseconds(
-        generated_test_data.nodegroup_describe_output[NodegroupAttributes.CREATED_AT]
-    )
-
-    if settings.TEST_SERVER_MODE:
-        RegExTemplates.ISO8601_FORMAT.match(result_time).should.be.true
-    else:
-        result_time.should.equal(FROZEN_TIME)
+    result_time = generated_test_data.nodegroup_describe_output[
+        NodegroupAttributes.CREATED_AT
+    ]
+    if not settings.TEST_SERVER_MODE:
+        assert result_time == ng_create_time
 
 
-@freeze_time(FROZEN_TIME)
-@mock_eks
+@mock_aws
 def test_create_nodegroup_generates_valid_nodegroup_modified_timestamp(
     NodegroupBuilder,
 ):
-    _, generated_test_data = NodegroupBuilder()
-
-    result_time = iso_8601_datetime_without_milliseconds(
-        generated_test_data.nodegroup_describe_output[NodegroupAttributes.MODIFIED_AT]
-    )
-
-    if settings.TEST_SERVER_MODE:
-        RegExTemplates.ISO8601_FORMAT.match(result_time).should.be.true
-    else:
-        result_time.should.equal(FROZEN_TIME)
+    ng_mod_time = datetime(2013, 11, 27, 1, 42, tzinfo=timezone.utc)
+    with freeze_time(ng_mod_time):
+        _, generated_test_data = NodegroupBuilder()
+    result_time = generated_test_data.nodegroup_describe_output[
+        NodegroupAttributes.MODIFIED_AT
+    ]
+    if not settings.TEST_SERVER_MODE:
+        assert result_time == ng_mod_time
 
 
-@mock_eks
+@mock_aws
 def test_create_nodegroup_generates_valid_autoscaling_group_name(NodegroupBuilder):
     _, generated_test_data = NodegroupBuilder()
     result_resources = generated_test_data.nodegroup_describe_output[
@@ -619,10 +642,10 @@ def test_create_nodegroup_generates_valid_autoscaling_group_name(NodegroupBuilde
         NodegroupAttributes.NAME
     ]
 
-    RegExTemplates.NODEGROUP_ASG_NAME_PATTERN.match(result_asg_name).should.be.true
+    assert RegExTemplates.NODEGROUP_ASG_NAME_PATTERN.match(result_asg_name)
 
 
-@mock_eks
+@mock_aws
 def test_create_nodegroup_generates_valid_security_group_name(NodegroupBuilder):
     _, generated_test_data = NodegroupBuilder()
     result_resources = generated_test_data.nodegroup_describe_output[
@@ -631,25 +654,25 @@ def test_create_nodegroup_generates_valid_security_group_name(NodegroupBuilder):
 
     result_security_group = result_resources[NodegroupAttributes.REMOTE_ACCESS_SG]
 
-    RegExTemplates.NODEGROUP_SECURITY_GROUP_NAME_PATTERN.match(
+    assert RegExTemplates.NODEGROUP_SECURITY_GROUP_NAME_PATTERN.match(
         result_security_group
-    ).should.be.true
+    )
 
 
-@mock_eks
+@mock_aws
 def test_create_nodegroup_saves_provided_parameters(NodegroupBuilder):
     _, generated_test_data = NodegroupBuilder(minimal=False)
 
     for key, expected_value in generated_test_data.attributes_to_test:
-        generated_test_data.nodegroup_describe_output[key].should.equal(expected_value)
+        assert generated_test_data.nodegroup_describe_output[key] == expected_value
 
 
-@mock_eks
+@mock_aws
 def test_describe_nodegroup_throws_exception_when_cluster_not_found(NodegroupBuilder):
     client, generated_test_data = NodegroupBuilder()
     expected_exception = ResourceNotFoundException
     expected_msg = CLUSTER_NOT_FOUND_MSG.format(
-        clusterName=generated_test_data.nonexistent_cluster_name,
+        clusterName=generated_test_data.nonexistent_cluster_name
     )
 
     with pytest.raises(ClientError) as raised_exception:
@@ -661,12 +684,12 @@ def test_describe_nodegroup_throws_exception_when_cluster_not_found(NodegroupBui
     assert_expected_exception(raised_exception, expected_exception, expected_msg)
 
 
-@mock_eks
+@mock_aws
 def test_describe_nodegroup_throws_exception_when_nodegroup_not_found(NodegroupBuilder):
     client, generated_test_data = NodegroupBuilder()
     expected_exception = ResourceNotFoundException
     expected_msg = NODEGROUP_NOT_FOUND_MSG.format(
-        nodegroupName=generated_test_data.nonexistent_nodegroup_name,
+        nodegroupName=generated_test_data.nonexistent_nodegroup_name
     )
 
     with pytest.raises(ClientError) as raised_exception:
@@ -678,7 +701,7 @@ def test_describe_nodegroup_throws_exception_when_nodegroup_not_found(NodegroupB
     assert_expected_exception(raised_exception, expected_exception, expected_msg)
 
 
-@mock_eks
+@mock_aws
 def test_delete_cluster_throws_exception_when_nodegroups_exist(NodegroupBuilder):
     client, generated_test_data = NodegroupBuilder()
     expected_exception = ResourceInUseException
@@ -688,11 +711,11 @@ def test_delete_cluster_throws_exception_when_nodegroups_exist(NodegroupBuilder)
         client.delete_cluster(name=generated_test_data.cluster_name)
     count_clusters_after_test = len(client.list_clusters()[ResponseAttributes.CLUSTERS])
 
-    count_clusters_after_test.should.equal(BatchCountSize.SINGLE)
+    assert count_clusters_after_test == BatchCountSize.SINGLE
     assert_expected_exception(raised_exception, expected_exception, expected_msg)
 
 
-@mock_eks
+@mock_aws
 def test_delete_nodegroup_removes_deleted_nodegroup(NodegroupBuilder):
     client, generated_test_data = NodegroupBuilder(BatchCountSize.SMALL)
 
@@ -704,11 +727,11 @@ def test_delete_nodegroup_removes_deleted_nodegroup(NodegroupBuilder):
         ResponseAttributes.NODEGROUPS
     ]
 
-    len(result).should.equal(BatchCountSize.SMALL - 1)
-    result.should_not.contain(generated_test_data.existing_nodegroup_name)
+    assert len(result) == BatchCountSize.SMALL - 1
+    assert generated_test_data.existing_nodegroup_name not in result
 
 
-@mock_eks
+@mock_aws
 def test_delete_nodegroup_returns_deleted_nodegroup(NodegroupBuilder):
     client, generated_test_data = NodegroupBuilder(BatchCountSize.SMALL, False)
 
@@ -718,15 +741,15 @@ def test_delete_nodegroup_returns_deleted_nodegroup(NodegroupBuilder):
     )[ResponseAttributes.NODEGROUP]
 
     for key, expected_value in generated_test_data.attributes_to_test:
-        result[key].should.equal(expected_value)
+        assert result[key] == expected_value
 
 
-@mock_eks
+@mock_aws
 def test_delete_nodegroup_throws_exception_when_cluster_not_found(NodegroupBuilder):
     client, generated_test_data = NodegroupBuilder()
     expected_exception = ResourceNotFoundException
     expected_msg = CLUSTER_NOT_FOUND_MSG.format(
-        clusterName=generated_test_data.nonexistent_cluster_name,
+        clusterName=generated_test_data.nonexistent_cluster_name
     )
 
     with pytest.raises(ClientError) as raised_exception:
@@ -738,12 +761,12 @@ def test_delete_nodegroup_throws_exception_when_cluster_not_found(NodegroupBuild
     assert_expected_exception(raised_exception, expected_exception, expected_msg)
 
 
-@mock_eks
+@mock_aws
 def test_delete_nodegroup_throws_exception_when_nodegroup_not_found(NodegroupBuilder):
     client, generated_test_data = NodegroupBuilder()
     expected_exception = ResourceNotFoundException
     expected_msg = NODEGROUP_NOT_FOUND_MSG.format(
-        nodegroupName=generated_test_data.nonexistent_nodegroup_name,
+        nodegroupName=generated_test_data.nonexistent_nodegroup_name
     )
 
     with pytest.raises(ClientError) as raised_exception:
@@ -788,7 +811,7 @@ test_cases = [
     "launch_template, instance_types, disk_size, remote_access, expected_result",
     test_cases,
 )
-@mock_eks
+@mock_aws
 def test_create_nodegroup_handles_launch_template_combinations(
     ClusterBuilder,
     launch_template,
@@ -798,7 +821,7 @@ def test_create_nodegroup_handles_launch_template_combinations(
     expected_result,
 ):
     client, generated_test_data = ClusterBuilder()
-    nodegroup_name = random_string()
+    nodegroup_name = mock_random.get_random_string()
     expected_exception = InvalidParameterException
     expected_msg = None
 
@@ -827,7 +850,7 @@ def test_create_nodegroup_handles_launch_template_combinations(
         result = client.create_nodegroup(**test_inputs)[ResponseAttributes.NODEGROUP]
 
         for key, expected_value in test_inputs.items():
-            result[key].should.equal(expected_value)
+            assert result[key] == expected_value
     else:
         if launch_template and disk_size:
             expected_msg = LAUNCH_TEMPLATE_WITH_DISK_SIZE_MSG
@@ -845,7 +868,7 @@ def test_create_nodegroup_handles_launch_template_combinations(
         assert_expected_exception(raised_exception, expected_exception, expected_msg)
 
 
-@mock_eks
+@mock_aws
 def test_list_fargate_profile_returns_empty_by_default(ClusterBuilder):
     client, generated_test_data = ClusterBuilder()
 
@@ -853,10 +876,10 @@ def test_list_fargate_profile_returns_empty_by_default(ClusterBuilder):
         clusterName=generated_test_data.existing_cluster_name
     )[ResponseAttributes.FARGATE_PROFILE_NAMES]
 
-    result.should.be.empty
+    assert result == []
 
 
-@mock_eks
+@mock_aws
 def test_list_fargate_profile_returns_sorted_fargate_profile_names(
     FargateProfileBuilder,
 ):
@@ -870,7 +893,7 @@ def test_list_fargate_profile_returns_sorted_fargate_profile_names(
     assert_result_matches_expected_list(result, expected_result, BatchCountSize.SMALL)
 
 
-@mock_eks
+@mock_aws
 def test_list_fargate_profile_returns_default_max_results(FargateProfileBuilder):
     client, generated_test_data = FargateProfileBuilder(BatchCountSize.LARGE)
     expected_len = DEFAULT_MAX_RESULTS
@@ -883,7 +906,7 @@ def test_list_fargate_profile_returns_default_max_results(FargateProfileBuilder)
     assert_result_matches_expected_list(result, expected_result, expected_len)
 
 
-@mock_eks
+@mock_aws
 def test_list_fargate_profile_returns_custom_max_results(FargateProfileBuilder):
     client, generated_test_data = FargateProfileBuilder(BatchCountSize.LARGE)
     expected_len = BatchCountSize.LARGE
@@ -896,7 +919,7 @@ def test_list_fargate_profile_returns_custom_max_results(FargateProfileBuilder):
     assert_result_matches_expected_list(result, expected_result, expected_len)
 
 
-@mock_eks
+@mock_aws
 def test_list_fargate_profile_returns_second_page_results(FargateProfileBuilder):
     client, generated_test_data = FargateProfileBuilder(BatchCountSize.MEDIUM)
     page1_len = PageCount.LARGE
@@ -913,7 +936,7 @@ def test_list_fargate_profile_returns_second_page_results(FargateProfileBuilder)
     assert_result_matches_expected_list(result, expected_result, expected_len)
 
 
-@mock_eks
+@mock_aws
 def test_list_fargate_profile_returns_custom_second_page_results(FargateProfileBuilder):
     client, generated_test_data = FargateProfileBuilder(BatchCountSize.MEDIUM)
     page1_len = PageCount.LARGE
@@ -934,24 +957,24 @@ def test_list_fargate_profile_returns_custom_second_page_results(FargateProfileB
     assert_result_matches_expected_list(result, expected_result, expected_len)
 
 
-@mock_eks
+@mock_aws
 def test_create_fargate_profile_throws_exception_when_cluster_not_found():
     client = boto3.client(SERVICE, region_name=REGION)
-    non_existent_cluster_name = random_string()
+    non_existent_cluster_name = mock_random.get_random_string()
     expected_exception = ResourceNotFoundException
-    expected_msg = CLUSTER_NOT_FOUND_MSG.format(clusterName=non_existent_cluster_name,)
+    expected_msg = CLUSTER_NOT_FOUND_MSG.format(clusterName=non_existent_cluster_name)
 
     with pytest.raises(ClientError) as raised_exception:
         client.create_fargate_profile(
             clusterName=non_existent_cluster_name,
-            fargateProfileName=random_string(),
-            **dict(FargateProfileInputs.REQUIRED)
+            fargateProfileName=mock_random.get_random_string(),
+            **dict(FargateProfileInputs.REQUIRED),
         )
 
     assert_expected_exception(raised_exception, expected_exception, expected_msg)
 
 
-@mock_eks
+@mock_aws
 def test_create_fargate_profile_throws_exception_when_fargate_profile_already_exists(
     FargateProfileBuilder,
 ):
@@ -963,7 +986,7 @@ def test_create_fargate_profile_throws_exception_when_fargate_profile_already_ex
         client.create_fargate_profile(
             clusterName=generated_test_data.cluster_name,
             fargateProfileName=generated_test_data.existing_fargate_profile_name,
-            **dict(FargateProfileInputs.REQUIRED)
+            **dict(FargateProfileInputs.REQUIRED),
         )
     count_profiles_after_test = len(
         client.list_fargate_profiles(clusterName=generated_test_data.cluster_name)[
@@ -971,28 +994,32 @@ def test_create_fargate_profile_throws_exception_when_fargate_profile_already_ex
         ]
     )
 
-    count_profiles_after_test.should.equal(BatchCountSize.SMALL)
+    assert count_profiles_after_test == BatchCountSize.SMALL
     assert_expected_exception(raised_exception, expected_exception, expected_msg)
 
 
-@mock_eks
+@mock_aws
 def test_create_fargate_profile_throws_exception_when_cluster_not_active(
-    FargateProfileBuilder, monkeypatch
+    FargateProfileBuilder,
 ):
     if settings.TEST_SERVER_MODE:
         raise SkipTest("Cant patch Cluster attributes in server mode.")
     client, generated_test_data = FargateProfileBuilder(BatchCountSize.SMALL)
     expected_exception = InvalidRequestException
     expected_msg = CLUSTER_NOT_READY_MSG.format(
-        clusterName=generated_test_data.cluster_name,
+        clusterName=generated_test_data.cluster_name
     )
 
-    with mock.patch("moto.eks.models.Cluster.isActive", return_value=False):
+    with mock.patch(
+        "moto.eks.models.Cluster.is_active",
+        new_callable=PropertyMock,
+        return_value=False,
+    ):
         with pytest.raises(ClientError) as raised_exception:
             client.create_fargate_profile(
                 clusterName=generated_test_data.cluster_name,
-                fargateProfileName=random_string(),
-                **dict(FargateProfileInputs.REQUIRED)
+                fargateProfileName=mock_random.get_random_string(),
+                **dict(FargateProfileInputs.REQUIRED),
             )
     count_fargate_profiles_after_test = len(
         client.list_fargate_profiles(clusterName=generated_test_data.cluster_name)[
@@ -1000,11 +1027,11 @@ def test_create_fargate_profile_throws_exception_when_cluster_not_active(
         ]
     )
 
-    count_fargate_profiles_after_test.should.equal(BatchCountSize.SMALL)
+    assert count_fargate_profiles_after_test == BatchCountSize.SMALL
     assert_expected_exception(raised_exception, expected_exception, expected_msg)
 
 
-@mock_eks
+@mock_aws
 def test_create_fargate_profile_generates_valid_profile_arn(FargateProfileBuilder):
     _, generated_test_data = FargateProfileBuilder()
     expected_arn_values = [
@@ -1025,39 +1052,36 @@ def test_create_fargate_profile_generates_valid_profile_arn(FargateProfileBuilde
     )
 
 
-@freeze_time(FROZEN_TIME)
-@mock_eks
+@mock_aws
 def test_create_fargate_profile_generates_valid_created_timestamp(
     FargateProfileBuilder,
 ):
-    _, generated_test_data = FargateProfileBuilder()
-
-    result_time = iso_8601_datetime_without_milliseconds(
-        generated_test_data.fargate_describe_output[FargateProfileAttributes.CREATED_AT]
-    )
-
-    if settings.TEST_SERVER_MODE:
-        RegExTemplates.ISO8601_FORMAT.match(result_time).should.be.true
-    else:
-        result_time.should.equal(FROZEN_TIME)
+    fp_create_time = datetime(2013, 11, 27, 1, 42, tzinfo=timezone.utc)
+    with freeze_time(fp_create_time):
+        _, generated_test_data = FargateProfileBuilder()
+    result_time = generated_test_data.fargate_describe_output[
+        FargateProfileAttributes.CREATED_AT
+    ]
+    if not settings.TEST_SERVER_MODE:
+        assert result_time == fp_create_time
 
 
-@mock_eks
+@mock_aws
 def test_create_fargate_profile_saves_provided_parameters(FargateProfileBuilder):
     _, generated_test_data = FargateProfileBuilder(minimal=False)
 
     for key, expected_value in generated_test_data.attributes_to_test:
-        generated_test_data.fargate_describe_output[key].should.equal(expected_value)
+        assert generated_test_data.fargate_describe_output[key] == expected_value
 
 
-@mock_eks
+@mock_aws
 def test_describe_fargate_profile_throws_exception_when_cluster_not_found(
     FargateProfileBuilder,
 ):
     client, generated_test_data = FargateProfileBuilder()
     expected_exception = ResourceNotFoundException
     expected_msg = CLUSTER_NOT_FOUND_MSG.format(
-        clusterName=generated_test_data.nonexistent_cluster_name,
+        clusterName=generated_test_data.nonexistent_cluster_name
     )
 
     with pytest.raises(ClientError) as raised_exception:
@@ -1069,14 +1093,14 @@ def test_describe_fargate_profile_throws_exception_when_cluster_not_found(
     assert_expected_exception(raised_exception, expected_exception, expected_msg)
 
 
-@mock_eks
+@mock_aws
 def test_describe_fargate_profile_throws_exception_when_profile_not_found(
     FargateProfileBuilder,
 ):
     client, generated_test_data = FargateProfileBuilder()
     expected_exception = ResourceNotFoundException
     expected_msg = FARGATE_PROFILE_NOT_FOUND_MSG.format(
-        fargateProfileName=generated_test_data.nonexistent_fargate_profile_name,
+        fargateProfileName=generated_test_data.nonexistent_fargate_profile_name
     )
 
     with pytest.raises(ClientError) as raised_exception:
@@ -1088,7 +1112,7 @@ def test_describe_fargate_profile_throws_exception_when_profile_not_found(
     assert_expected_exception(raised_exception, expected_exception, expected_msg)
 
 
-@mock_eks
+@mock_aws
 def test_delete_fargate_profile_removes_deleted_fargate_profile(FargateProfileBuilder):
     client, generated_test_data = FargateProfileBuilder(BatchCountSize.SMALL)
 
@@ -1100,11 +1124,11 @@ def test_delete_fargate_profile_removes_deleted_fargate_profile(FargateProfileBu
         ResponseAttributes.FARGATE_PROFILE_NAMES
     ]
 
-    len(result).should.equal(BatchCountSize.SMALL - 1)
-    result.should_not.contain(generated_test_data.existing_fargate_profile_name)
+    assert len(result) == BatchCountSize.SMALL - 1
+    assert generated_test_data.existing_fargate_profile_name not in result
 
 
-@mock_eks
+@mock_aws
 def test_delete_fargate_profile_returns_deleted_fargate_profile(FargateProfileBuilder):
     client, generated_test_data = FargateProfileBuilder(BatchCountSize.SMALL, False)
 
@@ -1114,17 +1138,17 @@ def test_delete_fargate_profile_returns_deleted_fargate_profile(FargateProfileBu
     )[ResponseAttributes.FARGATE_PROFILE]
 
     for key, expected_value in generated_test_data.attributes_to_test:
-        result[key].should.equal(expected_value)
+        assert result[key] == expected_value
 
 
-@mock_eks
+@mock_aws
 def test_delete_fargate_profile_throws_exception_when_cluster_not_found(
     FargateProfileBuilder,
 ):
     client, generated_test_data = FargateProfileBuilder()
     expected_exception = ResourceNotFoundException
     expected_msg = CLUSTER_NOT_FOUND_MSG.format(
-        clusterName=generated_test_data.nonexistent_cluster_name,
+        clusterName=generated_test_data.nonexistent_cluster_name
     )
 
     with pytest.raises(ClientError) as raised_exception:
@@ -1136,14 +1160,14 @@ def test_delete_fargate_profile_throws_exception_when_cluster_not_found(
     assert_expected_exception(raised_exception, expected_exception, expected_msg)
 
 
-@mock_eks
+@mock_aws
 def test_delete_fargate_profile_throws_exception_when_fargate_profile_not_found(
     FargateProfileBuilder,
 ):
     client, generated_test_data = FargateProfileBuilder()
     expected_exception = ResourceNotFoundException
     expected_msg = FARGATE_PROFILE_NOT_FOUND_MSG.format(
-        fargateProfileName=generated_test_data.nonexistent_fargate_profile_name,
+        fargateProfileName=generated_test_data.nonexistent_fargate_profile_name
     )
 
     with pytest.raises(ClientError) as raised_exception:
@@ -1155,11 +1179,11 @@ def test_delete_fargate_profile_throws_exception_when_fargate_profile_not_found(
     assert_expected_exception(raised_exception, expected_exception, expected_msg)
 
 
-@mock_eks
+@mock_aws
 def test_create_fargate_throws_exception_when_no_selectors_provided(ClusterBuilder):
     client, generated_test_data = ClusterBuilder()
     cluster_name = generated_test_data.existing_cluster_name
-    fargate_profile_name = random_string()
+    fargate_profile_name = mock_random.get_random_string()
     expected_exception = InvalidParameterException
     expected_msg = FARGATE_PROFILE_NEEDS_SELECTOR_MSG
 
@@ -1290,15 +1314,15 @@ selector_formatting_test_cases = [
 
 
 @pytest.mark.parametrize(
-    "selectors, expected_message, expected_result", selector_formatting_test_cases,
+    "selectors, expected_message, expected_result", selector_formatting_test_cases
 )
-@mock_eks
+@mock_aws
 def test_create_fargate_selectors(
     ClusterBuilder, selectors, expected_message, expected_result
 ):
     client, generated_test_data = ClusterBuilder()
     cluster_name = generated_test_data.existing_cluster_name
-    fargate_profile_name = random_string()
+    fargate_profile_name = mock_random.get_random_string()
     expected_exception = InvalidParameterException
 
     test_inputs = dict(
@@ -1320,7 +1344,7 @@ def test_create_fargate_selectors(
             ResponseAttributes.FARGATE_PROFILE
         ]
         for key, expected_value in test_inputs.items():
-            result[key].should.equal(expected_value)
+            assert result[key] == expected_value
     else:
         with pytest.raises(ClientError) as raised_exception:
             client.create_fargate_profile(**test_inputs)
@@ -1343,16 +1367,16 @@ def all_arn_values_should_be_valid(expected_arn_values, pattern, arn_under_test)
     for value in reversed(findall):
         expected_value = expected_values.pop()
         if expected_value:
-            value.should.be.within(expected_value)
+            assert value in expected_value
         else:
-            value.should.be.truthy
-    region_matches_partition(findall[1], findall[0]).should.be.true
+            assert value is not None
+    assert region_matches_partition(findall[1], findall[0]) is True
 
 
 def assert_expected_exception(raised_exception, expected_exception, expected_msg):
     error = raised_exception.value.response[ErrorAttributes.ERROR]
-    error[ErrorAttributes.CODE].should.equal(expected_exception.TYPE)
-    error[ErrorAttributes.MESSAGE].should.equal(expected_msg)
+    assert error[ErrorAttributes.CODE] == expected_exception.code
+    assert error[ErrorAttributes.MESSAGE] == expected_msg
 
 
 def assert_result_matches_expected_list(result, expected_result, expected_len):
@@ -1363,7 +1387,7 @@ def assert_result_matches_expected_list(result, expected_result, expected_len):
 def assert_valid_selectors(ClusterBuilder, expected_msg, expected_result, selectors):
     client, generated_test_data = ClusterBuilder()
     cluster_name = generated_test_data.existing_cluster_name
-    fargate_profile_name = random_string()
+    fargate_profile_name = mock_random.get_random_string()
     expected_exception = InvalidParameterException
 
     test_inputs = dict(
@@ -1385,8 +1409,203 @@ def assert_valid_selectors(ClusterBuilder, expected_msg, expected_result, select
             ResponseAttributes.FARGATE_PROFILE
         ]
         for key, expected_value in test_inputs.items():
-            result[key].should.equal(expected_value)
+            assert result[key] == expected_value
     else:
         with pytest.raises(ClientError) as raised_exception:
             client.create_fargate_profile(**test_inputs)
         assert_expected_exception(raised_exception, expected_exception, expected_msg)
+
+
+@mock_aws
+def test_update_cluster_config(ClusterBuilder):
+    client, generated_cluster = ClusterBuilder(BatchCountSize.SINGLE)
+    cluster_name = generated_cluster.existing_cluster_name
+
+    new_vpc_config = {
+        "subnetIds": ["test-new-subnet"],
+        "endpointPublicAccess": False,
+    }
+
+    new_logging = {"clusterLogging": [{"types": ["api", "audit"], "enabled": True}]}
+
+    client_request_token = "test-new-client-request-token"
+
+    new_kubernetes_network_config = {"serviceIpv4Cidr": "0.0.0.0"}
+    new_remote_network_config = {
+        "remoteNodeNetworks": [
+            {"cidrs": ["test-new-cidrs"]},
+        ],
+    }
+
+    client.update_cluster_config(
+        name=cluster_name,
+        resourcesVpcConfig=new_vpc_config,
+        logging=new_logging,
+        clientRequestToken=client_request_token,
+        kubernetesNetworkConfig=new_kubernetes_network_config,
+        remoteNetworkConfig=new_remote_network_config,
+    )
+
+    updated = client.describe_cluster(name=cluster_name)[ResponseAttributes.CLUSTER]
+    assert updated[ClusterAttributes.RESOURCES_VPC_CONFIG] == new_vpc_config
+    assert updated[ClusterAttributes.LOGGING] == new_logging
+    assert (
+        updated[ClusterAttributes.KUBERNETES_NETWORK_CONFIG]
+        == new_kubernetes_network_config
+    )
+    assert updated[ClusterAttributes.REMOTE_NETWORK_CONFIG] == new_remote_network_config
+    assert updated[ClusterAttributes.CLIENT_REQUEST_TOKEN] == client_request_token
+
+
+@mock_aws
+def test_update_cluster_config_not_found(ClusterBuilder):
+    client, generated_cluster = ClusterBuilder(BatchCountSize.SINGLE)
+
+    expected_exception = ResourceNotFoundException
+    expected_msg = CLUSTER_NOT_FOUND_MSG.format(
+        clusterName=generated_cluster.nonexistent_cluster_name
+    )
+    with pytest.raises(ClientError) as raised_exception:
+        client.update_cluster_config(name=generated_cluster.nonexistent_cluster_name)
+
+    assert_expected_exception(raised_exception, expected_exception, expected_msg)
+
+
+@mock_aws
+def test_update_nodegroup_config_labels(NodegroupBuilder):
+    client, generated_test_data = NodegroupBuilder()
+    cluster_name = generated_test_data.cluster_name
+    nodegroup_name = generated_test_data.existing_nodegroup_name
+
+    # Add/update labels
+    result = client.update_nodegroup_config(
+        clusterName=cluster_name,
+        nodegroupName=nodegroup_name,
+        labels={
+            "addOrUpdateLabels": {"env": "test", "team": "platform"},
+        },
+    )
+    assert "update" in result
+    assert result["update"]["status"] == "Successful"
+    assert result["update"]["type"] == "ConfigUpdate"
+
+    # Verify labels were applied
+    nodegroup = client.describe_nodegroup(
+        clusterName=cluster_name, nodegroupName=nodegroup_name
+    )["nodegroup"]
+    assert nodegroup["labels"]["env"] == "test"
+    assert nodegroup["labels"]["team"] == "platform"
+
+    # Remove a label
+    client.update_nodegroup_config(
+        clusterName=cluster_name,
+        nodegroupName=nodegroup_name,
+        labels={"removeLabels": ["env"]},
+    )
+    nodegroup = client.describe_nodegroup(
+        clusterName=cluster_name, nodegroupName=nodegroup_name
+    )["nodegroup"]
+    assert "env" not in nodegroup["labels"]
+    assert nodegroup["labels"]["team"] == "platform"
+
+
+@mock_aws
+def test_update_nodegroup_config_taints(NodegroupBuilder):
+    client, generated_test_data = NodegroupBuilder()
+    cluster_name = generated_test_data.cluster_name
+    nodegroup_name = generated_test_data.existing_nodegroup_name
+
+    # Add taints
+    result = client.update_nodegroup_config(
+        clusterName=cluster_name,
+        nodegroupName=nodegroup_name,
+        taints={
+            "addOrUpdateTaints": [
+                {"key": "dedicated", "value": "gpu", "effect": "NO_SCHEDULE"},
+            ],
+        },
+    )
+    assert result["update"]["status"] == "Successful"
+
+    nodegroup = client.describe_nodegroup(
+        clusterName=cluster_name, nodegroupName=nodegroup_name
+    )["nodegroup"]
+    assert len(nodegroup["taints"]) == 1
+    assert nodegroup["taints"][0]["key"] == "dedicated"
+
+    # Remove taints
+    client.update_nodegroup_config(
+        clusterName=cluster_name,
+        nodegroupName=nodegroup_name,
+        taints={
+            "removeTaints": [
+                {"key": "dedicated", "effect": "NO_SCHEDULE"},
+            ],
+        },
+    )
+    nodegroup = client.describe_nodegroup(
+        clusterName=cluster_name, nodegroupName=nodegroup_name
+    )["nodegroup"]
+    assert len(nodegroup["taints"]) == 0
+
+
+@mock_aws
+def test_update_nodegroup_config_scaling(NodegroupBuilder):
+    client, generated_test_data = NodegroupBuilder()
+    cluster_name = generated_test_data.cluster_name
+    nodegroup_name = generated_test_data.existing_nodegroup_name
+
+    result = client.update_nodegroup_config(
+        clusterName=cluster_name,
+        nodegroupName=nodegroup_name,
+        scalingConfig={"minSize": 1, "maxSize": 5, "desiredSize": 3},
+    )
+    assert result["update"]["status"] == "Successful"
+
+    nodegroup = client.describe_nodegroup(
+        clusterName=cluster_name, nodegroupName=nodegroup_name
+    )["nodegroup"]
+    assert nodegroup["scalingConfig"]["minSize"] == 1
+    assert nodegroup["scalingConfig"]["maxSize"] == 5
+    assert nodegroup["scalingConfig"]["desiredSize"] == 3
+
+
+@mock_aws
+def test_update_nodegroup_config_cluster_not_found():
+    client = boto3.client(SERVICE, region_name=REGION)
+    expected_exception = ResourceNotFoundException
+    expected_msg = CLUSTER_NOT_FOUND_MSG.format(clusterName="nonexistent")
+
+    with pytest.raises(ClientError) as raised_exception:
+        client.update_nodegroup_config(
+            clusterName="nonexistent",
+            nodegroupName="ng-1",
+            labels={"addOrUpdateLabels": {"key": "value"}},
+        )
+    assert_expected_exception(raised_exception, expected_exception, expected_msg)
+
+
+@mock_aws
+def test_update_nodegroup_config_nodegroup_not_found(ClusterBuilder):
+    client, generated_test_data = ClusterBuilder()
+    cluster_name = generated_test_data.existing_cluster_name
+    expected_exception = ResourceNotFoundException
+    expected_msg = NODEGROUP_NOT_FOUND_MSG.format(nodegroupName="nonexistent")
+
+    with pytest.raises(ClientError) as raised_exception:
+        client.update_nodegroup_config(
+            clusterName=cluster_name,
+            nodegroupName="nonexistent",
+            labels={"addOrUpdateLabels": {"key": "value"}},
+        )
+    assert_expected_exception(raised_exception, expected_exception, expected_msg)
+
+
+@mock_aws
+def test_invalid_arn_raises_exception():
+    eks = boto3.client("eks", "us-east-2")
+    with pytest.raises(ClientError, match=r"Invalid.*arn") as exc:
+        eks.create_cluster(
+            name="a", roleArn="arn:invalid:format", resourcesVpcConfig={}
+        )
+    assert exc.value.response["Error"]["Code"] == "InvalidParameterException"

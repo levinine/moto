@@ -1,5 +1,4 @@
 import json
-import sure  # noqa # pylint: disable=unused-import
 
 from moto.awslambda.policy import Policy
 
@@ -26,7 +25,7 @@ def test_policy():
         "FunctionName": "function_name",
         "Principal": {"Service": "events.amazonaws.com"},
         "Effect": "Allow",
-        "Resource": "arn:$LATEST",
+        "Resource": "arn",
         "Sid": "statement0",
         "Condition": {
             "ArnLike": {
@@ -37,11 +36,10 @@ def test_policy():
     }
 
     policy.add_statement(json.dumps(statement))
-    expected.should.be.equal(policy.statements[0])
+    assert expected == policy.statements[0]
 
-    sid = statement.get("StatementId", None)
-    if sid == None:
-        raise "TestCase.statement does not contain StatementId"
+    sid = statement.get("StatementId")
+    assert sid is not None
 
     policy.del_statement(sid)
-    [].should.be.equal(policy.statements)
+    assert [] == policy.statements

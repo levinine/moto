@@ -1,42 +1,42 @@
-from moto.core.exceptions import RESTError, JsonRESTError, AWSError
-
-ERROR_WITH_MODEL_NAME = """{% extends 'single_error' %}
-{% block extra %}<ModelName>{{ model }}</ModelName>{% endblock %}
-"""
+from moto.core.exceptions import ServiceException
 
 
-class SagemakerClientError(RESTError):
-    def __init__(self, *args, **kwargs):
-        kwargs.setdefault("template", "single_error")
-        self.templates["model_error"] = ERROR_WITH_MODEL_NAME
-        super(SagemakerClientError, self).__init__(*args, **kwargs)
+class SagemakerClientError(ServiceException):
+    pass
 
 
-class ModelError(RESTError):
-    def __init__(self, *args, **kwargs):
-        kwargs.setdefault("template", "model_error")
-        self.templates["model_error"] = ERROR_WITH_MODEL_NAME
-        super(ModelError, self).__init__(*args, **kwargs)
+class ValidationError(SagemakerClientError):
+    code = "ValidationException"
+
+    # We have to keep this initializer because call sites are using message="message"
+    def __init__(self, message: str):
+        super().__init__(message)
 
 
-class MissingModel(ModelError):
-    code = 404
-
-    def __init__(self, *args, **kwargs):
-        super(MissingModel, self).__init__(
-            "NoSuchModel", "Could not find model", *args, **kwargs
-        )
+class MissingModel(ValidationError):
+    def __init__(self, model: str):
+        super().__init__(f'Could not find model "{model}".')
 
 
-class ValidationError(JsonRESTError):
-    def __init__(self, message, **kwargs):
-        super(ValidationError, self).__init__("ValidationException", message, **kwargs)
+class AWSValidationException(SagemakerClientError):
+    code = "ValidationException"
 
 
-class AWSValidationException(AWSError):
-    TYPE = "ValidationException"
+class ResourceInUseException(SagemakerClientError):
+    code = "ResourceInUse"
+
+    # We have to keep this initializer because call sites are using message="message"
+    def __init__(self, message: str):
+        super().__init__(message)
 
 
-class ResourceNotFound(JsonRESTError):
-    def __init__(self, message, **kwargs):
-        super(ResourceNotFound, self).__init__(__class__.__name__, message, **kwargs)
+class ConflictException(SagemakerClientError):
+    code = "ConflictException"
+
+
+class ResourceNotFound(SagemakerClientError):
+    code = "ResourceNotFound"
+
+    # We have to keep this initializer because call sites are using message="message"
+    def __init__(self, message: str):
+        super().__init__(message)

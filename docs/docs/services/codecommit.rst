@@ -12,17 +12,6 @@
 codecommit
 ==========
 
-|start-h3| Example usage |end-h3|
-
-.. sourcecode:: python
-
-            @mock_codecommit
-            def test_codecommit_behaviour:
-                boto3.client("codecommit")
-                ...
-
-
-
 |start-h3| Implemented features for this service |end-h3|
 
 - [ ] associate_approval_rule_template_with_repository
@@ -50,6 +39,7 @@ codecommit
 - [ ] evaluate_pull_request_approval_rules
 - [ ] get_approval_rule_template
 - [ ] get_blob
+- [ ] get_blob_differences
 - [ ] get_branch
 - [ ] get_comment
 - [ ] get_comment_reactions
@@ -70,6 +60,7 @@ codecommit
 - [ ] list_approval_rule_templates
 - [ ] list_associated_approval_rule_templates_for_repository
 - [ ] list_branches
+- [ ] list_file_commit_history
 - [ ] list_pull_requests
 - [ ] list_repositories
 - [ ] list_repositories_for_approval_rule_template
@@ -101,5 +92,6 @@ codecommit
 - [ ] update_pull_request_status
 - [ ] update_pull_request_title
 - [ ] update_repository_description
+- [ ] update_repository_encryption_key
 - [ ] update_repository_name
 

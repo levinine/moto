@@ -4,7 +4,7 @@
 IAM-like Access Control
 =======================
 
-Moto also has the ability to authenticate and authorize actions, just like it's done by IAM in AWS. This functionality can be enabled by either setting the `INITIAL_NO_AUTH_ACTION_COUNT` environment variable or using the `set_initial_no_auth_action_count` decorator. Note that the current implementation is very basic, see `the source code <https://github.com/spulec/moto/blob/master/moto/core/access_control.py>`_ for more information.
+Moto also has the ability to authenticate and authorize actions, just like it's done by IAM in AWS. This functionality can be enabled by either setting the `INITIAL_NO_AUTH_ACTION_COUNT` environment variable or using the `set_initial_no_auth_action_count` decorator. Note that the current implementation is very basic, see `the source code <https://github.com/getmoto/moto/blob/master/moto/iam/access_control.py>`_ for more information.
 
 `INITIAL_NO_AUTH_ACTION_COUNT`
 ------------------------------
@@ -19,7 +19,7 @@ This is a decorator that works similarly to the environment variable, but the se
 .. sourcecode:: python
 
     @set_initial_no_auth_action_count(4)
-    @mock_ec2
+    @mock_aws
     def test_describe_instances_allowed():
         policy_document = {
             "Version": "2012-10-17",
@@ -44,4 +44,4 @@ This is a decorator that works similarly to the environment variable, but the se
         assert len(instances) == 0
 
 
-See `the related test suite <https://github.com/spulec/moto/blob/master/tests/test_core/test_auth.py>`_ for more examples.
+See `the related test suite <https://github.com/getmoto/moto/blob/master/tests/test_core/test_auth.py>`_ for more examples.

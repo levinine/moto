@@ -1,74 +1,49 @@
 import json
 import re
-
-from urllib.parse import urlsplit
+from typing import Any
 
 from moto.core.responses import BaseResponse
-from .models import polly_backends
+
+from .models import PollyBackend, polly_backends
 from .resources import LANGUAGE_CODES, VOICE_IDS
 
 LEXICON_NAME_REGEX = re.compile(r"^[0-9A-Za-z]{1,20}$")
 
 
 class PollyResponse(BaseResponse):
-    @property
-    def polly_backend(self):
-        return polly_backends[self.region]
+    def __init__(self) -> None:
+        super().__init__(service_name="polly")
 
     @property
-    def json(self):
+    def polly_backend(self) -> PollyBackend:
+        return polly_backends[self.current_account][self.region]
+
+    @property
+    def json(self) -> dict[str, Any]:  # type: ignore[misc]
         if not hasattr(self, "_json"):
             self._json = json.loads(self.body)
         return self._json
 
-    def _error(self, code, message):
-        return json.dumps({"__type": code, "message": message}), dict(status=400)
+    def _error(self, code: str, message: str) -> tuple[str, dict[str, int]]:
+        return json.dumps({"__type": code, "message": message}), {"status": 400}
 
-    def _get_action(self):
-        # Amazon is now naming things /v1/api_name
-        url_parts = urlsplit(self.uri).path.lstrip("/").split("/")
-        # [0] = 'v1'
-
-        return url_parts[1]
-
-    # DescribeVoices
-    def voices(self):
+    def describe_voices(self) -> str | tuple[str, dict[str, int]]:
         language_code = self._get_param("LanguageCode")
-        next_token = self._get_param("NextToken")
 
         if language_code is not None and language_code not in LANGUAGE_CODES:
+            all_codes = ", ".join(LANGUAGE_CODES)  # type: ignore
             msg = (
-                "1 validation error detected: Value '{0}' at 'languageCode' failed to satisfy constraint: "
-                "Member must satisfy enum value set: [{1}]".format(
-                    language_code, ", ".join(LANGUAGE_CODES)
-                )
+                f"1 validation error detected: Value '{language_code}' at 'languageCode' failed to satisfy constraint: "
+                f"Member must satisfy enum value set: [{all_codes}]"
             )
-            return msg, dict(status=400)
+            return msg, {"status": 400}
 
-        voices = self.polly_backend.describe_voices(language_code, next_token)
+        voices = self.polly_backend.describe_voices(language_code)
 
         return json.dumps({"Voices": voices})
 
-    def lexicons(self):
-        # Dish out requests based on methods
-
-        # anything after the /v1/lexicons/
-        args = urlsplit(self.uri).path.lstrip("/").split("/")[2:]
-
-        if self.method == "GET":
-            if len(args) == 0:
-                return self._get_lexicons_list()
-            else:
-                return self._get_lexicon(*args)
-        elif self.method == "PUT":
-            return self._put_lexicons(*args)
-        elif self.method == "DELETE":
-            return self._delete_lexicon(*args)
-
-        return self._error("InvalidAction", "Bad route")
-
-    # PutLexicon
-    def _put_lexicons(self, lexicon_name):
+    def put_lexicon(self) -> str | tuple[str, dict[str, int]]:
+        lexicon_name = self._get_param("LexiconName")
         if LEXICON_NAME_REGEX.match(lexicon_name) is None:
             return self._error(
                 "InvalidParameterValue", "Lexicon name must match [0-9A-Za-z]{1,20}"
@@ -81,16 +56,13 @@ class PollyResponse(BaseResponse):
 
         return ""
 
-    # ListLexicons
-    def _get_lexicons_list(self):
-        next_token = self._get_param("NextToken")
-
-        result = {"Lexicons": self.polly_backend.list_lexicons(next_token)}
+    def list_lexicons(self) -> str:
+        result = {"Lexicons": self.polly_backend.list_lexicons()}
 
         return json.dumps(result)
 
-    # GetLexicon
-    def _get_lexicon(self, lexicon_name):
+    def get_lexicon(self) -> str | tuple[str, dict[str, int]]:
+        lexicon_name = self._get_param("LexiconName")
         try:
             lexicon = self.polly_backend.get_lexicon(lexicon_name)
         except KeyError:
@@ -103,8 +75,8 @@ class PollyResponse(BaseResponse):
 
         return json.dumps(result)
 
-    # DeleteLexicon
-    def _delete_lexicon(self, lexicon_name):
+    def delete_lexicon(self) -> str | tuple[str, dict[str, int]]:
+        lexicon_name = self._get_param("LexiconName")
         try:
             self.polly_backend.delete_lexicon(lexicon_name)
         except KeyError:
@@ -112,8 +84,7 @@ class PollyResponse(BaseResponse):
 
         return ""
 
-    # SynthesizeSpeech
-    def speech(self):
+    def synthesize_speech(self) -> tuple[str, dict[str, Any]]:
         # Sanity check params
         args = {
             "lexicon_names": None,
@@ -170,13 +141,12 @@ class PollyResponse(BaseResponse):
         if "VoiceId" not in self.json:
             return self._error("MissingParameter", "Missing parameter VoiceId")
         if self.json["VoiceId"] not in VOICE_IDS:
-            return self._error(
-                "InvalidParameterValue", "Not one of {0}".format(", ".join(VOICE_IDS))
-            )
+            all_voices = ", ".join(VOICE_IDS)  # type: ignore
+            return self._error("InvalidParameterValue", f"Not one of {all_voices}")
         args["voice_id"] = self.json["VoiceId"]
 
         # More validation
-        if len(args["text"]) > 3000:
+        if len(args["text"]) > 3000:  # type: ignore
             return self._error("TextLengthExceededException", "Text too long")
 
         if args["speech_marks"] is not None and args["output_format"] != "json":

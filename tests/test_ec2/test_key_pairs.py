@@ -1,17 +1,23 @@
-import pytest
-
-import boto
-import sure  # noqa # pylint: disable=unused-import
-import boto3
-
-from boto.exception import EC2ResponseError
-from botocore.exceptions import ClientError
-from moto import mock_ec2, mock_ec2_deprecated, settings
+from datetime import datetime
 from uuid import uuid4
-from unittest import SkipTest
 
-from .helpers import rsa_check_private_key
+import boto3
+import pytest
+from botocore.exceptions import ClientError
 
+from moto import mock_aws
+
+from .helpers import assert_dryrun_error, check_private_key
+
+ED25519_PUBLIC_KEY_OPENSSH = b"""\
+ssh-ed25519 \
+AAAAC3NzaC1lZDI1NTE5AAAAIEwsSB9HbTeKCdkSlMZeTq9jZggaPJUwAsUi/7wakB+B \
+moto@getmoto"""
+
+ED25519_PUBLIC_KEY_FINGERPRINT = (
+    "6e:bc:8a:45:e5:fa:ba:e4:c9:a4:a3:f6:7b:da:05:16:fb:cc:88:66:05"
+    ":33:b8:a1:c2:80:9a:6b:06:ac:38:76"
+)
 
 RSA_PUBLIC_KEY_OPENSSH = b"""\
 ssh-rsa \
@@ -23,8 +29,46 @@ A3t8mL7r91aM5q6QOQm219lctFM8O7HRJnDgmhGpnjRwE1LyKktWTbgFZ4SNWU2X\
 qusUO07jKuSxzPumXBeU+JEtx0J1tqZwJlpGt2R+0qN7nKnPl2+hx \
 moto@github.com"""
 
-RSA_PUBLIC_KEY_RFC4716 = b"""\
+RSA_PUBLIC_KEY_RFC4716_1 = b"""\
 ---- BEGIN SSH2 PUBLIC KEY ----
+AAAAB3NzaC1yc2EAAAADAQABAAABAQDusXfgTE4eBP50NglSzCSEGnIL6+cr6m3H6cZANO
+Q+P1o/W4BdtcAL3sor4iGi7SOeJgo8kweyMQrhrt6HaKGgromRiz37LQx4YIAcBi4Zd023
+mO/V7Rc2Chh18mWgLSmA6ng+j37ip6452zxtv0jHAz9pJolbKBpJzbZlPN45ZCTk9ck0fS
+VHRl6VRSSPQcpqi65XpRf+35zNOCGCc1mAOOTmw59Q2a6A3t8mL7r91aM5q6QOQm219lct
+FM8O7HRJnDgmhGpnjRwE1LyKktWTbgFZ4SNWU2XqusUO07jKuSxzPumXBeU+JEtx0J1tqZ
+wJlpGt2R+0qN7nKnPl2+hx
+---- END SSH2 PUBLIC KEY ----
+"""
+
+RSA_PUBLIC_KEY_RFC4716_2 = b"""\
+---- BEGIN SSH2 PUBLIC KEY ----
+cOmmENt: moto@github.com
+AAAAB3NzaC1yc2EAAAADAQABAAABAQDusXfgTE4eBP50NglSzCSEGnIL6+cr6m3H6cZANO
+Q+P1o/W4BdtcAL3sor4iGi7SOeJgo8kweyMQrhrt6HaKGgromRiz37LQx4YIAcBi4Zd023
+mO/V7Rc2Chh18mWgLSmA6ng+j37ip6452zxtv0jHAz9pJolbKBpJzbZlPN45ZCTk9ck0fS
+VHRl6VRSSPQcpqi65XpRf+35zNOCGCc1mAOOTmw59Q2a6A3t8mL7r91aM5q6QOQm219lct
+FM8O7HRJnDgmhGpnjRwE1LyKktWTbgFZ4SNWU2XqusUO07jKuSxzPumXBeU+JEtx0J1tqZ
+wJlpGt2R+0qN7nKnPl2+hx
+---- END SSH2 PUBLIC KEY ----
+"""
+
+RSA_PUBLIC_KEY_RFC4716_3 = b"""\
+---- BEGIN SSH2 PUBLIC KEY ----
+Comment: "1024-bit RSA, converted from OpenSSH by me@example.com"
+x-command: /home/me/bin/lock-in-guest.sh
+AAAAB3NzaC1yc2EAAAADAQABAAABAQDusXfgTE4eBP50NglSzCSEGnIL6+cr6m3H6cZANO
+Q+P1o/W4BdtcAL3sor4iGi7SOeJgo8kweyMQrhrt6HaKGgromRiz37LQx4YIAcBi4Zd023
+mO/V7Rc2Chh18mWgLSmA6ng+j37ip6452zxtv0jHAz9pJolbKBpJzbZlPN45ZCTk9ck0fS
+VHRl6VRSSPQcpqi65XpRf+35zNOCGCc1mAOOTmw59Q2a6A3t8mL7r91aM5q6QOQm219lct
+FM8O7HRJnDgmhGpnjRwE1LyKktWTbgFZ4SNWU2XqusUO07jKuSxzPumXBeU+JEtx0J1tqZ
+wJlpGt2R+0qN7nKnPl2+hx
+---- END SSH2 PUBLIC KEY ----
+"""
+
+RSA_PUBLIC_KEY_RFC4716_4 = b"""\
+---- BEGIN SSH2 PUBLIC KEY ----
+Comment: This is my public key for use on \
+servers which I don't like.
 AAAAB3NzaC1yc2EAAAADAQABAAABAQDusXfgTE4eBP50NglSzCSEGnIL6+cr6m3H6cZANO
 Q+P1o/W4BdtcAL3sor4iGi7SOeJgo8kweyMQrhrt6HaKGgromRiz37LQx4YIAcBi4Zd023
 mO/V7Rc2Chh18mWgLSmA6ng+j37ip6452zxtv0jHAz9pJolbKBpJzbZlPN45ZCTk9ck0fS
@@ -46,371 +90,216 @@ ffsm7UIHtCBYERr9Nx0u20ldfhkgB1lhaJb5o0ZJ3pmJ38KChfyHe5EUcqRdEFo89Mp72VI2Z6UHyL17
 moto@github.com"""
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
+@pytest.mark.requires_clean_slate
 def test_key_pairs_empty():
-    conn = boto.connect_ec2("the_key", "the_secret")
-    assert len(conn.get_all_key_pairs()) == 0
-
-
-@mock_ec2
-def test_key_pairs_empty_boto3():
-    if settings.TEST_SERVER_MODE:
-        raise SkipTest("ServerMode is not guaranteed to be empty")
     client = boto3.client("ec2", "us-west-1")
-    client.describe_key_pairs()["KeyPairs"].should.be.empty
+    assert client.describe_key_pairs()["KeyPairs"] == []
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_key_pairs_invalid_id():
-    conn = boto.connect_ec2("the_key", "the_secret")
-
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.get_all_key_pairs("foo")
-    cm.value.code.should.equal("InvalidKeyPair.NotFound")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-
-@mock_ec2
-def test_key_pairs_invalid_id_boto3():
     client = boto3.client("ec2", "us-west-1")
 
     with pytest.raises(ClientError) as ex:
         client.describe_key_pairs(KeyNames=[str(uuid4())])
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidKeyPair.NotFound")
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidKeyPair.NotFound"
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
-def test_key_pairs_create():
-    conn = boto.connect_ec2("the_key", "the_secret")
-
-    with pytest.raises(EC2ResponseError) as ex:
-        conn.create_key_pair("foo", dry_run=True)
-    ex.value.error_code.should.equal("DryRunOperation")
-    ex.value.status.should.equal(412)
-    ex.value.message.should.equal(
-        "An error occurred (DryRunOperation) when calling the CreateKeyPair operation: Request would have succeeded, but DryRun flag is set"
-    )
-
-    kp = conn.create_key_pair("foo")
-    rsa_check_private_key(kp.material)
-
-    kps = conn.get_all_key_pairs()
-    assert len(kps) == 1
-    assert kps[0].name == "foo"
-
-
-# Has boto3 equivalent
-@mock_ec2_deprecated
-def test_key_pairs_create_two():
-    conn = boto.connect_ec2("the_key", "the_secret")
-
-    kp1 = conn.create_key_pair("foo")
-    rsa_check_private_key(kp1.material)
-
-    kp2 = conn.create_key_pair("bar")
-    rsa_check_private_key(kp2.material)
-
-    assert kp1.material != kp2.material
-
-    kps = conn.get_all_key_pairs()
-    kps.should.have.length_of(2)
-    assert {i.name for i in kps} == {"foo", "bar"}
-
-    kps = conn.get_all_key_pairs("foo")
-    kps.should.have.length_of(1)
-    kps[0].name.should.equal("foo")
-
-
-@mock_ec2
-def test_key_pairs_create_dryrun_boto3():
+@mock_aws
+def test_key_pairs_create_dryrun():
     ec2 = boto3.resource("ec2", "us-west-1")
 
     with pytest.raises(ClientError) as ex:
         ec2.create_key_pair(KeyName="foo", DryRun=True)
-    ex.value.response["Error"]["Code"].should.equal("DryRunOperation")
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(412)
-    ex.value.response["Error"]["Message"].should.equal(
-        "An error occurred (DryRunOperation) when calling the CreateKeyPair operation: Request would have succeeded, but DryRun flag is set"
-    )
+    assert_dryrun_error(ex)
 
 
-@mock_ec2
-def test_key_pairs_create_boto3():
+@mock_aws
+@pytest.mark.parametrize("key_type, fingerprint_len", [("rsa", 59), ("ed25519", 95)])
+def test_key_pairs_create(key_type: str, fingerprint_len: int):
     ec2 = boto3.resource("ec2", "us-west-1")
     client = boto3.client("ec2", "us-west-1")
 
     key_name = str(uuid4())[0:6]
-    kp = ec2.create_key_pair(KeyName=key_name)
-    rsa_check_private_key(kp.key_material)
+    kp = ec2.create_key_pair(KeyName=key_name, KeyType=key_type)
+    check_private_key(kp.key_material, key_type)
     # Verify the client can create a key_pair as well - should behave the same
     key_name2 = str(uuid4())
-    kp2 = client.create_key_pair(KeyName=key_name2)
-    rsa_check_private_key(kp2["KeyMaterial"])
+    kp2 = client.create_key_pair(KeyName=key_name2, KeyType=key_type)
+    check_private_key(kp2["KeyMaterial"], key_type)
 
-    kp.key_material.shouldnt.equal(kp2["KeyMaterial"])
+    assert kp.key_material != kp2["KeyMaterial"]
 
     kps = client.describe_key_pairs()["KeyPairs"]
-    all_names = set([k["KeyName"] for k in kps])
-    all_names.should.contain(key_name)
-    all_names.should.contain(key_name2)
+    all_names = {k["KeyName"] for k in kps}
+    assert key_name in all_names
+    assert key_name2 in all_names
 
     kps = client.describe_key_pairs(KeyNames=[key_name])["KeyPairs"]
-    kps.should.have.length_of(1)
-    kps[0].should.have.key("KeyName").equal(key_name)
-    kps[0].should.have.key("KeyFingerprint")
+    assert len(kps) == 1
+    assert "KeyPairId" in kps[0]
+    assert kps[0]["KeyName"] == key_name
+    assert "KeyFingerprint" in kps[0]
+    # Naive check for hash type
+    # SHA1 - 40 + 19 `:` symbols
+    # SHA256 - 64 + 31 `:` symbols
+    assert len(kps[0]["KeyFingerprint"]) == fingerprint_len
+    assert isinstance(kps[0]["CreateTime"], datetime)
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_key_pairs_create_exist():
-    conn = boto.connect_ec2("the_key", "the_secret")
-    conn.create_key_pair("foo")
-    assert len(conn.get_all_key_pairs()) == 1
-
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.create_key_pair("foo")
-    cm.value.code.should.equal("InvalidKeyPair.Duplicate")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-
-@mock_ec2
-def test_key_pairs_create_exist_boto3():
     client = boto3.client("ec2", "us-west-1")
     key_name = str(uuid4())[0:6]
     client.create_key_pair(KeyName=key_name)
 
     with pytest.raises(ClientError) as ex:
         client.create_key_pair(KeyName=key_name)
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidKeyPair.Duplicate")
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidKeyPair.Duplicate"
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_key_pairs_delete_no_exist():
-    conn = boto.connect_ec2("the_key", "the_secret")
-    assert len(conn.get_all_key_pairs()) == 0
-    r = conn.delete_key_pair("foo")
-    r.should.be.ok
-
-
-@mock_ec2
-def test_key_pairs_delete_no_exist_boto3():
     client = boto3.client("ec2", "us-west-1")
-    client.delete_key_pair(KeyName=str(uuid4())[0:6])
+    resp = client.delete_key_pair(KeyName=str(uuid4())[0:6])
+    assert resp["Return"] is True
+    assert "KeyPairId" not in resp
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_key_pairs_delete_exist():
-    conn = boto.connect_ec2("the_key", "the_secret")
-    conn.create_key_pair("foo")
-
-    with pytest.raises(EC2ResponseError) as ex:
-        r = conn.delete_key_pair("foo", dry_run=True)
-    ex.value.error_code.should.equal("DryRunOperation")
-    ex.value.status.should.equal(412)
-    ex.value.message.should.equal(
-        "An error occurred (DryRunOperation) when calling the DeleteKeyPair operation: Request would have succeeded, but DryRun flag is set"
-    )
-
-    r = conn.delete_key_pair("foo")
-    r.should.be.ok
-    assert len(conn.get_all_key_pairs()) == 0
-
-
-@mock_ec2
-def test_key_pairs_delete_exist_boto3():
     client = boto3.client("ec2", "us-west-1")
     key_name = str(uuid4())[0:6]
     client.create_key_pair(KeyName=key_name)
 
     with pytest.raises(ClientError) as ex:
         client.delete_key_pair(KeyName=key_name, DryRun=True)
-    ex.value.response["Error"]["Code"].should.equal("DryRunOperation")
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(412)
-    ex.value.response["Error"]["Message"].should.equal(
-        "An error occurred (DryRunOperation) when calling the DeleteKeyPair operation: Request would have succeeded, but DryRun flag is set"
-    )
+    assert_dryrun_error(ex)
 
     client.delete_key_pair(KeyName=key_name)
-    [kp.get("Name") for kp in client.describe_key_pairs()["KeyPairs"]].shouldnt.contain(
-        key_name
-    )
+    assert key_name not in [
+        kp.get("Name") for kp in client.describe_key_pairs()["KeyPairs"]
+    ]
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
-def test_key_pairs_import():
-    conn = boto.connect_ec2("the_key", "the_secret")
-
-    with pytest.raises(EC2ResponseError) as ex:
-        conn.import_key_pair("foo", RSA_PUBLIC_KEY_OPENSSH, dry_run=True)
-    ex.value.error_code.should.equal("DryRunOperation")
-    ex.value.status.should.equal(412)
-    ex.value.message.should.equal(
-        "An error occurred (DryRunOperation) when calling the ImportKeyPair operation: Request would have succeeded, but DryRun flag is set"
-    )
-
-    kp1 = conn.import_key_pair("foo", RSA_PUBLIC_KEY_OPENSSH)
-    assert kp1.name == "foo"
-    assert kp1.fingerprint == RSA_PUBLIC_KEY_FINGERPRINT
-
-    kp2 = conn.import_key_pair("foo2", RSA_PUBLIC_KEY_RFC4716)
-    assert kp2.name == "foo2"
-    assert kp2.fingerprint == RSA_PUBLIC_KEY_FINGERPRINT
-
-    kps = conn.get_all_key_pairs()
-    assert len(kps) == 2
-    assert kps[0].name == kp1.name
-    assert kps[1].name == kp2.name
-
-
-@mock_ec2
-def test_key_pairs_import_boto3():
+@mock_aws
+@pytest.mark.parametrize(
+    "public_key,fingerprint,key_type",
+    [
+        (RSA_PUBLIC_KEY_OPENSSH, RSA_PUBLIC_KEY_FINGERPRINT, "rsa"),
+        (RSA_PUBLIC_KEY_RFC4716_1, RSA_PUBLIC_KEY_FINGERPRINT, "rsa"),
+        (RSA_PUBLIC_KEY_RFC4716_2, RSA_PUBLIC_KEY_FINGERPRINT, "rsa"),
+        (RSA_PUBLIC_KEY_RFC4716_3, RSA_PUBLIC_KEY_FINGERPRINT, "rsa"),
+        (RSA_PUBLIC_KEY_RFC4716_4, RSA_PUBLIC_KEY_FINGERPRINT, "rsa"),
+        (ED25519_PUBLIC_KEY_OPENSSH, ED25519_PUBLIC_KEY_FINGERPRINT, "ed25519"),
+    ],
+    ids=[
+        "rsa-openssh",
+        "rsa-rfc4716-1",
+        "rsa-rfc4716-2",
+        "rsa-rfc4716-3",
+        "rsa-rfc4716-4",
+        "ed25519",
+    ],
+)
+def test_key_pairs_import(public_key, fingerprint, key_type):
     client = boto3.client("ec2", "us-west-1")
 
     key_name = str(uuid4())[0:6]
     with pytest.raises(ClientError) as ex:
         client.import_key_pair(
-            KeyName=key_name, PublicKeyMaterial=RSA_PUBLIC_KEY_OPENSSH, DryRun=True
+            KeyName=key_name, PublicKeyMaterial=public_key, DryRun=True
         )
-    ex.value.response["Error"]["Code"].should.equal("DryRunOperation")
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(412)
-    ex.value.response["Error"]["Message"].should.equal(
-        "An error occurred (DryRunOperation) when calling the ImportKeyPair operation: Request would have succeeded, but DryRun flag is set"
+    assert_dryrun_error(ex)
+
+    kp1 = client.import_key_pair(KeyName=key_name, PublicKeyMaterial=public_key)
+
+    assert "KeyPairId" in kp1
+    assert kp1["KeyName"] == key_name
+    assert kp1["KeyFingerprint"] == fingerprint
+
+    resp = client.describe_key_pairs(
+        Filters=[{"Name": "key-pair-id", "Values": [kp1["KeyPairId"]]}]
     )
+    key_pair = resp["KeyPairs"][0]
+    assert key_pair["KeyPairId"] == kp1["KeyPairId"]
+    assert key_pair["KeyFingerprint"] == kp1["KeyFingerprint"]
+    assert key_pair["KeyName"] == kp1["KeyName"]
+    assert key_pair["KeyType"] == key_type
+    assert "PublicKey" not in key_pair
 
-    kp1 = client.import_key_pair(
-        KeyName=key_name, PublicKeyMaterial=RSA_PUBLIC_KEY_OPENSSH
+    resp = client.describe_key_pairs(
+        IncludePublicKey=True,
+        Filters=[{"Name": "key-pair-id", "Values": [kp1["KeyPairId"]]}],
     )
-
-    kp1.should.have.key("KeyName").equal(key_name)
-    kp1.should.have.key("KeyFingerprint").equal(RSA_PUBLIC_KEY_FINGERPRINT)
-
-    key_name2 = str(uuid4())
-    kp2 = client.import_key_pair(
-        KeyName=key_name2, PublicKeyMaterial=RSA_PUBLIC_KEY_RFC4716
-    )
-    kp2.should.have.key("KeyName").equal(key_name2)
-    kp2.should.have.key("KeyFingerprint").equal(RSA_PUBLIC_KEY_FINGERPRINT)
-
-    all_kps = client.describe_key_pairs()["KeyPairs"]
-    all_names = [kp["KeyName"] for kp in all_kps]
-    all_names.should.contain(kp1["KeyName"])
-    all_names.should.contain(kp2["KeyName"])
+    key_pair = resp["KeyPairs"][0]
+    assert key_pair["PublicKey"] == public_key.decode("utf-8")
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
+def test_key_pairs_import_invalid_key():
+    client = boto3.client("ec2", "us-west-1")
+
+    with pytest.raises(ClientError) as exc:
+        client.import_key_pair(
+            KeyName="sth", PublicKeyMaterial="---- BEGIN SSH2 PUBLIC KEY ----\nsth"
+        )
+    err = exc.value.response["Error"]
+    assert err["Code"] == "InvalidKeyPair.Format"
+
+
+@mock_aws
 def test_key_pairs_import_exist():
-    conn = boto.connect_ec2("the_key", "the_secret")
-    kp = conn.import_key_pair("foo", RSA_PUBLIC_KEY_OPENSSH)
-    assert kp.name == "foo"
-    assert len(conn.get_all_key_pairs()) == 1
-
-    with pytest.raises(EC2ResponseError) as cm:
-        conn.create_key_pair("foo")
-    cm.value.code.should.equal("InvalidKeyPair.Duplicate")
-    cm.value.status.should.equal(400)
-    cm.value.request_id.should_not.be.none
-
-
-@mock_ec2
-def test_key_pairs_import_exist_boto3():
     client = boto3.client("ec2", "us-west-1")
 
     key_name = str(uuid4())[0:6]
     kp = client.import_key_pair(
         KeyName=key_name, PublicKeyMaterial=RSA_PUBLIC_KEY_OPENSSH
     )
-    kp["KeyName"].should.equal(key_name)
+    assert kp["KeyName"] == key_name
 
-    client.describe_key_pairs(KeyNames=[key_name])["KeyPairs"].should.have.length_of(1)
+    assert len(client.describe_key_pairs(KeyNames=[key_name])["KeyPairs"]) == 1
 
     with pytest.raises(ClientError) as ex:
         client.create_key_pair(KeyName=key_name)
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.value.response["ResponseMetadata"].should.have.key("RequestId")
-    ex.value.response["Error"]["Code"].should.equal("InvalidKeyPair.Duplicate")
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "RequestId" in ex.value.response["ResponseMetadata"]
+    assert ex.value.response["Error"]["Code"] == "InvalidKeyPair.Duplicate"
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_key_pairs_invalid():
-    conn = boto.connect_ec2("the_key", "the_secret")
-
-    with pytest.raises(EC2ResponseError) as ex:
-        conn.import_key_pair("foo", b"")
-    ex.value.error_code.should.equal("InvalidKeyPair.Format")
-    ex.value.status.should.equal(400)
-    ex.value.message.should.equal("Key is not in valid OpenSSH public key format")
-
-    with pytest.raises(EC2ResponseError) as ex:
-        conn.import_key_pair("foo", b"garbage")
-    ex.value.error_code.should.equal("InvalidKeyPair.Format")
-    ex.value.status.should.equal(400)
-    ex.value.message.should.equal("Key is not in valid OpenSSH public key format")
-
-    with pytest.raises(EC2ResponseError) as ex:
-        conn.import_key_pair("foo", DSA_PUBLIC_KEY_OPENSSH)
-    ex.value.error_code.should.equal("InvalidKeyPair.Format")
-    ex.value.status.should.equal(400)
-    ex.value.message.should.equal("Key is not in valid OpenSSH public key format")
-
-
-@mock_ec2
-def test_key_pairs_invalid_boto3():
     client = boto3.client("ec2", "us-west-1")
 
     with pytest.raises(ClientError) as ex:
         client.import_key_pair(KeyName="foo", PublicKeyMaterial=b"")
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
     err = ex.value.response["Error"]
-    err["Code"].should.equal("InvalidKeyPair.Format")
-    err["Message"].should.equal("Key is not in valid OpenSSH public key format")
+    assert err["Code"] == "InvalidKeyPair.Format"
+    assert err["Message"] == "Key is not in valid OpenSSH public key format"
 
     with pytest.raises(ClientError) as ex:
         client.import_key_pair(KeyName="foo", PublicKeyMaterial=b"garbage")
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
     err = ex.value.response["Error"]
-    err["Code"].should.equal("InvalidKeyPair.Format")
-    err["Message"].should.equal("Key is not in valid OpenSSH public key format")
+    assert err["Code"] == "InvalidKeyPair.Format"
+    assert err["Message"] == "Key is not in valid OpenSSH public key format"
 
     with pytest.raises(ClientError) as ex:
         client.import_key_pair(KeyName="foo", PublicKeyMaterial=DSA_PUBLIC_KEY_OPENSSH)
-    ex.value.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
+    assert ex.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
     err = ex.value.response["Error"]
-    err["Code"].should.equal("InvalidKeyPair.Format")
-    err["Message"].should.equal("Key is not in valid OpenSSH public key format")
+    assert err["Code"] == "InvalidKeyPair.Format"
+    assert err["Message"] == "Key is not in valid OpenSSH public key format"
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_key_pair_filters():
-    conn = boto.connect_ec2("the_key", "the_secret")
-
-    _ = conn.create_key_pair("kpfltr1")
-    kp2 = conn.create_key_pair("kpfltr2")
-    kp3 = conn.create_key_pair("kpfltr3")
-
-    kp_by_name = conn.get_all_key_pairs(filters={"key-name": "kpfltr2"})
-    set([kp.name for kp in kp_by_name]).should.equal(set([kp2.name]))
-
-    kp_by_name = conn.get_all_key_pairs(filters={"fingerprint": kp3.fingerprint})
-    set([kp.name for kp in kp_by_name]).should.equal(set([kp3.name]))
-
-
-@mock_ec2
-def test_key_pair_filters_boto3():
     ec2 = boto3.resource("ec2", "us-west-1")
     client = boto3.client("ec2", "us-west-1")
 
@@ -424,9 +313,57 @@ def test_key_pair_filters_boto3():
     kp_by_name = client.describe_key_pairs(
         Filters=[{"Name": "key-name", "Values": [key_name_2]}]
     )["KeyPairs"]
-    set([kp["KeyName"] for kp in kp_by_name]).should.equal(set([kp2.name]))
+    assert {kp["KeyName"] for kp in kp_by_name} == {kp2.name}
 
     kp_by_name = client.describe_key_pairs(
         Filters=[{"Name": "fingerprint", "Values": [kp3.key_fingerprint]}]
     )["KeyPairs"]
-    set([kp["KeyName"] for kp in kp_by_name]).should.equal(set([kp3.name]))
+    assert {kp["KeyName"] for kp in kp_by_name} == {kp3.name}
+
+
+@mock_aws
+def test_key_pair_with_tags():
+    client = boto3.client("ec2", "us-east-1")
+
+    key_name_1 = str(uuid4())[0:6]
+    key_name_2 = str(uuid4())[0:6]
+    key_name_3 = str(uuid4())[0:6]
+    key_name_4 = str(uuid4())[0:6]
+    resp = client.create_key_pair(
+        KeyName=key_name_1,
+        TagSpecifications=[
+            {"ResourceType": "key-pair", "Tags": [{"Key": "key", "Value": "val1"}]}
+        ],
+    )
+    assert resp["Tags"] == [{"Key": "key", "Value": "val1"}]
+    kp1 = resp["KeyPairId"]
+
+    kp2 = client.create_key_pair(
+        KeyName=key_name_2,
+        TagSpecifications=[
+            {"ResourceType": "key-pair", "Tags": [{"Key": "key", "Value": "val2"}]}
+        ],
+    )["KeyPairId"]
+
+    assert "Tags" not in client.create_key_pair(KeyName=key_name_3)
+
+    key_pairs = client.describe_key_pairs(
+        Filters=[{"Name": "tag-key", "Values": ["key"]}]
+    )["KeyPairs"]
+    assert [kp["KeyPairId"] for kp in key_pairs] == [kp1, kp2]
+
+    key_pairs = client.describe_key_pairs(
+        Filters=[{"Name": "tag:key", "Values": ["val1"]}]
+    )["KeyPairs"]
+    assert len(key_pairs) == 1
+    assert key_pairs[0]["KeyPairId"] == kp1
+    assert key_pairs[0]["Tags"] == [{"Key": "key", "Value": "val1"}]
+
+    resp = client.import_key_pair(
+        KeyName=key_name_4,
+        PublicKeyMaterial=RSA_PUBLIC_KEY_OPENSSH,
+        TagSpecifications=[
+            {"ResourceType": "key-pair", "Tags": [{"Key": "key", "Value": "val4"}]}
+        ],
+    )
+    assert resp["Tags"] == [{"Key": "key", "Value": "val4"}]

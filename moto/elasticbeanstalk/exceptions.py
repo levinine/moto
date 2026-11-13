@@ -1,15 +1,13 @@
-from moto.core.exceptions import RESTError
+from moto.core.exceptions import ServiceException
 
 
-class InvalidParameterValueError(RESTError):
-    def __init__(self, message):
-        super(InvalidParameterValueError, self).__init__(
-            "InvalidParameterValue", message
-        )
+class ElasticBeanstalkException(ServiceException):
+    pass
 
 
-class ResourceNotFoundException(RESTError):
-    def __init__(self, message):
-        super(ResourceNotFoundException, self).__init__(
-            "ResourceNotFoundException", message
-        )
+class InvalidParameterValueError(ServiceException):
+    code = "InvalidParameterValue"
+
+
+class ResourceNotFoundException(ServiceException):
+    code = "ResourceNotFoundException"

@@ -1,5 +1,3 @@
-from __future__ import absolute_import, division, print_function
-
 # Standard library modules
 import unittest
 
@@ -8,7 +6,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 # Package modules
-from moto import mock_cloudformation
+from moto import mock_aws
 
 AWS_REGION = "us-west-1"
 
@@ -63,7 +61,7 @@ Resources:
 class TestSimpleInstance(unittest.TestCase):
     def test_simple_instance(self):
         """Test that we can create a simple CloudFormation stack that imports values from an existing CloudFormation stack"""
-        with mock_cloudformation():
+        with mock_aws():
             client = boto3.client("cloudformation", region_name=AWS_REGION)
             client.create_stack(StackName=SG_STACK_NAME, TemplateBody=SG_TEMPLATE)
             response = client.create_stack(
@@ -79,10 +77,14 @@ class TestSimpleInstance(unittest.TestCase):
 
     def test_simple_instance_missing_export(self):
         """Test that we get an exception if a CloudFormation stack tries to imports a non-existent export value"""
-        with mock_cloudformation():
+        with mock_aws():
             client = boto3.client("cloudformation", region_name=AWS_REGION)
             with self.assertRaises(ClientError) as e:
                 client.create_stack(StackName=EC2_STACK_NAME, TemplateBody=EC2_TEMPLATE)
             self.assertIn("Error", e.exception.response)
             self.assertIn("Code", e.exception.response["Error"])
-            self.assertEqual("ExportNotFound", e.exception.response["Error"]["Code"])
+            self.assertEqual("ValidationError", e.exception.response["Error"]["Code"])
+            expected_error_message = "No export named SimpleSecurityGroup found."
+            self.assertEqual(
+                expected_error_message, e.exception.response["Error"]["Message"]
+            )

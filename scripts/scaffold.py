@@ -10,7 +10,7 @@ This script will look at the botocore's definition file for the selected
 service and operation, then auto-generate the code and responses.
 
 Almost all services are supported, as long as the service's protocol is
-`query`, `json` or `rest-json`.  Even if aws adds new services, this script
+`query`, `json`, `rest-xml` or `rest-json`.  Even if aws adds new services, this script
 will work if the protocol is known.
 
 TODO:
@@ -19,11 +19,13 @@ TODO:
   - Some services's operations might cause this script to crash. If that
     should happen, please create an issue for the problem.
 """
+
 import os
+import random
 import re
 import inspect
 import importlib
-from lxml import etree
+import subprocess
 
 import click
 import jinja2
@@ -35,14 +37,27 @@ from botocore.session import Session
 import boto3
 
 from moto.core.responses import BaseResponse
-from moto.core import BaseBackend
+from moto.core.base_backend import BaseBackend
 from inflection import singularize
 from implementation_coverage import get_moto_implementation
+
+PRIMITIVE_SHAPES = [
+    "string",
+    "timestamp",
+    "integer",
+    "boolean",
+    "sensitiveStringType",
+    "long",
+]
 
 TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "./template")
 
 INPUT_IGNORED_IN_BACKEND = ["Marker", "PageSize"]
 OUTPUT_IGNORED_IN_BACKEND = ["NextMarker"]
+
+root_dir = (
+    subprocess.check_output(["git", "rev-parse", "--show-toplevel"]).decode().strip()
+)
 
 
 def print_progress(title, body, color):
@@ -51,44 +66,57 @@ def print_progress(title, body, color):
     click.echo(body)
 
 
-def select_service_and_operation():
+def select_service():
     """Prompt user to select service and operation."""
+    service_name = None
     service_names = Session().get_available_services()
     service_completer = WordCompleter(service_names)
-    service_name = prompt("Select service: ", completer=service_completer)
-    if service_name not in service_names:
-        click.secho(f"{service_name} is not valid service", fg="red")
-        raise click.Abort()
-    moto_client = get_moto_implementation(service_name)
+    while service_name not in service_names:
+        service_name = prompt("Select service: ", completer=service_completer)
+        if service_name not in service_names:
+            click.secho(f"{service_name} is not valid service", fg="red")
+    return service_name
+
+
+def print_service_status(service_name):
+    implemented, operation_names = get_operations(service_name)
+    click.echo("==Current Implementation Status==")
+    for operation_name in operation_names:
+        check = "X" if operation_name in implemented else " "
+        click.secho(f"[{check}] {operation_name}")
+    click.echo("=================================")
+
+
+def select_operation(service_name):
+    implemented, operation_names = get_operations(service_name)
+    operation_completer = WordCompleter(operation_names)
+
+    operation_available = False
+    while not operation_available:
+        operation_name = prompt("Select Operation: ", completer=operation_completer)
+        if operation_name not in operation_names:
+            click.secho(f"{operation_name} is not valid operation", fg="red")
+        elif operation_name in implemented:
+            click.secho(f"{operation_name} is already implemented", fg="red")
+        else:
+            operation_available = True
+    return operation_name
+
+
+def get_operations(service_name):
+    try:
+        moto_client, _name = get_moto_implementation(service_name)
+    except ModuleNotFoundError:
+        moto_client = None
     real_client = boto3.client(service_name, region_name="us-east-1")
     implemented = []
-    not_implemented = []
-
     operation_names = [
         xform_name(op) for op in real_client.meta.service_model.operation_names
     ]
     for operation in operation_names:
         if moto_client and operation in dir(moto_client):
             implemented.append(operation)
-        else:
-            not_implemented.append(operation)
-    operation_completer = WordCompleter(operation_names)
-
-    click.echo("==Current Implementation Status==")
-    for operation_name in operation_names:
-        check = "X" if operation_name in implemented else " "
-        click.secho(f"[{check}] {operation_name}")
-    click.echo("=================================")
-    operation_name = prompt("Select Operation: ", completer=operation_completer)
-
-    if operation_name not in operation_names:
-        click.secho(f"{operation_name} is not valid operation", fg="red")
-        raise click.Abort()
-
-    if operation_name in implemented:
-        click.secho(f"{operation_name} is already implemented", fg="red")
-        raise click.Abort()
-    return service_name, operation_name
+    return implemented, operation_names
 
 
 def get_escaped_service(service):
@@ -127,29 +155,6 @@ def render_template(tmpl_dir, tmpl_filename, context, service, alt_filename=None
             fhandle.write(rendered)
 
 
-def append_mock_to_init_py(service):
-    """Update __init_.py to add line to load the mock service."""
-    path = os.path.join(os.path.dirname(__file__), "..", "moto", "__init__.py")
-    with open(path, encoding="utf-8") as fhandle:
-        lines = [_.replace("\n", "") for _ in fhandle.readlines()]
-
-    if any(_ for _ in lines if re.match(f"^mock_{service}.*lazy_load(.*)$", _)):
-        return
-    filtered_lines = [_ for _ in lines if re.match("^mock_.*lazy_load(.*)$", _)]
-    last_import_line_index = lines.index(filtered_lines[-1])
-
-    escaped_service = get_escaped_service(service)
-    new_line = (
-        f"mock_{escaped_service} = lazy_load("
-        f'".{escaped_service}", "mock_{escaped_service}", boto3_name="{service}")'
-    )
-    lines.insert(last_import_line_index + 1, new_line)
-
-    body = "\n".join(lines) + "\n"
-    with open(path, "w", encoding="utf-8") as fhandle:
-        fhandle.write(body)
-
-
 def initialize_service(service, api_protocol):
     """Create lib and test dirs if they don't exist."""
     lib_dir = get_lib_dir(service)
@@ -159,10 +164,7 @@ def initialize_service(service, api_protocol):
 
     client = boto3.client(service)
     service_class = client.__class__.__name__
-    endpoint_prefix = (
-        # pylint: disable=protected-access
-        client._service_model.endpoint_prefix
-    )
+    endpoint_prefix = client._service_model.endpoint_prefix
 
     tmpl_context = {
         "service": service,
@@ -197,8 +199,6 @@ def initialize_service(service, api_protocol):
             else None
         )
         render_template(tmpl_dir, tmpl_filename, tmpl_context, service, alt_filename)
-    # append mock to initi files
-    append_mock_to_init_py(service)
 
 
 def to_upper_camel_case(string):
@@ -224,9 +224,7 @@ def get_operation_name_in_keys(operation_name, operation_keys):
     return operation_keys[index]
 
 
-def get_function_in_responses(
-    service, operation, protocol
-):  # pylint: disable=too-many-locals
+def get_function_in_responses(service, operation, protocol): 
     """refers to definition of API in botocore, and autogenerates function
     You can see example of elbv2 from link below.
       https://github.com/boto/botocore/blob/develop/botocore/data/elbv2/2015-12-01/service-2.json
@@ -234,7 +232,6 @@ def get_function_in_responses(
     escaped_service = get_escaped_service(service)
     client = boto3.client(service)
 
-    # pylint: disable=protected-access
     aws_operation_name = get_operation_name_in_keys(
         to_upper_camel_case(operation),
         list(client._service_model._service_description["operations"].keys()),
@@ -252,17 +249,17 @@ def get_function_in_responses(
     output_names = [
         to_snake_case(_) for _ in outputs.keys() if _ not in OUTPUT_IGNORED_IN_BACKEND
     ]
-    body = f"\ndef {operation}(self):\n"
+
+    body = ""
+    if protocol in ["rest-xml"]:
+        body += f"\ndef {operation}(self, request, full_url, headers):\n"
+        body += "    self.setup_class(request, full_url, headers)\n"
+    else:
+        body = f"\ndef {operation}(self):\n"
+    body += "    params = self._get_params()\n"
 
     for input_name, input_type in inputs.items():
-        type_name = input_type.type_name
-        if type_name == "integer":
-            arg_line_tmpl = '    {}=self._get_int_param("{}")\n'
-        elif type_name == "list":
-            arg_line_tmpl = '    {}=self._get_list_prefix("{}.member")\n'
-        else:
-            arg_line_tmpl = '    {}=self._get_param("{}")\n'
-        body += arg_line_tmpl.format(to_snake_case(input_name), input_name)
+        body += f'    {to_snake_case(input_name)} = params.get("{input_name}")\n'
     if output_names:
         body += f"    {', '.join(output_names)} = self.{escaped_service}_backend.{operation}(\n"
     else:
@@ -271,10 +268,9 @@ def get_function_in_responses(
         body += f"        {input_name}={input_name},\n"
 
     body += "    )\n"
-    if protocol == "query":
-        body += f"    template = self.response_template({operation.upper()}_TEMPLATE)\n"
-        names = ", ".join([f"{n}={n}" for n in output_names])
-        body += f"    return template.render({names})\n"
+    if protocol in ["query", "rest-xml"]:
+        body += get_result_dict_template(service, operation)
+        body += f"    return ActionResult(result)\n"
     elif protocol in ["json", "rest-json"]:
         body += "    # TODO: adjust response\n"
         names = ", ".join([f"{to_lower_camel_case(_)}={_}" for _ in output_names])
@@ -289,7 +285,6 @@ def get_function_in_models(service, operation):
     """
     client = boto3.client(service)
 
-    # pylint: disable=protected-access
     aws_operation_name = get_operation_name_in_keys(
         to_upper_camel_case(operation),
         list(client._service_model._service_description["operations"].keys()),
@@ -316,104 +311,111 @@ def get_function_in_models(service, operation):
     return body
 
 
-def _get_subtree(name, shape, replace_list, name_prefix=None):
+def get_func_in_tests(service, operation):
+    """
+    Autogenerates an example unit test
+    Throws an exception by default, to remind the user to implement this
+    """
+    escaped_service = get_escaped_service(service)
+    random_region = random.choice(["us-east-2", "eu-west-1", "ap-southeast-1"])
+    body = "\n\n"
+    body += f"@mock_aws\n"
+    body += f"def test_{operation}():\n"
+    body += f'    client = boto3.client("{service}", region_name="{random_region}")\n'
+    body += f"    resp = client.{operation}()\n"
+    body += f"\n"
+    body += f'    raise Exception("NotYetImplemented")'
+    body += "\n"
+    return body
+
+
+def _get_dict_entry(name, shape, indent, name_prefix=None):
+    """Recursively build a Python dict string entry for an output shape member."""
     if not name_prefix:
         name_prefix = []
 
     class_name = shape.__class__.__name__
-    if class_name in ("StringShape", "Shape"):
-        tree = etree.Element(name)  # pylint: disable=c-extension-no-member
-        if name_prefix:
-            tree.text = f"{{{{ {name_prefix[-1]}.{to_snake_case(name)} }}}}"
-        else:
-            tree.text = f"{{{{ {to_snake_case(name)} }}}}"
-        return tree
+    shape_type = shape.type_name
+    prefix = " " * indent
 
-    if class_name in ("ListShape",):
-        # pylint: disable=c-extension-no-member
-        replace_list.append((name, name_prefix))
-        tree = etree.Element(name)
-        t_member = etree.Element("member")
-        tree.append(t_member)
-        for nested_name, nested_shape in shape.member.members.items():
-            t_member.append(
-                _get_subtree(
-                    nested_name,
-                    nested_shape,
-                    replace_list,
-                    name_prefix + [singularize(name.lower())],
+    if class_name in ("StringShape", "Shape") or shape_type == "structure":
+        if shape_type == "structure" and hasattr(shape, "members") and shape.members:
+            # Nested structure - recurse into members
+            lines = [f'{prefix}"{name}": {{']
+            for member_name, member_shape in shape.members.items():
+                lines.append(
+                    _get_dict_entry(
+                        member_name,
+                        member_shape,
+                        indent + 4,
+                        name_prefix,
+                    )
                 )
-            )
-        return tree
-    raise ValueError("Not supported Shape")
+            lines.append(f"{prefix}}},")
+            return "\n".join(lines)
+        else:
+            if name_prefix:
+                var = f"{name_prefix[-1]}.{to_snake_case(name)}"
+            else:
+                var = to_snake_case(name)
+            return f'{prefix}"{name}": {var},'
+
+    if class_name in ("ListShape",) or shape_type == "list":
+        singular = singularize(name.lower())
+        if name_prefix:
+            iter_var = f"{name_prefix[-1]}.{to_snake_case(name)}"
+        else:
+            iter_var = to_snake_case(name)
+
+        if hasattr(shape.member, "members") and shape.member.members:
+            lines = [f'{prefix}"{name}": [']
+            lines.append(f"{prefix}    {{")
+            for member_name, member_shape in shape.member.members.items():
+                lines.append(
+                    _get_dict_entry(
+                        member_name,
+                        member_shape,
+                        indent + 8,
+                        name_prefix + [singular],
+                    )
+                )
+            lines.append(f"{prefix}    }}")
+            lines.append(f"{prefix}    for {singular} in {iter_var}")
+            lines.append(f"{prefix}],")
+            return "\n".join(lines)
+        else:
+            return f'{prefix}"{name}": {iter_var},'
+
+    raise ValueError(f"Not supported Shape: {shape}")
 
 
-def get_response_query_template(service, operation):  # pylint: disable=too-many-locals
-    """refers to definition of API in botocore, and autogenerates template
-    Assume that response format is xml when protocol is query
+def get_result_dict_template(service, operation):
+    """Refers to definition of API in botocore, and autogenerates a Python
+    dict template representing the output model of the boto3 client operation.
 
     You can see example of elbv2 from link below.
       https://github.com/boto/botocore/blob/develop/botocore/data/elbv2/2015-12-01/service-2.json
     """
     client = boto3.client(service)
 
-    # pylint: disable=protected-access
     aws_operation_name = get_operation_name_in_keys(
         to_upper_camel_case(operation),
         list(client._service_model._service_description["operations"].keys()),
     )
 
     op_model = client._service_model.operation_model(aws_operation_name)
-    result_wrapper = op_model.output_shape.serialization["resultWrapper"]
-    response_wrapper = result_wrapper.replace("Result", "Response")
-    metadata = op_model.metadata
-    xml_namespace = metadata["xmlNamespace"]
+    if not hasattr(op_model.output_shape, "members"):
+        outputs = {}
+    else:
+        outputs = op_model.output_shape.members
 
-    # build xml tree
-    # pylint: disable=c-extension-no-member
-    t_root = etree.Element(response_wrapper, xmlns=xml_namespace)
-
-    # build metadata
-    t_metadata = etree.Element("ResponseMetadata")
-    t_request_id = etree.Element("RequestId")
-    t_request_id.text = "1549581b-12b7-11e3-895e-1334aEXAMPLE"
-    t_metadata.append(t_request_id)
-    t_root.append(t_metadata)
-
-    # build result
-    t_result = etree.Element(result_wrapper)
-    outputs = op_model.output_shape.members
-    replace_list = []
+    lines = [f"    result = {{"]
     for output_name, output_shape in outputs.items():
-        t_result.append(_get_subtree(output_name, output_shape, replace_list))
-    t_root.append(t_result)
-    xml_body = etree.tostring(t_root, pretty_print=True).decode("utf-8")
-    xml_body_lines = xml_body.splitlines()
-    for replace in replace_list:
-        name = replace[0]
-        prefix = replace[1]
-        singular_name = singularize(name)
-
-        start_tag = f"<{name}>"
-        iter_name = f"{prefix[-1]}.{name.lower()}" if prefix else name.lower()
-        loop_start = f"{{%% for {singular_name.lower()} in {iter_name} %%}}"
-        end_tag = f"</{name}>"
-        loop_end = "{{ endfor }}"
-
-        start_tag_indexes = [i for i, l in enumerate(xml_body_lines) if start_tag in l]
-        if len(start_tag_indexes) != 1:
-            raise Exception(f"tag {start_tag} not found in response body")
-        start_tag_index = start_tag_indexes[0]
-        xml_body_lines.insert(start_tag_index + 1, loop_start)
-
-        end_tag_indexes = [i for i, l in enumerate(xml_body_lines) if end_tag in l]
-        if len(end_tag_indexes) != 1:
-            raise Exception(f"tag {end_tag} not found in response body")
-        end_tag_index = end_tag_indexes[0]
-        xml_body_lines.insert(end_tag_index, loop_end)
-    xml_body = "\n".join(xml_body_lines)
-    body = f'\n{operation.upper()}_TEMPLATE = """{xml_body}"""'
-    return body
+        if output_name in OUTPUT_IGNORED_IN_BACKEND:
+            continue
+        lines.append(_get_dict_entry(output_name, output_shape, indent=8))
+    lines.append("    }\n")
+    return "\n".join(lines)
 
 
 def insert_code_to_class(path, base_class, new_code):
@@ -441,17 +443,49 @@ def insert_code_to_class(path, base_class, new_code):
         fhandle.write(body)
 
 
-def insert_url(service, operation, api_protocol):  # pylint: disable=too-many-locals
+def uri_to_regexp(uri: str) -> str:
+    """converts uri w/ placeholder to regexp
+      '/accounts/{AwsAccountId}/namespaces/{Namespace}/groups'
+    -> '^/accounts/(?P<AwsAccountId>[^/]+)/namespaces/(?P<Namespace>[^/]+)/groups$'
+
+      '/trustStores/{trustStoreArn+}'
+    -> '^/trustStores/(?P<trustStoreArn>.+)$'
+
+    """
+
+    def _convert(elem: str) -> str:
+        if not re.match("^{.*}$", elem):
+            # URL-parts sometimes contain a $
+            # Like Greengrass: /../deployments/$reset
+            # We don't want to our regex to think this marks an end-of-line, so let's escape it
+            return elem.replace("$", r"\$")
+
+        # In the Smithy specification, a plus sign indicates a greedy label, which
+        # allows the label to match multiple path segments, including forward slashes.
+        # If a label is the last segment of a uri, we default it to greedy as well.
+        greedy = elem.endswith("+}") or uri.endswith(elem)
+        name = elem.replace("{", "").replace("}", "").replace("+", "").replace("-", "_")
+        if greedy:
+            return f"(?P<{name}>.+)"
+        return f"(?P<{name}>[^/]+)"
+
+    elems = uri.split("/")
+    regexp = "/".join([_convert(elem) for elem in elems])
+    return f"^{regexp}$"
+
+
+def insert_url(service, operation, api_protocol):
     """Create urls.py with appropriate URL bases and paths."""
     client = boto3.client(service)
     service_class = client.__class__.__name__
 
-    # pylint: disable=protected-access
     aws_operation_name = get_operation_name_in_keys(
         to_upper_camel_case(operation),
         list(client._service_model._service_description["operations"].keys()),
     )
     uri = client._service_model.operation_model(aws_operation_name).http["requestUri"]
+    if "?" in uri:
+        uri = uri.split("?")[0]
 
     path = os.path.join(
         os.path.dirname(__file__), "..", "moto", get_escaped_service(service), "urls.py"
@@ -461,6 +495,7 @@ def insert_url(service, operation, api_protocol):  # pylint: disable=too-many-lo
 
     if any(_ for _ in lines if re.match(uri, _)):
         return
+    uri = uri_to_regexp(uri)[1:-1]
 
     url_paths_found = False
     last_elem_line_index = -1
@@ -476,7 +511,9 @@ def insert_url(service, operation, api_protocol):  # pylint: disable=too-many-lo
 
     # generate url pattern
     if api_protocol == "rest-json":
-        new_line = '    "{0}/.*$": response.dispatch,'
+        new_line = f'    "{{0}}{uri}$": {service_class}Response.dispatch,'
+    elif api_protocol == "rest-xml":
+        new_line = f'    "{{0}}{uri}$": {service_class}Response.{operation},'
     else:
         new_line = f'    "{{0}}{uri}$": {service_class}Response.dispatch,'
     if new_line in lines:
@@ -493,19 +530,11 @@ def insert_codes(service, operation, api_protocol):
     escaped_service = get_escaped_service(service)
     func_in_responses = get_function_in_responses(service, operation, api_protocol)
     func_in_models = get_function_in_models(service, operation)
+    func_in_tests = get_func_in_tests(service, operation)
     # edit responses.py
     responses_path = f"moto/{escaped_service}/responses.py"
     print_progress("inserting code", responses_path, "green")
     insert_code_to_class(responses_path, BaseResponse, func_in_responses)
-
-    # insert template
-    if api_protocol == "query":
-        template = get_response_query_template(service, operation)
-        with open(responses_path, encoding="utf-8") as fhandle:
-            lines = [_[:-1] for _ in fhandle.readlines()]
-        lines += template.splitlines()
-        with open(responses_path, "w", encoding="utf-8") as fhandle:
-            fhandle.write("\n".join(lines))
 
     # edit models.py
     models_path = f"moto/{escaped_service}/models.py"
@@ -515,38 +544,55 @@ def insert_codes(service, operation, api_protocol):
     # edit urls.py
     insert_url(service, operation, api_protocol)
 
+    # Edit tests
+    tests_path = f"tests/test_{escaped_service}/test_{escaped_service}.py"
+    print_progress("inserting code", tests_path, "green")
+    with open(tests_path, "a", encoding="utf-8") as fhandle:
+        fhandle.write(func_in_tests)
+
 
 @click.command()
 def main():
-
     click.echo("This script uses the click-module.\n")
-    click.echo(" - Start typing the name of the service you want to extend\n"
-               " - Use Tab to auto-complete the first suggest service\n"
-               " - Use the up and down-arrows on the keyboard to select something from the dropdown\n"
-               " - Press enter to continue\n")
+    click.echo(
+        " - Start typing the name of the service you want to extend\n"
+        " - Use Tab to auto-complete the first suggest service\n"
+        " - Use the up and down-arrows on the keyboard to select something from the dropdown\n"
+        " - Press enter to continue\n"
+    )
 
     """Create basic files needed for the user's choice of service and op."""
-    service, operation = select_service_and_operation()
+    service = select_service()
+    print_service_status(service)
 
-    # pylint: disable=protected-access
-    api_protocol = boto3.client(service)._service_model.metadata["protocol"]
-    initialize_service(service, api_protocol)
+    while True:
+        operation = select_operation(service)
 
-    if api_protocol in ["query", "json", "rest-json"]:
-        insert_codes(service, operation, api_protocol)
-    else:
-        print_progress(
-            "skip inserting code",
-            f'api protocol "{api_protocol}" is not supported',
-            "yellow",
+        api_protocol = boto3.client(service)._service_model.metadata["protocol"]
+        initialize_service(service, api_protocol)
+
+        if api_protocol in ["query", "json", "rest-json", "rest-xml"]:
+            insert_codes(service, operation, api_protocol)
+        else:
+            print_progress(
+                "skip inserting code",
+                f'api protocol "{api_protocol}" is not supported',
+                "yellow",
+            )
+
+        click.echo("Updating backend index...")
+        subprocess.check_output(
+            [f"{root_dir}/scripts/update_backend_index.py"]
+        ).decode().strip()
+
+        click.echo(
+            "\n"
+            "Please select another operation, or Ctrl-X/Ctrl-C to cancel."
+            "\n\n"
+            "Remaining steps after development is complete:\n"
+            "- Run scripts/implementation_coverage.py,\n"
+            "\n"
         )
-
-    click.echo(
-        "\n"
-        "Remaining steps after development is complete:\n"
-        '- Run scripts/implementation_coverage.py,\n'
-        "- Run scripts/update_backend_index.py."
-    )
 
 
 if __name__ == "__main__":

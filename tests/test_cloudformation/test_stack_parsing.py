@@ -1,24 +1,23 @@
-import boto3
 import json
-import yaml
-
-import pytest
-import sure  # noqa # pylint: disable=unused-import
-from botocore.exceptions import ClientError
 from unittest.mock import patch
 
-from moto.cloudformation.exceptions import ValidationError
-from moto.cloudformation.models import FakeStack
-from moto.cloudformation.parsing import (
-    resource_class_from_type,
-    parse_condition,
-)
-from moto import mock_cloudformation, mock_sqs, mock_ssm, settings
-from moto.sqs.models import Queue
-from moto.s3.models import FakeBucket
-from moto.cloudformation.utils import yaml_tag_constructor
-from moto.packages.boto.cloudformation.stack import Output
+import boto3
+import pytest
+import yaml
+from botocore.exceptions import ClientError
 
+from moto import mock_aws, settings
+from moto.cloudformation.exceptions import ValidationError
+from moto.cloudformation.models import Stack
+from moto.cloudformation.parsing import (
+    Output,
+    parse_condition,
+    resource_class_from_type,
+)
+from moto.cloudformation.utils import yaml_tag_constructor
+from moto.core import DEFAULT_ACCOUNT_ID as ACCOUNT_ID
+from moto.s3.models import FakeBucket
+from moto.sqs.models import Queue
 
 dummy_template = {
     "AWSTemplateFormatVersion": "2010-09-09",
@@ -106,7 +105,7 @@ sub_template = {
         "Queue1": {
             "Type": "AWS::SQS::Queue",
             "Properties": {
-                "QueueName": {"Fn::Sub": "${AWS::StackName}-queue-${!Literal}"},
+                "QueueName": {"Fn::Sub": "${AWS::StackName}-queue"},
                 "VisibilityTimeout": 60,
             },
         },
@@ -114,6 +113,49 @@ sub_template = {
             "Type": "AWS::SQS::Queue",
             "Properties": {
                 "QueueName": {"Fn::Sub": "${Queue1.QueueName}"},
+                "VisibilityTimeout": 60,
+            },
+        },
+    },
+}
+
+sub_num_template = {
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Parameters": {
+        "Num": {"Type": "Number"},
+    },
+    "Resources": {
+        "Queue": {
+            "Type": "AWS::SQS::Queue",
+            "Properties": {
+                "QueueName": {"Fn::Sub": "${AWS::StackName}-queue-${Num}"},
+                "VisibilityTimeout": 60,
+            },
+        },
+    },
+}
+
+sub_mapping_template = {
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Parameters": {
+        "TestRef": {"Type": "String"},
+    },
+    "Conditions": {
+        "IsApple": {"Fn::Equals": [{"Ref": "TestRef"}, "apple"]},
+    },
+    "Resources": {
+        "Queue": {
+            "Type": "AWS::SQS::Queue",
+            "Properties": {
+                "QueueName": {
+                    "Fn::Sub": [
+                        "${AWS::StackName}-queue-${TestRef}-${TestFn}",
+                        {
+                            "TestRef": {"Ref": "TestRef"},
+                            "TestFn": {"Fn::If": ["IsApple", "yes", "no"]},
+                        },
+                    ],
+                },
                 "VisibilityTimeout": 60,
             },
         },
@@ -146,6 +188,31 @@ import_value_template = {
         }
     },
 }
+to_json_string_template = {
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Resources": {
+        "DLQ": {
+            "Type": "AWS::SQS::Queue",
+            "Properties": {
+                "QueueName": "deadletter",
+                "VisibilityTimeout": 60,
+            },
+        },
+        "Queue": {
+            "Type": "AWS::SQS::Queue",
+            "Properties": {
+                "QueueName": "test",
+                "RedrivePolicy": {
+                    "Fn::ToJsonString": {
+                        "deadLetterTargetArn": {"Fn::Sub": "${DLQ.Arn}"},
+                        "maxReceiveCount": 1,
+                    }
+                },
+                "VisibilityTimeout": 60,
+            },
+        },
+    },
+}
 
 outputs_template = dict(list(dummy_template.items()) + list(output_dict.items()))
 null_outputs_template = dict(list(dummy_template.items()) + list(null_output.items()))
@@ -173,28 +240,32 @@ parameters_template_json = json.dumps(parameters_template)
 ssm_parameter_template_json = json.dumps(ssm_parameter_template)
 split_select_template_json = json.dumps(split_select_template)
 sub_template_json = json.dumps(sub_template)
+sub_num_template_json = json.dumps(sub_num_template)
+sub_mapping_json = json.dumps(sub_mapping_template)
 export_value_template_json = json.dumps(export_value_template)
 import_value_template_json = json.dumps(import_value_template)
+to_json_string_template_json = json.dumps(to_json_string_template)
 
 
 def test_parse_stack_resources():
-    stack = FakeStack(
+    stack = Stack(
         stack_id="test_id",
         name="test_stack",
         template=dummy_template_json,
         parameters={},
+        account_id=ACCOUNT_ID,
         region_name="us-west-1",
     )
 
-    stack.resource_map.should.have.length_of(2)
+    assert len(stack.resource_map) == 2
 
     queue = stack.resource_map["Queue"]
-    queue.should.be.a(Queue)
-    queue.name.should.equal("my-queue")
+    assert isinstance(queue, Queue)
+    assert queue.name == "my-queue"
 
     bucket = stack.resource_map["S3Bucket"]
-    bucket.should.be.a(FakeBucket)
-    bucket.physical_resource_id.should.equal(bucket.name)
+    assert isinstance(bucket, FakeBucket)
+    assert bucket.physical_resource_id == bucket.name
 
 
 @patch("moto.cloudformation.parsing.logger")
@@ -204,139 +275,151 @@ def test_missing_resource_logs(logger):
 
 
 def test_parse_stack_with_name_type_resource():
-    stack = FakeStack(
+    stack = Stack(
         stack_id="test_id",
         name="test_stack",
         template=name_type_template_json,
         parameters={},
+        account_id=ACCOUNT_ID,
         region_name="us-west-1",
     )
 
-    stack.resource_map.should.have.length_of(1)
-    list(stack.resource_map.keys())[0].should.equal("Queue")
+    assert len(stack.resource_map) == 1
+    assert list(stack.resource_map.keys())[0] == "Queue"
     queue = list(stack.resource_map.values())[0]
-    queue.should.be.a(Queue)
+    assert isinstance(queue, Queue)
 
 
 def test_parse_stack_with_tabbed_json_template():
-    stack = FakeStack(
+    stack = Stack(
         stack_id="test_id",
         name="test_stack",
         template=name_type_template_with_tabs_json,
         parameters={},
+        account_id=ACCOUNT_ID,
         region_name="us-west-1",
     )
 
-    stack.resource_map.should.have.length_of(1)
-    list(stack.resource_map.keys())[0].should.equal("Queue")
+    assert len(stack.resource_map) == 1
+    assert list(stack.resource_map.keys())[0] == "Queue"
     queue = list(stack.resource_map.values())[0]
-    queue.should.be.a(Queue)
+    assert isinstance(queue, Queue)
 
 
 def test_parse_stack_with_yaml_template():
-    stack = FakeStack(
+    stack = Stack(
         stack_id="test_id",
         name="test_stack",
         template=yaml.dump(name_type_template),
         parameters={},
+        account_id=ACCOUNT_ID,
         region_name="us-west-1",
     )
 
-    stack.resource_map.should.have.length_of(1)
-    list(stack.resource_map.keys())[0].should.equal("Queue")
+    assert len(stack.resource_map) == 1
+    assert list(stack.resource_map.keys())[0] == "Queue"
     queue = list(stack.resource_map.values())[0]
-    queue.should.be.a(Queue)
+    assert isinstance(queue, Queue)
 
 
 def test_parse_stack_with_outputs():
-    stack = FakeStack(
+    stack = Stack(
         stack_id="test_id",
         name="test_stack",
         template=output_type_template_json,
         parameters={},
+        account_id=ACCOUNT_ID,
         region_name="us-west-1",
     )
 
-    stack.output_map.should.have.length_of(1)
-    list(stack.output_map.keys())[0].should.equal("Output1")
+    assert len(stack.output_map) == 1
+    assert list(stack.output_map.keys())[0] == "Output1"
     output = list(stack.output_map.values())[0]
-    output.should.be.a(Output)
-    output.description.should.equal("This is a description.")
+    assert isinstance(output, Output)
+    assert output.description == "This is a description."
 
 
 def test_parse_stack_with_get_attribute_outputs():
-    stack = FakeStack(
+    stack = Stack(
         stack_id="test_id",
         name="test_stack",
         template=get_attribute_outputs_template_json,
         parameters={},
+        account_id=ACCOUNT_ID,
         region_name="us-west-1",
     )
 
-    stack.output_map.should.have.length_of(1)
-    list(stack.output_map.keys())[0].should.equal("Output1")
+    assert len(stack.output_map) == 1
+    assert list(stack.output_map.keys())[0] == "Output1"
     output = list(stack.output_map.values())[0]
-    output.should.be.a(Output)
-    output.value.should.equal("my-queue")
+    assert isinstance(output, Output)
+    assert output.value == "my-queue"
 
 
 def test_parse_stack_with_get_attribute_kms():
     from .fixtures.kms_key import template
 
     template_json = json.dumps(template)
-    stack = FakeStack(
+    stack = Stack(
         stack_id="test_id",
         name="test_stack",
         template=template_json,
         parameters={},
+        account_id=ACCOUNT_ID,
         region_name="us-west-1",
     )
 
-    stack.output_map.should.have.length_of(1)
-    list(stack.output_map.keys())[0].should.equal("KeyArn")
+    assert len(stack.output_map) == 1
+    assert list(stack.output_map.keys())[0] == "KeyArn"
     output = list(stack.output_map.values())[0]
-    output.should.be.a(Output)
+    assert isinstance(output, Output)
 
 
 def test_parse_stack_with_get_availability_zones():
-    stack = FakeStack(
+    stack = Stack(
         stack_id="test_id",
         name="test_stack",
         template=get_availability_zones_template_json,
         parameters={},
+        account_id=ACCOUNT_ID,
         region_name="us-east-1",
     )
 
-    stack.output_map.should.have.length_of(1)
-    list(stack.output_map.keys())[0].should.equal("Output1")
+    assert len(stack.output_map) == 1
+    assert list(stack.output_map.keys())[0] == "Output1"
     output = list(stack.output_map.values())[0]
-    output.should.be.a(Output)
-    output.value.should.equal(["us-east-1a", "us-east-1b", "us-east-1c", "us-east-1d"])
+    assert isinstance(output, Output)
+    assert output.value == ["us-east-1a", "us-east-1b", "us-east-1c", "us-east-1d"]
 
 
-@mock_sqs
-@mock_cloudformation
-def test_parse_stack_with_bad_get_attribute_outputs_using_boto3():
+@mock_aws
+def test_parse_stack_with_bad_get_attribute_outputs_using():
     conn = boto3.client("cloudformation", region_name="us-west-1")
     with pytest.raises(ClientError) as exc:
         conn.create_stack(StackName="teststack", TemplateBody=bad_output_template_json)
     err = exc.value.response["Error"]
-    err["Code"].should.equal("ValidationError")
-    err["Message"].should.equal(
-        "Template error: resource Queue does not support attribute type InvalidAttribute in Fn::GetAtt"
+    assert err["Code"] == "ValidationError"
+    assert (
+        err["Message"]
+        == "Template error: resource Queue does not support attribute type InvalidAttribute in Fn::GetAtt"
     )
 
 
 def test_parse_stack_with_null_outputs_section():
-    FakeStack.when.called_with(
-        "test_id", "test_stack", null_output_template_json, {}, "us-west-1"
-    ).should.throw(
-        ValidationError, "[/Outputs] 'null' values are not allowed in templates"
-    )
+    with pytest.raises(ValidationError) as exc:
+        Stack(
+            "test_id",
+            "test_stack",
+            null_output_template_json,
+            {},
+            account_id=ACCOUNT_ID,
+            region_name="us-west-1",
+        )
+    assert "[/Outputs] 'null' values are not allowed in templates" in str(exc.value)
 
 
 def test_parse_stack_with_parameters():
-    stack = FakeStack(
+    stack = Stack(
         stack_id="test_id",
         name="test_stack",
         template=parameters_template_json,
@@ -346,150 +429,233 @@ def test_parse_stack_with_parameters():
             "NumberListParam": "42,3.14159",
             "NoEchoParam": "hidden value",
         },
+        account_id=ACCOUNT_ID,
         region_name="us-west-1",
     )
 
-    stack.resource_map.no_echo_parameter_keys.should.have("NoEchoParam")
-    stack.resource_map.no_echo_parameter_keys.should_not.have("Param")
-    stack.resource_map.no_echo_parameter_keys.should_not.have("NumberParam")
-    stack.resource_map.no_echo_parameter_keys.should_not.have("NumberListParam")
-    stack.resource_map.resolved_parameters["NumberParam"].should.equal(42)
-    stack.resource_map.resolved_parameters["NumberListParam"].should.equal(
-        [42, 3.14159]
-    )
+    assert "NoEchoParam" in stack.resource_map.no_echo_parameter_keys
+    assert "Param" not in stack.resource_map.no_echo_parameter_keys
+    assert "NumberParam" not in stack.resource_map.no_echo_parameter_keys
+    assert "NumberListParam" not in stack.resource_map.no_echo_parameter_keys
+    assert stack.resource_map.resolved_parameters["NumberParam"] == 42
+    assert stack.resource_map.resolved_parameters["NumberListParam"] == [42, 3.14159]
 
 
 def test_parse_equals_condition():
-    parse_condition(
-        condition={"Fn::Equals": [{"Ref": "EnvType"}, "prod"]},
-        resources_map={"EnvType": "prod"},
-        condition_map={},
-    ).should.equal(True)
+    assert (
+        parse_condition(
+            condition={"Fn::Equals": [{"Ref": "EnvType"}, "prod"]},
+            resources_map={"EnvType": "prod"},
+            condition_map={},
+        )
+        is True
+    )
 
-    parse_condition(
-        condition={"Fn::Equals": [{"Ref": "EnvType"}, "prod"]},
-        resources_map={"EnvType": "staging"},
-        condition_map={},
-    ).should.equal(False)
+    assert (
+        parse_condition(
+            condition={"Fn::Equals": [{"Ref": "EnvType"}, "prod"]},
+            resources_map={"EnvType": "staging"},
+            condition_map={},
+        )
+        is False
+    )
 
 
 def test_parse_not_condition():
-    parse_condition(
-        condition={"Fn::Not": [{"Fn::Equals": [{"Ref": "EnvType"}, "prod"]}]},
-        resources_map={"EnvType": "prod"},
-        condition_map={},
-    ).should.equal(False)
+    assert (
+        parse_condition(
+            condition={"Fn::Not": [{"Fn::Equals": [{"Ref": "EnvType"}, "prod"]}]},
+            resources_map={"EnvType": "prod"},
+            condition_map={},
+        )
+        is False
+    )
 
-    parse_condition(
-        condition={"Fn::Not": [{"Fn::Equals": [{"Ref": "EnvType"}, "prod"]}]},
-        resources_map={"EnvType": "staging"},
-        condition_map={},
-    ).should.equal(True)
+    assert (
+        parse_condition(
+            condition={"Fn::Not": [{"Fn::Equals": [{"Ref": "EnvType"}, "prod"]}]},
+            resources_map={"EnvType": "staging"},
+            condition_map={},
+        )
+        is True
+    )
 
 
 def test_parse_and_condition():
-    parse_condition(
-        condition={
-            "Fn::And": [
-                {"Fn::Equals": [{"Ref": "EnvType"}, "prod"]},
-                {"Fn::Equals": [{"Ref": "EnvType"}, "staging"]},
-            ]
-        },
-        resources_map={"EnvType": "prod"},
-        condition_map={},
-    ).should.equal(False)
+    assert (
+        parse_condition(
+            condition={
+                "Fn::And": [
+                    {"Fn::Equals": [{"Ref": "EnvType"}, "prod"]},
+                    {"Fn::Equals": [{"Ref": "EnvType"}, "staging"]},
+                ]
+            },
+            resources_map={"EnvType": "prod"},
+            condition_map={},
+        )
+        is False
+    )
 
-    parse_condition(
-        condition={
-            "Fn::And": [
-                {"Fn::Equals": [{"Ref": "EnvType"}, "prod"]},
-                {"Fn::Equals": [{"Ref": "EnvType"}, "prod"]},
-            ]
-        },
-        resources_map={"EnvType": "prod"},
-        condition_map={},
-    ).should.equal(True)
+    assert (
+        parse_condition(
+            condition={
+                "Fn::And": [
+                    {"Fn::Equals": [{"Ref": "EnvType"}, "prod"]},
+                    {"Fn::Equals": [{"Ref": "EnvType"}, "prod"]},
+                ]
+            },
+            resources_map={"EnvType": "prod"},
+            condition_map={},
+        )
+        is True
+    )
 
 
 def test_parse_or_condition():
-    parse_condition(
-        condition={
-            "Fn::Or": [
-                {"Fn::Equals": [{"Ref": "EnvType"}, "prod"]},
-                {"Fn::Equals": [{"Ref": "EnvType"}, "staging"]},
-            ]
-        },
-        resources_map={"EnvType": "prod"},
-        condition_map={},
-    ).should.equal(True)
+    assert (
+        parse_condition(
+            condition={
+                "Fn::Or": [
+                    {"Fn::Equals": [{"Ref": "EnvType"}, "prod"]},
+                    {"Fn::Equals": [{"Ref": "EnvType"}, "staging"]},
+                ]
+            },
+            resources_map={"EnvType": "prod"},
+            condition_map={},
+        )
+        is True
+    )
 
-    parse_condition(
-        condition={
-            "Fn::Or": [
-                {"Fn::Equals": [{"Ref": "EnvType"}, "staging"]},
-                {"Fn::Equals": [{"Ref": "EnvType"}, "staging"]},
-            ]
-        },
-        resources_map={"EnvType": "prod"},
-        condition_map={},
-    ).should.equal(False)
+    assert (
+        parse_condition(
+            condition={
+                "Fn::Or": [
+                    {"Fn::Equals": [{"Ref": "EnvType"}, "staging"]},
+                    {"Fn::Equals": [{"Ref": "EnvType"}, "staging"]},
+                ]
+            },
+            resources_map={"EnvType": "prod"},
+            condition_map={},
+        )
+        is False
+    )
 
 
 def test_reference_other_conditions():
-    parse_condition(
-        condition={"Fn::Not": [{"Condition": "OtherCondition"}]},
-        resources_map={},
-        condition_map={"OtherCondition": True},
-    ).should.equal(False)
+    assert (
+        parse_condition(
+            condition={"Fn::Not": [{"Condition": "OtherCondition"}]},
+            resources_map={},
+            condition_map={"OtherCondition": True},
+        )
+        is False
+    )
 
 
 def test_parse_split_and_select():
-    stack = FakeStack(
+    stack = Stack(
         stack_id="test_id",
         name="test_stack",
         template=split_select_template_json,
         parameters={},
+        account_id=ACCOUNT_ID,
         region_name="us-west-1",
     )
 
-    stack.resource_map.should.have.length_of(1)
+    assert len(stack.resource_map) == 1
     queue = stack.resource_map["Queue"]
-    queue.name.should.equal("myqueue")
+    assert queue.name == "myqueue"
 
 
 def test_sub():
-    stack = FakeStack(
+    stack = Stack(
         stack_id="test_id",
         name="test_stack",
         template=sub_template_json,
         parameters={},
+        account_id=ACCOUNT_ID,
         region_name="us-west-1",
     )
 
     queue1 = stack.resource_map["Queue1"]
     queue2 = stack.resource_map["Queue2"]
-    queue2.name.should.equal(queue1.name)
+    assert queue2.name == queue1.name
+
+
+def test_sub_num():
+    stack = Stack(
+        stack_id="test_id",
+        name="test_stack",
+        template=sub_num_template_json,
+        parameters={"Num": "42"},
+        account_id=ACCOUNT_ID,
+        region_name="us-west-1",
+    )
+
+    # Errors on moto<=4.0.10 because int(42) is used with str.replace
+    queue = stack.resource_map["Queue"]
+    assert queue.name == "test_stack-queue-42"
+
+
+def test_sub_mapping():
+    stack = Stack(
+        stack_id="test_id",
+        name="test_stack",
+        template=sub_mapping_json,
+        parameters={"TestRef": "apple"},
+        account_id=ACCOUNT_ID,
+        region_name="us-west-1",
+    )
+    queue = stack.resource_map["Queue"]
+    assert queue.name == "test_stack-queue-apple-yes"
+
+    stack = Stack(
+        stack_id="test_id",
+        name="test_stack",
+        template=sub_mapping_json,
+        parameters={"TestRef": "banana"},
+        account_id=ACCOUNT_ID,
+        region_name="us-west-1",
+    )
+    queue = stack.resource_map["Queue"]
+    assert queue.name == "test_stack-queue-banana-no"
 
 
 def test_import():
-    export_stack = FakeStack(
+    export_stack = Stack(
         stack_id="test_id",
         name="test_stack",
         template=export_value_template_json,
         parameters={},
+        account_id=ACCOUNT_ID,
         region_name="us-west-1",
     )
-    import_stack = FakeStack(
+    import_stack = Stack(
         stack_id="test_id",
         name="test_stack",
         template=import_value_template_json,
         parameters={},
+        account_id=ACCOUNT_ID,
         region_name="us-west-1",
         cross_stack_resources={export_stack.exports[0].value: export_stack.exports[0]},
     )
 
     queue = import_stack.resource_map["Queue"]
-    queue.name.should.equal("value")
+    assert queue.name == "value"
+
+
+def test_to_json_string():
+    stack = Stack(
+        stack_id="test_id",
+        name="test_stack",
+        template=to_json_string_template_json,
+        parameters={},
+        account_id=ACCOUNT_ID,
+        region_name="us-west-1",
+    )
+    queue = stack.resource_map["Queue"]
+    assert queue.name == "test"
+    assert queue.dead_letter_queue.name == "deadletter"
 
 
 def test_short_form_func_in_yaml_teamplate():
@@ -532,10 +698,10 @@ def test_short_form_func_in_yaml_teamplate():
         ["KeySub", {"Fn::Sub": "A"}],
     ]
     for k, v in key_and_expects:
-        template_dict.should.have.key(k).which.should.be.equal(v)
+        assert template_dict[k] == v
 
 
-@mock_ssm
+@mock_aws
 def test_ssm_parameter_parsing():
     client = boto3.client("ssm", region_name="us-west-1")
     client.put_parameter(Name="/path/to/single/param", Value="string", Type="String")
@@ -544,7 +710,7 @@ def test_ssm_parameter_parsing():
     )
 
     if not settings.TEST_SERVER_MODE:
-        stack = FakeStack(
+        stack = Stack(
             stack_id="test_id",
             name="test_stack",
             template=ssm_parameter_template_json,
@@ -552,25 +718,25 @@ def test_ssm_parameter_parsing():
                 "SingleParamCfn": "/path/to/single/param",
                 "ListParamCfn": "/path/to/list/param",
             },
+            account_id=ACCOUNT_ID,
             region_name="us-west-1",
         )
 
-        stack.resource_map.resolved_parameters["SingleParamCfn"].should.equal("string")
-        stack.resource_map.resolved_parameters["ListParamCfn"].should.equal(
-            ["comma", "separated", "string"]
-        )
+        params = stack.resource_map.resolved_parameters
+        assert params["SingleParamCfn"] == "string"
+        assert params["ListParamCfn"] == ["comma", "separated", "string"]
 
     # Not passing in a value for ListParamCfn to test Default value
     if not settings.TEST_SERVER_MODE:
-        stack = FakeStack(
+        stack = Stack(
             stack_id="test_id",
             name="test_stack",
             template=ssm_parameter_template_json,
-            parameters={"SingleParamCfn": "/path/to/single/param",},
+            parameters={"SingleParamCfn": "/path/to/single/param"},
+            account_id=ACCOUNT_ID,
             region_name="us-west-1",
         )
 
-        stack.resource_map.resolved_parameters["SingleParamCfn"].should.equal("string")
-        stack.resource_map.resolved_parameters["ListParamCfn"].should.equal(
-            ["comma", "separated", "string"]
-        )
+        params = stack.resource_map.resolved_parameters
+        assert params["SingleParamCfn"] == "string"
+        assert params["ListParamCfn"] == ["comma", "separated", "string"]

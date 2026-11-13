@@ -1,4 +1,5 @@
 import json
+from typing import Any
 
 from moto.ecr.exceptions import InvalidParameterException
 
@@ -12,6 +13,7 @@ VALID_ACTION_TYPE_VALUES = {"expire"}
 
 REQUIRED_SELECTION_PROPERTIES = {"tagStatus", "countType", "countNumber"}
 VALID_SELECTION_PROPERTIES = {
+    "tagPatternList",
     "tagPrefixList",
     "countUnit",
     *REQUIRED_SELECTION_PROPERTIES,
@@ -28,12 +30,12 @@ class EcrLifecyclePolicyValidator:
         "'Lifecycle policy validation failure: "
     )
 
-    def __init__(self, policy_text):
+    def __init__(self, policy_text: str):
         self._policy_text = policy_text
-        self._policy_json = {}
-        self._rules = []
+        self._policy_json: dict[str, Any] = {}
+        self._rules: list[Any] = []
 
-    def validate(self):
+    def validate(self) -> None:
         try:
             self._parse_policy()
         except Exception:
@@ -61,17 +63,17 @@ class EcrLifecyclePolicyValidator:
         self._validate_rule_type()
         self._validate_rule_top_properties()
 
-    def _parse_policy(self):
+    def _parse_policy(self) -> None:
         self._policy_json = json.loads(self._policy_text)
         assert isinstance(self._policy_json, dict)
 
-    def _extract_rules(self):
+    def _extract_rules(self) -> None:
         assert "rules" in self._policy_json
         assert isinstance(self._policy_json["rules"], list)
 
         self._rules = self._policy_json["rules"]
 
-    def _validate_rule_type(self):
+    def _validate_rule_type(self) -> None:
         for rule in self._rules:
             if not isinstance(rule, dict):
                 raise InvalidParameterException(
@@ -83,7 +85,7 @@ class EcrLifecyclePolicyValidator:
                     )
                 )
 
-    def _validate_rule_top_properties(self):
+    def _validate_rule_top_properties(self) -> None:
         for rule in self._rules:
             rule_properties = set(rule.keys())
             missing_properties = REQUIRED_RULE_PROPERTIES - rule_properties
@@ -111,7 +113,7 @@ class EcrLifecyclePolicyValidator:
             self._validate_action(rule["action"])
             self._validate_selection(rule["selection"])
 
-    def _validate_action(self, action):
+    def _validate_action(self, action: Any) -> None:
         given_properties = set(action.keys())
         missing_properties = REQUIRED_ACTION_PROPERTIES - given_properties
 
@@ -139,7 +141,7 @@ class EcrLifecyclePolicyValidator:
 
             self._validate_action_type(action["type"])
 
-    def _validate_action_type(self, action_type):
+    def _validate_action_type(self, action_type: str) -> None:
         if action_type not in VALID_ACTION_TYPE_VALUES:
             raise InvalidParameterException(
                 "".join(
@@ -151,7 +153,7 @@ class EcrLifecyclePolicyValidator:
                 )
             )
 
-    def _validate_selection(self, selection):
+    def _validate_selection(self, selection: Any) -> None:
         given_properties = set(selection.keys())
         missing_properties = REQUIRED_SELECTION_PROPERTIES - given_properties
 
@@ -182,7 +184,7 @@ class EcrLifecyclePolicyValidator:
             self._validate_selection_count_unit(selection.get("countUnit"))
             self._validate_selection_count_number(selection["countNumber"])
 
-    def _validate_selection_tag_status(self, tag_status):
+    def _validate_selection_tag_status(self, tag_status: Any) -> None:
         if tag_status not in VALID_SELECTION_TAG_STATUS_VALUES:
             raise InvalidParameterException(
                 "".join(
@@ -194,7 +196,7 @@ class EcrLifecyclePolicyValidator:
                 )
             )
 
-    def _validate_selection_count_type(self, count_type):
+    def _validate_selection_count_type(self, count_type: Any) -> None:
         if count_type not in VALID_SELECTION_COUNT_TYPE_VALUES:
             raise InvalidParameterException(
                 "".join(
@@ -205,7 +207,7 @@ class EcrLifecyclePolicyValidator:
                 )
             )
 
-    def _validate_selection_count_unit(self, count_unit):
+    def _validate_selection_count_unit(self, count_unit: Any) -> None:
         if not count_unit:
             return None
 
@@ -220,7 +222,7 @@ class EcrLifecyclePolicyValidator:
                 )
             )
 
-    def _validate_selection_count_number(self, count_number):
+    def _validate_selection_count_number(self, count_number: int) -> None:
         if count_number < 1:
             raise InvalidParameterException(
                 "".join(

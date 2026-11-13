@@ -1,44 +1,34 @@
-from moto.core.exceptions import JsonRESTError
+"""Exceptions raised by the codepipeline service."""
+
+from moto.core.exceptions import ServiceException
 
 
-class InvalidStructureException(JsonRESTError):
-    code = 400
-
-    def __init__(self, message):
-        super(InvalidStructureException, self).__init__(
-            "InvalidStructureException", message
-        )
+class CodePipelineException(ServiceException):
+    pass
 
 
-class PipelineNotFoundException(JsonRESTError):
-    code = 400
-
-    def __init__(self, message):
-        super(PipelineNotFoundException, self).__init__(
-            "PipelineNotFoundException", message
-        )
+class InvalidStructureException(CodePipelineException):
+    code = "InvalidStructureException"
 
 
-class ResourceNotFoundException(JsonRESTError):
-    code = 400
-
-    def __init__(self, message):
-        super(ResourceNotFoundException, self).__init__(
-            "ResourceNotFoundException", message
-        )
+class PipelineNotFoundException(CodePipelineException):
+    code = "PipelineNotFoundException"
 
 
-class InvalidTagsException(JsonRESTError):
-    code = 400
-
-    def __init__(self, message):
-        super(InvalidTagsException, self).__init__("InvalidTagsException", message)
+class PipelineExecutionNotFoundException(CodePipelineException):
+    code = "PipelineExecutionNotFoundException"
 
 
-class TooManyTagsException(JsonRESTError):
-    code = 400
+class ResourceNotFoundException(CodePipelineException):
+    code = "ResourceNotFoundException"
 
-    def __init__(self, arn):
-        super(TooManyTagsException, self).__init__(
-            "TooManyTagsException", "Tag limit exceeded for resource [{}].".format(arn)
-        )
+
+class InvalidTagsException(CodePipelineException):
+    code = "InvalidTagsException"
+
+
+class TooManyTagsException(CodePipelineException):
+    code = "TooManyTagsException"
+
+    def __init__(self, arn: str):
+        super().__init__(f"Tag limit exceeded for resource [{arn}].")

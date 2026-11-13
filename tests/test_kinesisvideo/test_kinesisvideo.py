@@ -1,11 +1,11 @@
 import boto3
-import sure  # noqa # pylint: disable=unused-import
 import pytest
-from moto import mock_kinesisvideo
 from botocore.exceptions import ClientError
 
+from moto import mock_aws
 
-@mock_kinesisvideo
+
+@mock_aws
 def test_create_stream():
     client = boto3.client("kinesisvideo", region_name="ap-northeast-1")
     stream_name = "my-stream"
@@ -13,10 +13,10 @@ def test_create_stream():
 
     # stream can be created
     res = client.create_stream(StreamName=stream_name, DeviceName=device_name)
-    res.should.have.key("StreamARN").which.should.contain(stream_name)
+    assert stream_name in res["StreamARN"]
 
 
-@mock_kinesisvideo
+@mock_aws
 def test_create_stream_with_same_name():
     client = boto3.client("kinesisvideo", region_name="ap-northeast-1")
     stream_name = "my-stream"
@@ -29,14 +29,14 @@ def test_create_stream_with_same_name():
         client.create_stream(StreamName=stream_name, DeviceName=device_name)
 
 
-@mock_kinesisvideo
+@mock_aws
 def test_describe_stream():
     client = boto3.client("kinesisvideo", region_name="ap-northeast-1")
     stream_name = "my-stream"
     device_name = "random-device"
 
     res = client.create_stream(StreamName=stream_name, DeviceName=device_name)
-    res.should.have.key("StreamARN").which.should.contain(stream_name)
+    assert stream_name in res["StreamARN"]
     stream_arn = res["StreamARN"]
 
     # cannot create with existing stream name
@@ -45,32 +45,34 @@ def test_describe_stream():
 
     # stream can be described with name
     res = client.describe_stream(StreamName=stream_name)
-    res.should.have.key("StreamInfo")
     stream_info = res["StreamInfo"]
-    stream_info.should.have.key("StreamARN").which.should.contain(stream_name)
-    stream_info.should.have.key("StreamName").which.should.equal(stream_name)
-    stream_info.should.have.key("DeviceName").which.should.equal(device_name)
+    assert stream_name in stream_info["StreamARN"]
+    assert stream_info["StreamName"] == stream_name
+    assert stream_info["DeviceName"] == device_name
 
     # stream can be described with arn
     res = client.describe_stream(StreamARN=stream_arn)
-    res.should.have.key("StreamInfo")
     stream_info = res["StreamInfo"]
-    stream_info.should.have.key("StreamARN").which.should.contain(stream_name)
-    stream_info.should.have.key("StreamName").which.should.equal(stream_name)
-    stream_info.should.have.key("DeviceName").which.should.equal(device_name)
+    assert stream_name in stream_info["StreamARN"]
+    assert stream_info["StreamName"] == stream_name
+    assert stream_info["DeviceName"] == device_name
 
 
-@mock_kinesisvideo
+@mock_aws
 def test_describe_stream_with_name_not_exist():
     client = boto3.client("kinesisvideo", region_name="ap-northeast-1")
     stream_name_not_exist = "not-exist-stream"
 
     # cannot describe with not exist stream name
-    with pytest.raises(ClientError):
+    with pytest.raises(ClientError) as ex:
         client.describe_stream(StreamName=stream_name_not_exist)
+    metadata = ex.value.response["ResponseMetadata"]
+    assert metadata["HTTPStatusCode"] == 404
+    error = ex.value.response["Error"]
+    assert error["Code"] == "ResourceNotFoundException"
 
 
-@mock_kinesisvideo
+@mock_aws
 def test_list_streams():
     client = boto3.client("kinesisvideo", region_name="ap-northeast-1")
     stream_name = "my-stream"
@@ -82,12 +84,11 @@ def test_list_streams():
 
     # streams can be listed
     res = client.list_streams()
-    res.should.have.key("StreamInfoList")
     streams = res["StreamInfoList"]
-    streams.should.have.length_of(2)
+    assert len(streams) == 2
 
 
-@mock_kinesisvideo
+@mock_aws
 def test_delete_stream():
     client = boto3.client("kinesisvideo", region_name="ap-northeast-1")
     stream_name = "my-stream"
@@ -102,10 +103,10 @@ def test_delete_stream():
     client.delete_stream(StreamARN=stream_2_arn)
     res = client.list_streams()
     streams = res["StreamInfoList"]
-    streams.should.have.length_of(1)
+    assert len(streams) == 1
 
 
-@mock_kinesisvideo
+@mock_aws
 def test_delete_stream_with_arn_not_exist():
     client = boto3.client("kinesisvideo", region_name="ap-northeast-1")
     stream_name = "my-stream"
@@ -124,7 +125,7 @@ def test_delete_stream_with_arn_not_exist():
         client.delete_stream(StreamARN=stream_arn_not_exist)
 
 
-@mock_kinesisvideo
+@mock_aws
 def test_data_endpoint():
     client = boto3.client("kinesisvideo", region_name="ap-northeast-1")
     stream_name = "my-stream"
@@ -134,4 +135,4 @@ def test_data_endpoint():
     api_name = "GET_MEDIA"
     client.create_stream(StreamName=stream_name, DeviceName=device_name)
     res = client.get_data_endpoint(StreamName=stream_name, APIName=api_name)
-    res.should.have.key("DataEndpoint")
+    assert "DataEndpoint" in res

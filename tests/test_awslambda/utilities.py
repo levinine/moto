@@ -1,13 +1,15 @@
-import boto3
 import io
-import pytest
 import time
 import zipfile
-
-from botocore.exceptions import ClientError
-from moto import settings, mock_iam
 from uuid import uuid4
 
+import boto3
+import pytest
+from botocore.exceptions import ClientError
+
+from moto import mock_aws
+
+PYTHON_VERSION = "python3.14"
 _lambda_region = "us-west-2"
 
 
@@ -24,6 +26,8 @@ def get_test_zip_file1():
     pfunc = """
 def lambda_handler(event, context):
     print("custom log event")
+    if "error" in event:
+        raise Exception('I failed!')
     return event
 """
     return _process_lambda(pfunc)
@@ -34,17 +38,64 @@ def get_test_zip_file2():
 import boto3
 
 def lambda_handler(event, context):
-    ec2 = boto3.resource('ec2', region_name='us-west-2', endpoint_url='http://{base_url}')
+    ec2 = boto3.resource('ec2', region_name='us-west-2')
 
     volume_id = event.get('volume_id')
     vol = ec2.Volume(volume_id)
 
-    return {{'id': vol.id, 'state': vol.state, 'size': vol.size}}
-""".format(
-        base_url="motoserver:5000"
-        if settings.TEST_SERVER_MODE
-        else "ec2.us-west-2.amazonaws.com"
-    )
+    return {'id': vol.id, 'state': vol.state, 'size': vol.size}
+"""
+    return _process_lambda(func_str)
+
+
+def get_lambda_using_environment_port():
+    func_str = """
+import boto3
+import os
+
+def lambda_handler(event, context):
+    base_url = os.environ.get("MOTO_HOST")
+    port = os.environ.get("MOTO_PORT")
+    url = base_url + ":" + port
+    conn = boto3.client('lambda', region_name='us-west-2', endpoint_url=url)
+
+    full_url = os.environ["MOTO_HTTP_ENDPOINT"]
+
+    functions = conn.list_functions()["Functions"]
+
+    return {'functions': functions, 'host': full_url}
+"""
+    return _process_lambda(func_str)
+
+
+def get_lambda_using_network_mode():
+    func_str = """
+import boto3
+import os
+
+def lambda_handler(event, context):
+    port = os.environ.get("MOTO_PORT")
+    url = "http://localhost:" + port
+    conn = boto3.client('lambda', region_name='us-west-2', endpoint_url=url)
+
+    functions = conn.list_functions()["Functions"]
+    return {'response': functions}
+"""
+    return _process_lambda(func_str)
+
+
+def get_proxy_zip_file():
+    func_str = """
+import boto3
+
+def lambda_handler(event, context):
+    ec2 = boto3.resource('ec2', region_name='us-west-2')
+
+    volume_id = event.get('volume_id')
+    vol = ec2.Volume(volume_id)
+
+    return {'id': vol.id, 'state': vol.state, 'size': vol.size}
+"""
     return _process_lambda(func_str)
 
 
@@ -62,6 +113,15 @@ def get_test_zip_file_error():
     pfunc = """
 def lambda_handler(event, context):
     raise Exception('I failed!')
+"""
+    return _process_lambda(pfunc)
+
+
+def get_test_zip_largeresponse():
+    pfunc = """
+def lambda_handler(event, context):
+    x = ["xxx" for x in range(10 ** 6)]
+    return {"statusCode": 200, "body": x}
 """
     return _process_lambda(pfunc)
 
@@ -89,6 +149,16 @@ def util_function():
     return zip_output.read()
 
 
+def get_test_zip_file_print_event():
+    pfunc = """
+def lambda_handler(event, context):
+    print(event)
+    print("FINISHED_PRINTING_EVENT")
+    return event
+"""
+    return _process_lambda(pfunc)
+
+
 def create_invalid_lambda(role):
     conn = boto3.client("lambda", _lambda_region)
     zip_content = get_test_zip_file1()
@@ -96,7 +166,7 @@ def create_invalid_lambda(role):
     with pytest.raises(ClientError) as err:
         conn.create_function(
             FunctionName=function_name,
-            Runtime="python2.7",
+            Runtime=PYTHON_VERSION,
             Role=role,
             Handler="lambda_function.handler",
             Code={"ZipFile": zip_content},
@@ -108,24 +178,29 @@ def create_invalid_lambda(role):
     return err
 
 
-def get_role_name():
-    with mock_iam():
-        iam = boto3.client("iam", region_name=_lambda_region)
-        try:
-            return iam.get_role(RoleName="my-role")["Role"]["Arn"]
-        except ClientError:
-            return iam.create_role(
-                RoleName="my-role",
-                AssumeRolePolicyDocument="some policy",
-                Path="/my-path/",
-            )["Role"]["Arn"]
+def get_role_name(region=None):
+    with mock_aws():
+        iam = boto3.client("iam", region_name=region or _lambda_region)
+        while True:
+            try:
+                return iam.get_role(RoleName="my-role")["Role"]["Arn"]
+            except ClientError:
+                try:
+                    return iam.create_role(
+                        RoleName="my-role",
+                        AssumeRolePolicyDocument="some policy",
+                        Path="/my-path/",
+                    )["Role"]["Arn"]
+                except ClientError:
+                    pass
 
 
-def wait_for_log_msg(expected_msg, log_group):
+def wait_for_log_msg(expected_msg, log_group, wait_time=30):
+    expected_msgs = expected_msg if isinstance(expected_msg, list) else [expected_msg]
     logs_conn = boto3.client("logs", region_name="us-east-1")
     received_messages = []
     start = time.time()
-    while (time.time() - start) < 30:
+    while (time.time() - start) < wait_time:
         try:
             result = logs_conn.describe_log_streams(logGroupName=log_group)
             log_streams = result.get("logStreams")
@@ -137,13 +212,13 @@ def wait_for_log_msg(expected_msg, log_group):
 
         for log_stream in log_streams:
             result = logs_conn.get_log_events(
-                logGroupName=log_group, logStreamName=log_stream["logStreamName"],
+                logGroupName=log_group, logStreamName=log_stream["logStreamName"]
             )
             received_messages.extend(
                 [event["message"] for event in result.get("events")]
             )
         for line in received_messages:
-            if expected_msg in line:
+            if any(msg in line for msg in expected_msgs):
                 return True, set(received_messages)
         time.sleep(1)
     return False, set(received_messages)

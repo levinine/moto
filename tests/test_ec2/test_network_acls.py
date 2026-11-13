@@ -1,48 +1,28 @@
-import boto
-import boto3
-import sure  # noqa # pylint: disable=unused-import
-import pytest
-from botocore.exceptions import ClientError
-
-from moto import mock_ec2_deprecated, mock_ec2, settings
-from moto.ec2.models import OWNER_ID
 from random import randint
 from unittest import SkipTest
 
+import boto3
+import pytest
+from botocore.exceptions import ClientError
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+from moto import mock_aws, settings
+from moto.core import DEFAULT_ACCOUNT_ID as OWNER_ID
+
+
+@mock_aws
 def test_default_network_acl_created_with_vpc():
-    conn = boto.connect_vpc("the_key", "the secret")
-    conn.create_vpc("10.0.0.0/16")
-    all_network_acls = conn.get_all_network_acls()
-    all_network_acls.should.have.length_of(2)
-
-
-@mock_ec2
-def test_default_network_acl_created_with_vpc_boto3():
     client = boto3.client("ec2", region_name="us-east-1")
     ec2 = boto3.resource("ec2", region_name="us-east-1")
     vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
 
     all_network_acls = client.describe_network_acls()["NetworkAcls"]
     our_acl = [a for a in all_network_acls if a["VpcId"] == vpc.id]
-    our_acl.should.have.length_of(1)
-    our_acl[0].should.have.key("IsDefault").equals(True)
+    assert len(our_acl) == 1
+    assert our_acl[0]["IsDefault"] is True
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
-def test_network_acls():
-    conn = boto.connect_vpc("the_key", "the secret")
-    vpc = conn.create_vpc("10.0.0.0/16")
-    conn.create_network_acl(vpc.id)
-    all_network_acls = conn.get_all_network_acls()
-    all_network_acls.should.have.length_of(3)
-
-
-@mock_ec2
-def test_network_create_and_list_acls_boto3():
+@mock_aws
+def test_network_create_and_list_acls():
     client = boto3.client("ec2", region_name="us-east-1")
     ec2 = boto3.resource("ec2", region_name="us-east-1")
     vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
@@ -53,28 +33,13 @@ def test_network_create_and_list_acls_boto3():
     acl_found = [
         a for a in all_network_acls if a["NetworkAclId"] == created_acl.network_acl_id
     ][0]
-    acl_found["VpcId"].should.equal(vpc.id)
-    acl_found["Tags"].should.equal([])
-    acl_found["IsDefault"].should.equal(False)
+    assert acl_found["VpcId"] == vpc.id
+    assert acl_found["Tags"] == []
+    assert acl_found["IsDefault"] is False
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_new_subnet_associates_with_default_network_acl():
-    conn = boto.connect_vpc("the_key", "the secret")
-    vpc = conn.get_all_vpcs()[0]
-
-    subnet = conn.create_subnet(vpc.id, "172.31.112.0/20")
-    all_network_acls = conn.get_all_network_acls()
-    all_network_acls.should.have.length_of(1)
-
-    acl = all_network_acls[0]
-    acl.associations.should.have.length_of(7)
-    [a.subnet_id for a in acl.associations].should.contain(subnet.id)
-
-
-@mock_ec2
-def test_new_subnet_associates_with_default_network_acl_boto3():
     if settings.TEST_SERVER_MODE:
         raise SkipTest("ServerMode will have conflicting CidrBlocks")
     client = boto3.client("ec2", region_name="us-east-1")
@@ -83,45 +48,15 @@ def test_new_subnet_associates_with_default_network_acl_boto3():
 
     subnet = ec2.create_subnet(VpcId=default_vpc["VpcId"], CidrBlock="172.31.112.0/20")
     all_network_acls = client.describe_network_acls()["NetworkAcls"]
-    all_network_acls.should.have.length_of(1)
+    assert len(all_network_acls) == 1
 
     acl = all_network_acls[0]
-    acl["Associations"].should.have.length_of(7)
-    [a["SubnetId"] for a in acl["Associations"]].should.contain(subnet.id)
+    assert len(acl["Associations"]) == 7
+    assert subnet.id in [a["SubnetId"] for a in acl["Associations"]]
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_network_acl_entries():
-    conn = boto.connect_vpc("the_key", "the secret")
-    vpc = conn.create_vpc("10.0.0.0/16")
-
-    network_acl = conn.create_network_acl(vpc.id)
-
-    conn.create_network_acl_entry(
-        network_acl.id,
-        110,
-        6,
-        "ALLOW",
-        "0.0.0.0/0",
-        False,
-        port_range_from="443",
-        port_range_to="443",
-    )
-
-    all_network_acls = conn.get_all_network_acls()
-    all_network_acls.should.have.length_of(3)
-
-    test_network_acl = next(na for na in all_network_acls if na.id == network_acl.id)
-    entries = test_network_acl.network_acl_entries
-    entries.should.have.length_of(1)
-    entries[0].rule_number.should.equal("110")
-    entries[0].protocol.should.equal("6")
-    entries[0].rule_action.should.equal("ALLOW")
-
-
-@mock_ec2
-def test_network_acl_entries_boto3():
     client = boto3.client("ec2", region_name="us-east-1")
     ec2 = boto3.resource("ec2", region_name="us-east-1")
     vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
@@ -134,6 +69,7 @@ def test_network_acl_entries_boto3():
         Protocol="6",  # TCP
         RuleAction="ALLOW",
         CidrBlock="0.0.0.0/0",
+        Ipv6CidrBlock="asdf",
         Egress=False,
         PortRange={"From": 443, "To": 443},
     )
@@ -143,47 +79,21 @@ def test_network_acl_entries_boto3():
     test_network_acl = next(
         na for na in all_network_acls if na["NetworkAclId"] == network_acl.id
     )
-    test_network_acl.should.have.key("IsDefault").should.equal(False)
+    assert test_network_acl["IsDefault"] is False
 
     entries = test_network_acl["Entries"]
-    entries.should.have.length_of(1)
-    entries[0]["RuleNumber"].should.equal(110)
-    entries[0]["Protocol"].should.equal("6")
-    entries[0]["RuleAction"].should.equal("ALLOW")
-    entries[0]["Egress"].should.equal(False)
-    entries[0]["PortRange"].should.equal({"To": 443, "From": 443})
-    entries[0]["CidrBlock"].should.equal("0.0.0.0/0")
+    assert len(entries) == 1
+    assert entries[0]["RuleNumber"] == 110
+    assert entries[0]["Protocol"] == "6"
+    assert entries[0]["RuleAction"] == "ALLOW"
+    assert entries[0]["Egress"] is False
+    assert entries[0]["PortRange"] == {"To": 443, "From": 443}
+    assert entries[0]["CidrBlock"] == "0.0.0.0/0"
+    assert entries[0]["Ipv6CidrBlock"] == "asdf"
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_delete_network_acl_entry():
-    conn = boto.connect_vpc("the_key", "the secret")
-    vpc = conn.create_vpc("10.0.0.0/16")
-
-    network_acl = conn.create_network_acl(vpc.id)
-
-    conn.create_network_acl_entry(
-        network_acl.id,
-        110,
-        6,
-        "ALLOW",
-        "0.0.0.0/0",
-        False,
-        port_range_from="443",
-        port_range_to="443",
-    )
-    conn.delete_network_acl_entry(network_acl.id, 110, False)
-
-    all_network_acls = conn.get_all_network_acls()
-
-    test_network_acl = next(na for na in all_network_acls if na.id == network_acl.id)
-    entries = test_network_acl.network_acl_entries
-    entries.should.have.length_of(0)
-
-
-@mock_ec2
-def test_delete_network_acl_entry_boto3():
     client = boto3.client("ec2", region_name="us-east-1")
     ec2 = boto3.resource("ec2", region_name="us-east-1")
     vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
@@ -208,50 +118,11 @@ def test_delete_network_acl_entry_boto3():
     test_network_acl = next(
         na for na in all_network_acls if na["NetworkAclId"] == network_acl.id
     )
-    test_network_acl["Entries"].should.have.length_of(0)
+    assert len(test_network_acl["Entries"]) == 0
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_replace_network_acl_entry():
-    conn = boto.connect_vpc("the_key", "the secret")
-    vpc = conn.create_vpc("10.0.0.0/16")
-
-    network_acl = conn.create_network_acl(vpc.id)
-
-    conn.create_network_acl_entry(
-        network_acl.id,
-        110,
-        6,
-        "ALLOW",
-        "0.0.0.0/0",
-        False,
-        port_range_from="443",
-        port_range_to="443",
-    )
-    conn.replace_network_acl_entry(
-        network_acl.id,
-        110,
-        -1,
-        "DENY",
-        "0.0.0.0/0",
-        False,
-        port_range_from="22",
-        port_range_to="22",
-    )
-
-    all_network_acls = conn.get_all_network_acls()
-
-    test_network_acl = next(na for na in all_network_acls if na.id == network_acl.id)
-    entries = test_network_acl.network_acl_entries
-    entries.should.have.length_of(1)
-    entries[0].rule_number.should.equal("110")
-    entries[0].protocol.should.equal("-1")
-    entries[0].rule_action.should.equal("DENY")
-
-
-@mock_ec2
-def test_replace_network_acl_entry_boto3():
     client = boto3.client("ec2", region_name="us-east-1")
     ec2 = boto3.resource("ec2", region_name="us-east-1")
     vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
@@ -283,55 +154,15 @@ def test_replace_network_acl_entry_boto3():
         na for na in all_network_acls if na["NetworkAclId"] == network_acl.id
     )
     entries = test_network_acl["Entries"]
-    entries.should.have.length_of(1)
-    entries[0]["RuleNumber"].should.equal(110)
-    entries[0]["Protocol"].should.equal("-1")
-    entries[0]["RuleAction"].should.equal("DENY")
-    entries[0]["PortRange"].should.equal({"To": 22, "From": 22})
+    assert len(entries) == 1
+    assert entries[0]["RuleNumber"] == 110
+    assert entries[0]["Protocol"] == "-1"
+    assert entries[0]["RuleAction"] == "DENY"
+    assert entries[0]["PortRange"] == {"To": 22, "From": 22}
 
 
-# TODO: How to convert 'associate_network_acl' to boto3?
-@mock_ec2_deprecated
-def test_associate_new_network_acl_with_subnet():
-    conn = boto.connect_vpc("the_key", "the secret")
-    vpc = conn.create_vpc("10.0.0.0/16")
-    subnet = conn.create_subnet(vpc.id, "10.0.0.0/18")
-    network_acl = conn.create_network_acl(vpc.id)
-
-    conn.associate_network_acl(network_acl.id, subnet.id)
-
-    all_network_acls = conn.get_all_network_acls()
-    all_network_acls.should.have.length_of(3)
-
-    test_network_acl = next(na for na in all_network_acls if na.id == network_acl.id)
-
-    test_network_acl.associations.should.have.length_of(1)
-    test_network_acl.associations[0].subnet_id.should.equal(subnet.id)
-
-
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_delete_network_acl():
-    conn = boto.connect_vpc("the_key", "the secret")
-    vpc = conn.create_vpc("10.0.0.0/16")
-    conn.create_subnet(vpc.id, "10.0.0.0/18")
-    network_acl = conn.create_network_acl(vpc.id)
-
-    all_network_acls = conn.get_all_network_acls()
-    all_network_acls.should.have.length_of(3)
-
-    any(acl.id == network_acl.id for acl in all_network_acls).should.be.ok
-
-    conn.delete_network_acl(network_acl.id)
-
-    updated_network_acls = conn.get_all_network_acls()
-    updated_network_acls.should.have.length_of(2)
-
-    any(acl.id == network_acl.id for acl in updated_network_acls).shouldnt.be.ok
-
-
-@mock_ec2
-def test_delete_network_acl_boto3():
     client = boto3.client("ec2", region_name="us-east-1")
     ec2 = boto3.resource("ec2", region_name="us-east-1")
     vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
@@ -339,38 +170,22 @@ def test_delete_network_acl_boto3():
 
     all_network_acls = client.describe_network_acls()["NetworkAcls"]
 
-    any(acl["NetworkAclId"] == network_acl.id for acl in all_network_acls).should.be.ok
+    assert (
+        any(acl["NetworkAclId"] == network_acl.id for acl in all_network_acls)
+        is not None
+    )
 
     client.delete_network_acl(NetworkAclId=network_acl.id)
 
     updated_network_acls = client.describe_network_acls()["NetworkAcls"]
 
-    any(
+    assert not any(
         acl["NetworkAclId"] == network_acl.id for acl in updated_network_acls
-    ).shouldnt.be.ok
+    )
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
+@mock_aws
 def test_network_acl_tagging():
-    conn = boto.connect_vpc("the_key", "the secret")
-    vpc = conn.create_vpc("10.0.0.0/16")
-    network_acl = conn.create_network_acl(vpc.id)
-
-    network_acl.add_tag("a key", "some value")
-
-    tag = conn.get_all_tags()[0]
-    tag.name.should.equal("a key")
-    tag.value.should.equal("some value")
-
-    all_network_acls = conn.get_all_network_acls()
-    test_network_acl = next(na for na in all_network_acls if na.id == network_acl.id)
-    test_network_acl.tags.should.have.length_of(1)
-    test_network_acl.tags["a key"].should.equal("some value")
-
-
-@mock_ec2
-def test_network_acl_tagging_boto3():
     client = boto3.client("ec2", region_name="us-east-1")
     ec2 = boto3.resource("ec2", region_name="us-east-1")
     vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
@@ -381,18 +196,18 @@ def test_network_acl_tagging_boto3():
     tag = client.describe_tags(
         Filters=[{"Name": "resource-id", "Values": [network_acl.id]}]
     )["Tags"][0]
-    tag.should.have.key("ResourceId").equal(network_acl.id)
-    tag.should.have.key("Key").equal("a key")
-    tag.should.have.key("Value").equal("some value")
+    assert tag["ResourceId"] == network_acl.id
+    assert tag["Key"] == "a key"
+    assert tag["Value"] == "some value"
 
     all_network_acls = client.describe_network_acls()["NetworkAcls"]
     test_network_acl = next(
         na for na in all_network_acls if na["NetworkAclId"] == network_acl.id
     )
-    test_network_acl["Tags"].should.equal([{"Value": "some value", "Key": "a key"}])
+    assert test_network_acl["Tags"] == [{"Value": "some value", "Key": "a key"}]
 
 
-@mock_ec2
+@mock_aws
 def test_new_subnet_in_new_vpc_associates_with_default_network_acl():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
     new_vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
@@ -403,12 +218,12 @@ def test_new_subnet_in_new_vpc_associates_with_default_network_acl():
 
     new_vpcs_default_network_acl = next(iter(new_vpc.network_acls.all()), None)
     new_vpcs_default_network_acl.reload()
-    new_vpcs_default_network_acl.vpc_id.should.equal(new_vpc.id)
-    new_vpcs_default_network_acl.associations.should.have.length_of(1)
-    new_vpcs_default_network_acl.associations[0]["SubnetId"].should.equal(subnet.id)
+    assert new_vpcs_default_network_acl.vpc_id == new_vpc.id
+    assert len(new_vpcs_default_network_acl.associations) == 1
+    assert new_vpcs_default_network_acl.associations[0]["SubnetId"] == subnet.id
 
 
-@mock_ec2
+@mock_aws
 def test_default_network_acl_default_entries():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
     client = boto3.client("ec2", region_name="us-west-1")
@@ -416,8 +231,8 @@ def test_default_network_acl_default_entries():
     if not settings.TEST_SERVER_MODE:
         # Can't know whether the first ACL is the default in ServerMode
         default_network_acl = next(iter(ec2.network_acls.all()), None)
-        default_network_acl.is_default.should.be.ok
-        default_network_acl.entries.should.have.length_of(4)
+        assert default_network_acl.is_default is True
+        assert len(default_network_acl.entries) == 4
 
     vpc = client.create_vpc(CidrBlock="10.0.0.0/16")
     vpc_id = vpc["Vpc"]["VpcId"]
@@ -432,22 +247,22 @@ def test_default_network_acl_default_entries():
 
     unique_entries = []
     for entry in default_acl["Entries"]:
-        entry["CidrBlock"].should.equal("0.0.0.0/0")
-        entry["Protocol"].should.equal("-1")
-        entry["RuleNumber"].should.be.within([100, 32767])
-        entry["RuleAction"].should.be.within(["allow", "deny"])
-        assert type(entry["Egress"]) is bool
+        assert entry["CidrBlock"] == "0.0.0.0/0"
+        assert entry["Protocol"] == "-1"
+        assert entry["RuleNumber"] in [100, 32767]
+        assert entry["RuleAction"] in ["allow", "deny"]
+        assert isinstance(entry["Egress"], bool)
         if entry["RuleAction"] == "allow":
-            entry["RuleNumber"].should.be.equal(100)
+            assert entry["RuleNumber"] == 100
         else:
-            entry["RuleNumber"].should.be.equal(32767)
+            assert entry["RuleNumber"] == 32767
         if entry not in unique_entries:
             unique_entries.append(entry)
 
-    unique_entries.should.have.length_of(4)
+    assert len(unique_entries) == 4
 
 
-@mock_ec2
+@mock_aws
 def test_delete_default_network_acl_default_entry():
     if settings.TEST_SERVER_MODE:
         raise SkipTest(
@@ -455,9 +270,9 @@ def test_delete_default_network_acl_default_entry():
         )
     ec2 = boto3.resource("ec2", region_name="us-west-1")
     default_network_acl = next(iter(ec2.network_acls.all()), None)
-    default_network_acl.is_default.should.be.ok
+    assert default_network_acl.is_default is True
 
-    default_network_acl.entries.should.have.length_of(4)
+    assert len(default_network_acl.entries) == 4
     first_default_network_acl_entry = default_network_acl.entries[0]
 
     default_network_acl.delete_entry(
@@ -465,14 +280,14 @@ def test_delete_default_network_acl_default_entry():
         RuleNumber=first_default_network_acl_entry["RuleNumber"],
     )
 
-    default_network_acl.entries.should.have.length_of(3)
+    assert len(default_network_acl.entries) == 3
 
 
-@mock_ec2
+@mock_aws
 def test_duplicate_network_acl_entry():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
     default_network_acl = next(iter(ec2.network_acls.all()), None)
-    default_network_acl.is_default.should.be.ok
+    assert default_network_acl.is_default is True
 
     rule_number = randint(0, 9999)
     egress = True
@@ -492,15 +307,13 @@ def test_duplicate_network_acl_entry():
             RuleAction="deny",
             RuleNumber=rule_number,
         )
-    str(ex.value).should.equal(
-        "An error occurred (NetworkAclEntryAlreadyExists) when calling the CreateNetworkAclEntry "
-        "operation: The network acl entry identified by {} already exists.".format(
-            rule_number
-        )
+    assert (
+        str(ex.value)
+        == f"An error occurred (NetworkAclEntryAlreadyExists) when calling the CreateNetworkAclEntry operation: The network acl entry identified by {rule_number} already exists."
     )
 
 
-@mock_ec2
+@mock_aws
 def test_describe_network_acls():
     conn = boto3.client("ec2", region_name="us-west-2")
 
@@ -514,27 +327,214 @@ def test_describe_network_acls():
     resp = conn.describe_network_acls(NetworkAclIds=[network_acl_id])
     result = resp["NetworkAcls"]
 
-    result.should.have.length_of(1)
-    result[0]["NetworkAclId"].should.equal(network_acl_id)
+    assert len(result) == 1
+    assert result[0]["NetworkAclId"] == network_acl_id
 
     resp2 = conn.describe_network_acls()["NetworkAcls"]
-    [na["NetworkAclId"] for na in resp2].should.contain(network_acl_id)
+    assert network_acl_id in [na["NetworkAclId"] for na in resp2]
 
     resp3 = conn.describe_network_acls(
         Filters=[{"Name": "owner-id", "Values": [OWNER_ID]}]
     )["NetworkAcls"]
-    [na["NetworkAclId"] for na in resp3].should.contain(network_acl_id)
+    assert network_acl_id in [na["NetworkAclId"] for na in resp3]
+
+    # Assertions for filters
+    network_acl_id = conn.create_network_acl(VpcId=vpc_id)["NetworkAcl"]["NetworkAclId"]
+    cidr_block = "0.0.0.0/24"
+    protocol = "17"  # UDP
+    rule_number = 420
+    rule_action = "allow"
+    conn.create_network_acl_entry(
+        NetworkAclId=network_acl_id,
+        CidrBlock=cidr_block,
+        Protocol=protocol,
+        RuleNumber=rule_number,
+        RuleAction=rule_action,
+        Egress=False,
+    )
+
+    # Ensure filtering by entry CIDR block
+    resp4 = conn.describe_network_acls(
+        Filters=[{"Name": "entry.cidr", "Values": [cidr_block]}]
+    )
+    assert len(resp4["NetworkAcls"]) == 1
+    assert resp4["NetworkAcls"][0]["NetworkAclId"] == network_acl_id
+    assert cidr_block in [
+        entry["CidrBlock"] for entry in resp4["NetworkAcls"][0]["Entries"]
+    ]
+
+    # Ensure filtering by entry protocol
+    resp4 = conn.describe_network_acls(
+        Filters=[{"Name": "entry.protocol", "Values": [protocol]}]
+    )
+    assert len(resp4["NetworkAcls"]) == 1
+    assert resp4["NetworkAcls"][0]["NetworkAclId"] == network_acl_id
+    assert protocol in [
+        entry["Protocol"] for entry in resp4["NetworkAcls"][0]["Entries"]
+    ]
+
+    # Ensure filtering by entry rule number
+    resp4 = conn.describe_network_acls(
+        Filters=[{"Name": "entry.rule-number", "Values": [str(rule_number)]}]
+    )
+    assert len(resp4["NetworkAcls"]) == 1
+    assert resp4["NetworkAcls"][0]["NetworkAclId"] == network_acl_id
+    assert rule_number in [
+        entry["RuleNumber"] for entry in resp4["NetworkAcls"][0]["Entries"]
+    ]
+
+    resp4 = conn.describe_network_acls(
+        Filters=[{"Name": "entry.rule-number", "Values": [str(rule_number + 1)]}]
+    )
+    assert len(resp4["NetworkAcls"]) == 0
+
+    # Ensure filtering by egress flag
+    resp4 = conn.describe_network_acls(
+        Filters=[{"Name": "entry.egress", "Values": ["false"]}]
+    )
+    assert network_acl_id in [entry["NetworkAclId"] for entry in resp4["NetworkAcls"]]
+    # the ACL with network_acl_id contains no entries with Egress=True
+    resp4 = conn.describe_network_acls(
+        Filters=[{"Name": "entry.egress", "Values": ["true"]}]
+    )
+    assert network_acl_id not in [
+        entry["NetworkAclId"] for entry in resp4["NetworkAcls"]
+    ]
+
+    # Ensure filtering by rule action
+    resp4 = conn.describe_network_acls(
+        Filters=[
+            {"Name": "entry.rule-action", "Values": [rule_action]},
+            {"Name": "id", "Values": [network_acl_id]},
+        ]
+    )
+    assert len(resp4["NetworkAcls"]) == 1
+    assert resp4["NetworkAcls"][0]["NetworkAclId"] == network_acl_id
+    assert rule_action in [
+        entry["RuleAction"] for entry in resp4["NetworkAcls"][0]["Entries"]
+    ]
 
     with pytest.raises(ClientError) as ex:
         conn.describe_network_acls(NetworkAclIds=["1"])
 
-    str(ex.value).should.equal(
-        "An error occurred (InvalidRouteTableID.NotFound) when calling the "
-        "DescribeNetworkAcls operation: The routeTable ID '1' does not exist"
+    assert (
+        str(ex.value)
+        == "An error occurred (InvalidRouteTableID.NotFound) when calling the DescribeNetworkAcls operation: The routeTable ID '1' does not exist"
     )
 
 
-@mock_ec2
+@mock_aws
+def test_describe_network_acls_associations_by_acl_id():
+    ec2_client = boto3.client("ec2", region_name="us-west-2")
+    vpc_id = ec2_client.create_vpc(CidrBlock="10.0.0.0/16")["Vpc"]["VpcId"]
+    subnet = ec2_client.create_subnet(VpcId=vpc_id, CidrBlock="10.0.1.0/24")
+    subnet_id = subnet["Subnet"]["SubnetId"]
+    custom_acl = ec2_client.create_network_acl(VpcId=vpc_id)["NetworkAcl"]
+    associate_subnet_to_acl(ec2_client, subnet_id, custom_acl["NetworkAclId"])
+
+    network_acls_by_subnet = ec2_client.describe_network_acls(
+        Filters=[{"Name": "association.subnet-id", "Values": [subnet_id]}]
+    )["NetworkAcls"]
+    association_id = network_acls_by_subnet[0]["Associations"][0][
+        "NetworkAclAssociationId"
+    ]
+
+    network_acls_by_association = ec2_client.describe_network_acls(
+        Filters=[{"Name": "association.association-id", "Values": [association_id]}]
+    )["NetworkAcls"]
+    assert len(network_acls_by_association) == 1
+    assert network_acls_by_association[0]["NetworkAclId"] == custom_acl["NetworkAclId"]
+
+
+@mock_aws
+def test_describe_network_acls_associations_by_subnet():
+    ec2_client = boto3.client("ec2", region_name="us-west-2")
+    vpc = ec2_client.create_vpc(CidrBlock="10.0.0.0/16")
+    vpc_id = vpc["Vpc"]["VpcId"]
+    all_acls = ec2_client.describe_network_acls(
+        Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
+    )["NetworkAcls"]
+    subnet_1_id = ec2_client.create_subnet(VpcId=vpc_id, CidrBlock="10.0.1.0/24")[
+        "Subnet"
+    ]["SubnetId"]
+    subnet_2_id = ec2_client.create_subnet(VpcId=vpc_id, CidrBlock="10.0.2.0/24")[
+        "Subnet"
+    ]["SubnetId"]
+    subnet_3_id = ec2_client.create_subnet(VpcId=vpc_id, CidrBlock="10.0.3.0/24")[
+        "Subnet"
+    ]["SubnetId"]
+    default_acl_id = next(acl["NetworkAclId"] for acl in all_acls if acl["IsDefault"])
+    custom_acl_id = ec2_client.create_network_acl(VpcId=vpc_id)["NetworkAcl"][
+        "NetworkAclId"
+    ]
+
+    # Subnets should be associated with the default ACL by default
+    assert_subnet_is_associated_to_acl(ec2_client, subnet_1_id, default_acl_id)
+    assert_subnet_is_associated_to_acl(ec2_client, subnet_3_id, default_acl_id)
+    assert_subnet_is_associated_to_acl(ec2_client, subnet_2_id, default_acl_id)
+
+    associate_subnet_to_acl(ec2_client, subnet_1_id, custom_acl_id)
+    associate_subnet_to_acl(ec2_client, subnet_3_id, custom_acl_id)
+    assert_subnet_is_associated_to_acl(ec2_client, subnet_1_id, custom_acl_id)
+    assert_subnet_is_associated_to_acl(ec2_client, subnet_3_id, custom_acl_id)
+    assert_subnet_is_associated_to_acl(ec2_client, subnet_2_id, default_acl_id)
+
+    # Re-associate Subnet 1 with the default ACL to test re-association
+    associate_subnet_to_acl(ec2_client, subnet_1_id, default_acl_id)
+    assert_subnet_is_associated_to_acl(ec2_client, subnet_1_id, default_acl_id)
+    assert_subnet_is_associated_to_acl(ec2_client, subnet_2_id, default_acl_id)
+    assert_subnet_is_associated_to_acl(ec2_client, subnet_3_id, custom_acl_id)
+
+    # Attempting to associate a non-existent ACL with a subnet should raise an error
+    with pytest.raises(ClientError):
+        associate_subnet_to_acl(ec2_client, subnet_1_id, "non-existent-acl")
+
+    # Attempting to delete a custom network ACL should fail if it has any subnets associated
+    with pytest.raises(ClientError) as exc:
+        ec2_client.delete_network_acl(NetworkAclId=custom_acl_id)
+    err = exc.value.response["Error"]
+    assert err["Code"] == "DependencyViolation"
+    assert (
+        err["Message"]
+        == f"The network ACL '{custom_acl_id}' has dependencies and cannot be deleted."
+    )
+
+    # Re-associate Subnet 3 with the default ACL to test deletion of custom ACL
+    associate_subnet_to_acl(ec2_client, subnet_3_id, default_acl_id)
+    ec2_client.delete_network_acl(NetworkAclId=custom_acl_id)
+    assert_subnet_is_associated_to_acl(ec2_client, subnet_3_id, default_acl_id)
+
+
+def associate_subnet_to_acl(ec2_client, subnet_id: str, acl_id: str):
+    assoc_id = get_subnet_acl_association_id(ec2_client, subnet_id)
+    ec2_client.replace_network_acl_association(
+        NetworkAclId=acl_id, AssociationId=assoc_id
+    )
+
+
+def get_subnet_acl_association_id(ec2_client, subnet_id: str):
+    network_acls_description = ec2_client.describe_network_acls(
+        Filters=[{"Name": "association.subnet-id", "Values": [subnet_id]}]
+    )
+    associations = network_acls_description["NetworkAcls"][0]["Associations"]
+    return next(
+        assoc["NetworkAclAssociationId"]
+        for assoc in associations
+        if assoc["SubnetId"] == subnet_id
+    )
+
+
+def assert_subnet_is_associated_to_acl(ec2_client, subnet_id: str, acl_id: str):
+    network_acl_description = ec2_client.describe_network_acls(
+        Filters=[{"Name": "association.subnet-id", "Values": [subnet_id]}]
+    )
+    acls_subnet = network_acl_description["NetworkAcls"]
+    # There should be only one ACL associated with the subnet at any given time
+    assert len(acls_subnet) == 1
+    assert acls_subnet[0]["NetworkAclId"] == acl_id
+
+
+@mock_aws
 def test_create_network_acl_with_tags():
     conn = boto3.client("ec2", region_name="us-west-2")
 
@@ -551,7 +551,7 @@ def test_create_network_acl_with_tags():
         ],
     )
 
-    (len(network_acl.get("NetworkAcl").get("Tags"))).should.equal(1)
-    network_acl.get("NetworkAcl").get("Tags").should.equal(
-        [{"Key": "test", "Value": "TestTags"}]
-    )
+    assert (len(network_acl.get("NetworkAcl").get("Tags"))) == 1
+    assert network_acl.get("NetworkAcl").get("Tags") == [
+        {"Key": "test", "Value": "TestTags"}
+    ]

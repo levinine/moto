@@ -1,20 +1,31 @@
-from boto3 import Session
-from moto.core import BaseBackend
-from moto.utilities.utils import load_resource
 import datetime
-import random
+from typing import Any
+
+from moto.core.base_backend import BackendDict, BaseBackend
+from moto.moto_api._internal import mock_random as random
+from moto.moto_api._internal.managed_state_model import ManagedState
+from moto.utilities.utils import load_resource
+
+ADVISOR_CHECKS = load_resource("support/resources/describe_trusted_advisor_checks.json")
 
 
-checks_json = "resources/describe_trusted_advisor_checks.json"
-ADVISOR_CHECKS = load_resource(__name__, checks_json)
-
-
-class SupportCase(object):
-    def __init__(self, **kwargs):
+class SupportCase(ManagedState):
+    def __init__(self, **kwargs: Any):
+        # Configure ManagedState
+        super().__init__(
+            "support::case",
+            transitions=[
+                ("opened", "pending-customer-action"),
+                ("pending-customer-action", "reopened"),
+                ("reopened", "resolved"),
+                ("resolved", "unassigned"),
+                ("unassigned", "work-in-progress"),
+                ("work-in-progress", "opened"),
+            ],
+        )
         self.case_id = kwargs.get("case_id")
         self.display_id = "foo_display_id"
         self.subject = kwargs.get("subject")
-        self.status = "opened"
         self.service_code = kwargs.get("service_code")
         self.category_code = kwargs.get("category_code")
         self.severity_code = kwargs.get("severity_code")
@@ -44,39 +55,35 @@ class SupportCase(object):
             }
         }
 
-    def get_datetime(self):
+    def get_datetime(self) -> str:
         return str(datetime.datetime.now().isoformat())
 
 
 class SupportBackend(BaseBackend):
-    def __init__(self, region_name=None):
-        super(SupportBackend, self).__init__()
-        self.region_name = region_name
-        self.check_status = {}
-        self.cases = {}
+    def __init__(self, region_name: str, account_id: str):
+        super().__init__(region_name, account_id)
+        self.check_status: dict[str, str] = {}
+        self.cases: dict[str, SupportCase] = {}
 
-    def reset(self):
-        region_name = self.region_name
-        self.__dict__ = {}
-        self.__init__(region_name)
-
-    def describe_trusted_advisor_checks(self, language):
+    def describe_trusted_advisor_checks(self) -> list[dict[str, Any]]:
+        """
+        The Language-parameter is not yet implemented
+        """
         # The checks are a static response
         checks = ADVISOR_CHECKS["checks"]
         return checks
 
-    def refresh_trusted_advisor_check(self, check_id):
+    def refresh_trusted_advisor_check(self, check_id: str) -> dict[str, Any]:
         self.advance_check_status(check_id)
-        status = {
+        return {
             "status": {
                 "checkId": check_id,
                 "status": self.check_status[check_id],
                 "millisUntilNextRefreshable": 123,
             }
         }
-        return status
 
-    def advance_check_status(self, check_id):
+    def advance_check_status(self, check_id: str) -> None:
         """
         Fake an advancement through statuses on refreshing TA checks
         """
@@ -98,30 +105,13 @@ class SupportBackend(BaseBackend):
         elif self.check_status[check_id] == "abandoned":
             self.check_status[check_id] = "none"
 
-    def advance_case_status(self, case_id):
+    def advance_case_status(self, case_id: str) -> None:
         """
         Fake an advancement through case statuses
         """
+        self.cases[case_id].advance()
 
-        if self.cases[case_id].status == "opened":
-            self.cases[case_id].status = "pending-customer-action"
-
-        elif self.cases[case_id].status == "pending-customer-action":
-            self.cases[case_id].status = "reopened"
-
-        elif self.cases[case_id].status == "reopened":
-            self.cases[case_id].status = "resolved"
-
-        elif self.cases[case_id].status == "resolved":
-            self.cases[case_id].status = "unassigned"
-
-        elif self.cases[case_id].status == "unassigned":
-            self.cases[case_id].status = "work-in-progress"
-
-        elif self.cases[case_id].status == "work-in-progress":
-            self.cases[case_id].status = "opened"
-
-    def advance_case_severity_codes(self, case_id):
+    def advance_case_severity_codes(self, case_id: str) -> None:
         """
         Fake an advancement through case status severities
         """
@@ -140,34 +130,34 @@ class SupportBackend(BaseBackend):
         elif self.cases[case_id].severity_code == "critical":
             self.cases[case_id].severity_code = "low"
 
-    def resolve_case(self, case_id):
+    def resolve_case(self, case_id: str) -> dict[str, str | None]:
         self.advance_case_status(case_id)
 
-        resolved_case = {
+        return {
             "initialCaseStatus": self.cases[case_id].status,
             "finalCaseStatus": "resolved",
         }
 
-        return resolved_case
-
     # persist case details to self.cases
     def create_case(
         self,
-        subject,
-        service_code,
-        severity_code,
-        category_code,
-        communication_body,
-        cc_email_addresses,
-        language,
-        issue_type,
-        attachment_set_id,
-    ):
+        subject: str,
+        service_code: str,
+        severity_code: str,
+        category_code: str,
+        communication_body: str,
+        cc_email_addresses: list[str],
+        language: str,
+        attachment_set_id: str,
+    ) -> dict[str, str]:
+        """
+        The IssueType-parameter is not yet implemented
+        """
         # Random case ID
         random_case_id = "".join(
             random.choice("0123456789ABCDEFGHIJKLMabcdefghijklm") for i in range(16)
         )
-        case_id = "case-12345678910-2020-%s" % random_case_id
+        case_id = f"case-12345678910-2020-{random_case_id}"
         case = SupportCase(
             case_id=case_id,
             subject=subject,
@@ -185,16 +175,15 @@ class SupportBackend(BaseBackend):
 
     def describe_cases(
         self,
-        case_id_list,
-        display_id,
-        after_time,
-        before_time,
-        include_resolved_cases,
-        next_token,
-        max_results,
-        language,
-        include_communications,
-    ):
+        case_id_list: list[str],
+        include_resolved_cases: bool,
+        next_token: str | None,
+        include_communications: bool,
+    ) -> dict[str, Any]:
+        """
+        The following parameters have not yet been implemented:
+        DisplayID, AfterTime, BeforeTime, MaxResults, Language
+        """
         cases = []
         requested_case_ids = case_id_list or self.cases.keys()
 
@@ -225,19 +214,9 @@ class SupportBackend(BaseBackend):
                 continue
 
             cases.append(formatted_case)
-        case_values = {"cases": cases}
-        case_values.update({"nextToken": next_token})
-
-        return case_values
+        return {"cases": cases, "nextToken": next_token}
 
 
-support_backends = {}
-
-# Only currently supported in us-east-1
-support_backends["us-east-1"] = SupportBackend("us-east-1")
-for region in Session().get_available_regions("support"):
-    support_backends[region] = SupportBackend(region)
-for region in Session().get_available_regions("support", partition_name="aws-us-gov"):
-    support_backends[region] = SupportBackend(region)
-for region in Session().get_available_regions("support", partition_name="aws-cn"):
-    support_backends[region] = SupportBackend(region)
+support_backends = BackendDict(
+    SupportBackend, "support", use_boto3_regions=False, additional_regions=["us-east-1"]
+)

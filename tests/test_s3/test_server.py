@@ -1,14 +1,18 @@
 import io
-from urllib.parse import urlparse, parse_qs
-import sure  # pylint: disable=unused-import
-
-from flask.testing import FlaskClient
-import moto.server as server
+import uuid
+from unittest import SkipTest
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
-"""
-Test the different server responses
-"""
+import boto3
+import pytest
+import requests
+import xmltodict
+from flask.testing import FlaskClient
+
+import moto.server as server
+from moto import settings
+from moto.moto_server.threaded_moto_server import ThreadedMotoServer
 
 
 class AuthenticatedClient(FlaskClient):
@@ -16,7 +20,7 @@ class AuthenticatedClient(FlaskClient):
         kwargs["headers"] = kwargs.get("headers", {})
         kwargs["headers"]["Authorization"] = "Any authorization header"
         kwargs["content_length"] = 0  # Fixes content-length complaints.
-        return super(AuthenticatedClient, self).open(*args, **kwargs)
+        return super().open(*args, **kwargs)
 
 
 def authenticated_client():
@@ -29,29 +33,78 @@ def test_s3_server_get():
     test_client = authenticated_client()
     res = test_client.get("/")
 
-    res.data.should.contain(b"ListAllMyBucketsResult")
+    assert b"ListAllMyBucketsResult" in res.data
 
 
-def test_s3_server_bucket_create():
+@pytest.mark.parametrize("key_name", ["bar_baz", "bar+baz", "baz bar"])
+def test_s3_server_bucket_create(key_name):
     test_client = authenticated_client()
 
     res = test_client.put("/", "http://foobaz.localhost:5000/")
-    res.status_code.should.equal(200)
+    assert res.status_code == 200
 
     res = test_client.get("/")
-    res.data.should.contain(b"<Name>foobaz</Name>")
+    assert b"<Name>foobaz</Name>" in res.data
 
     res = test_client.get("/", "http://foobaz.localhost:5000/")
-    res.status_code.should.equal(200)
-    res.data.should.contain(b"ListBucketResult")
+    assert res.status_code == 200
+    assert b"ListBucketResult" in res.data
 
-    res = test_client.put("/bar", "http://foobaz.localhost:5000/", data="test value")
-    res.status_code.should.equal(200)
+    res = test_client.put(
+        f"/{key_name}", "http://foobaz.localhost:5000/", data="test value"
+    )
+    assert res.status_code == 200
     assert "ETag" in dict(res.headers)
 
-    res = test_client.get("/bar", "http://foobaz.localhost:5000/")
-    res.status_code.should.equal(200)
-    res.data.should.equal(b"test value")
+    # ListObjects
+    res = test_client.get(
+        "/", "http://foobaz.localhost:5000/", query_string={"prefix": key_name}
+    )
+    assert res.status_code == 200
+    content = xmltodict.parse(res.data)["ListBucketResult"]["Contents"]
+    # If we receive a dict, we only received one result
+    # If content is of type list, our call returned multiple results - which is not correct
+    assert isinstance(content, dict)
+    assert content["Key"] == key_name
+
+    # ListObjects V2
+    res = test_client.get(
+        "/",
+        "http://foobaz.localhost:5000/",
+        query_string={"prefix": key_name, "list-type": "2"},
+    )
+    assert res.status_code == 200
+    content = xmltodict.parse(res.data)["ListBucketResult"]["Contents"]
+    assert isinstance(content, dict)
+    assert content["Key"] == key_name
+
+    # ListObjectsVersions
+    res = test_client.get(
+        "/",
+        "http://foobaz.localhost:5000/",
+        query_string={"prefix": key_name, "versions": ""},
+    )
+    assert res.status_code == 200
+    assert xmltodict.parse(res.data)["ListVersionsResult"]["Prefix"] == key_name
+    content = xmltodict.parse(res.data)["ListVersionsResult"]["Version"]
+    assert isinstance(content, dict)
+    assert content["Key"] == key_name
+
+    # GetBucket
+    res = test_client.head("http://foobaz.localhost:5000")
+    assert res.status_code == 200
+    assert res.headers.get("x-amz-bucket-region") == "us-east-1"
+
+    # HeadObject
+    res = test_client.head(f"/{key_name}", "http://foobaz.localhost:5000/")
+    assert res.status_code == 200
+    assert res.headers.get("Accept-Ranges") == "bytes"
+
+    # GetObject
+    res = test_client.get(f"/{key_name}", "http://foobaz.localhost:5000/")
+    assert res.status_code == 200
+    assert res.data == b"test value"
+    assert res.headers.get("Accept-Ranges") == "bytes"
 
 
 def test_s3_server_ignore_subdomain_for_bucketnames():
@@ -59,24 +112,38 @@ def test_s3_server_ignore_subdomain_for_bucketnames():
         test_client = authenticated_client()
 
         res = test_client.put("/mybucket", "http://foobaz.localhost:5000/")
-        res.status_code.should.equal(200)
-        res.data.should.contain(b"mybucket")
+        assert res.status_code == 200
+        assert "mybucket" in res.headers.get("Location")
 
 
 def test_s3_server_bucket_versioning():
     test_client = authenticated_client()
 
-    # Just enough XML to enable versioning
-    body = "<Status>Enabled</Status>"
+    res = test_client.put("/", "http://foobaz.localhost:5000/")
+    assert res.status_code == 200
+
+    status_enabled_xml = "<Status>Enabled</Status>"
+    # Bucket versioning should be disabled by default.
+    res = test_client.get("/?versioning", "http://foobaz.localhost:5000")
+    assert res.status_code == 200
+    decoded_body = res.data.decode()
+    assert status_enabled_xml not in decoded_body
+    # Enable versioning.
+    body = f"<VersioningConfiguration>{status_enabled_xml}</VersioningConfiguration>"
     res = test_client.put("/?versioning", "http://foobaz.localhost:5000", data=body)
-    res.status_code.should.equal(200)
+    assert res.status_code == 200
+    # Bucket version should now be enabled.
+    res = test_client.get("/?versioning", "http://foobaz.localhost:5000")
+    assert res.status_code == 200
+    decoded_body = res.data.decode()
+    assert status_enabled_xml in decoded_body
 
 
 def test_s3_server_post_to_bucket():
     test_client = authenticated_client()
 
     res = test_client.put("/", "http://tester.localhost:5000/")
-    res.status_code.should.equal(200)
+    assert res.status_code == 200
 
     test_client.post(
         "/",
@@ -85,15 +152,15 @@ def test_s3_server_post_to_bucket():
     )
 
     res = test_client.get("/the-key", "http://tester.localhost:5000/")
-    res.status_code.should.equal(200)
-    res.data.should.equal(b"nothing")
+    assert res.status_code == 200
+    assert res.data == b"nothing"
 
 
 def test_s3_server_post_to_bucket_redirect():
     test_client = authenticated_client()
 
     res = test_client.put("/", "http://tester.localhost:5000/")
-    res.status_code.should.equal(200)
+    assert res.status_code == 200
 
     redirect_base = "https://redirect.com/success/"
     filecontent = "nothing"
@@ -107,8 +174,8 @@ def test_s3_server_post_to_bucket_redirect():
             "success_action_redirect": redirect_base,
         },
     )
-    real_key = "asdf/the-key/{}".format(filename)
-    res.status_code.should.equal(303)
+    real_key = f"asdf/the-key/{filename}"
+    assert res.status_code == 303
     redirect = res.headers["location"]
     assert redirect.startswith(redirect_base)
 
@@ -117,36 +184,62 @@ def test_s3_server_post_to_bucket_redirect():
     assert args["key"][0] == real_key
     assert args["bucket"][0] == "tester"
 
-    res = test_client.get("/{}".format(real_key), "http://tester.localhost:5000/")
-    res.status_code.should.equal(200)
-    res.data.should.equal(filecontent.encode("utf8"))
+    res = test_client.get(f"/{real_key}", "http://tester.localhost:5000/")
+    assert res.status_code == 200
+    assert res.data == filecontent.encode("utf8")
 
 
 def test_s3_server_post_without_content_length():
     test_client = authenticated_client()
 
+    # You can create a bucket without specifying Content-Length
     res = test_client.put(
         "/", "http://tester.localhost:5000/", environ_overrides={"CONTENT_LENGTH": ""}
     )
-    res.status_code.should.equal(411)
+    assert res.status_code == 200
 
+    # You can specify a bucket in another region without specifying Content-Length
+    # (The body is just ignored..)
+    res = test_client.put(
+        "/",
+        "http://tester.localhost:5000/",
+        environ_overrides={"CONTENT_LENGTH": ""},
+        data=(
+            "<CreateBucketConfiguration>"
+            "<LocationConstraint>us-west-2</LocationConstraint>"
+            "</CreateBucketConfiguration>"
+        ),
+    )
+    assert res.status_code == 200
+
+    # You cannot make any other bucket-related requests without specifying Content-Length
+    for path in ["/?versioning", "/?policy"]:
+        res = test_client.put(
+            path, "http://t.localhost:5000", environ_overrides={"CONTENT_LENGTH": ""}
+        )
+        assert res.status_code == 411
+
+    # You cannot make any POST-request
     res = test_client.post(
         "/", "https://tester.localhost:5000/", environ_overrides={"CONTENT_LENGTH": ""}
     )
-    res.status_code.should.equal(411)
+    assert res.status_code == 411
 
 
 def test_s3_server_post_unicode_bucket_key():
-    # Make sure that we can deal with non-ascii characters in request URLs (e.g., S3 object names)
+    """Verify non-ascii characters in request URLs (e.g., S3 object names)."""
     dispatcher = server.DomainDispatcherApplication(server.create_backend_app)
     backend_app = dispatcher.get_application(
-        {"HTTP_HOST": "s3.amazonaws.com", "PATH_INFO": "/test-bucket/test-object-てすと"}
+        {
+            "HTTP_HOST": "s3.amazonaws.com",
+            "PATH_INFO": "/test-bucket/test-object-てすと",
+        }
     )
     assert backend_app
     backend_app = dispatcher.get_application(
         {
             "HTTP_HOST": "s3.amazonaws.com",
-            "PATH_INFO": "/test-bucket/test-object-てすと".encode("utf-8"),
+            "PATH_INFO": "/test-bucket/test-object-てすと".encode(),
         }
     )
     assert backend_app
@@ -169,22 +262,37 @@ def test_s3_server_post_cors():
     )
     assert res.status_code in [200, 204]
 
-    expected_methods = set(["DELETE", "PATCH", "PUT", "GET", "HEAD", "POST", "OPTIONS"])
+    expected_methods = {"DELETE", "PATCH", "PUT", "GET", "HEAD", "POST", "OPTIONS"}
     assert (
         set(res.headers["Access-Control-Allow-Methods"].split(", ")) == expected_methods
     )
 
-    res.headers.should.have.key("Access-Control-Allow-Origin").which.should.equal(
-        "https://localhost:9000"
-    )
-    res.headers.should.have.key("Access-Control-Allow-Headers").which.should.equal(
-        "origin, x-requested-with"
-    )
+    assert res.headers["Access-Control-Allow-Origin"] == "https://localhost:9000"
+    assert res.headers["Access-Control-Allow-Headers"] == "origin, x-requested-with"
+
+
+def test_s3_no_default_cors():
+    """Test default CORS headers are not set if MOTO_DISABLE_GLOBAL_CORS is true"""
+    for disable_cors in [True, False]:
+        with patch("moto.moto_server.werkzeug_app.DISABLE_GLOBAL_CORS", disable_cors):
+            test_client = authenticated_client()
+
+            # Create a bucket and a file
+            test_client.put("/", "http://nodefaultcors.localhost:5000/")
+            test_client.put("/test", "http://nodefaultcors.localhost:5000/")
+            test_client.put("/", "http://tester.localhost:5000/")
+
+            resp = test_client.get(
+                "/test",
+                "http://nodefaultcors.localhost:5000/",
+                headers={"Origin": "example.com"},
+            )
+            assert ("Access-Control-Allow-Origin" not in resp.headers) == disable_cors
 
 
 def test_s3_server_post_cors_exposed_header():
-    """Test that we can override default CORS headers with custom bucket rules"""
-    # github.com/spulec/moto/issues/4220
+    """Test overriding default CORS headers with custom bucket rules"""
+    # github.com/getmoto/moto/issues/4220
 
     cors_config_payload = """<CORSConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
   <CORSRule>
@@ -202,10 +310,11 @@ def test_s3_server_post_cors_exposed_header():
     """
 
     test_client = authenticated_client()
+    valid_origin = "https://example.org"
     preflight_headers = {
         "Access-Control-Request-Method": "POST",
         "Access-Control-Request-Headers": "origin, x-requested-with",
-        "Origin": "https://localhost:9000",
+        "Origin": valid_origin,
     }
     # Returns 403 on non existing bucket
     preflight_response = test_client.options(
@@ -213,15 +322,16 @@ def test_s3_server_post_cors_exposed_header():
     )
     assert preflight_response.status_code == 403
 
-    # Create the bucket
+    # Create the bucket & file
     test_client.put("/", "http://testcors.localhost:5000/")
+    test_client.put("/test", "http://testcors.localhost:5000/")
     res = test_client.put(
         "/?cors", "http://testcors.localhost:5000", data=cors_config_payload
     )
     assert res.status_code == 200
 
     cors_res = test_client.get("/?cors", "http://testcors.localhost:5000")
-    assert b"<ExposedHeader>ETag</ExposedHeader>" in cors_res.data
+    assert b"<ExposeHeader>ETag</ExposeHeader>" in cors_res.data
 
     # Test OPTIONS bucket response and key response
     for key_name in ("/", "/test"):
@@ -239,3 +349,173 @@ def test_s3_server_post_cors_exposed_header():
         for header_name, header_value in expected_cors_headers.items():
             assert header_name in preflight_response.headers
             assert preflight_response.headers[header_name] == header_value
+
+    # Test GET key response
+    # A regular GET should not receive any CORS headers
+    resp = test_client.get("/test", "http://testcors.localhost:5000/")
+    assert "Access-Control-Allow-Methods" not in resp.headers
+    assert "Access-Control-Expose-Headers" not in resp.headers
+
+    # A GET with mismatched Origin-header should not receive any CORS headers
+    resp = test_client.get(
+        "/test", "http://testcors.localhost:5000/", headers={"Origin": "something.com"}
+    )
+    assert "Access-Control-Allow-Methods" not in resp.headers
+    assert "Access-Control-Expose-Headers" not in resp.headers
+
+    # Only a GET with matching Origin-header should receive CORS headers
+    resp = test_client.get(
+        "/test", "http://testcors.localhost:5000/", headers={"Origin": valid_origin}
+    )
+    assert (
+        resp.headers["Access-Control-Allow-Methods"] == "HEAD, GET, PUT, POST, DELETE"
+    )
+    assert resp.headers["Access-Control-Expose-Headers"] == "ETag"
+
+    # Test PUT key response
+    # A regular PUT should not receive any CORS headers
+    resp = test_client.put("/test", "http://testcors.localhost:5000/")
+    assert "Access-Control-Allow-Methods" not in resp.headers
+    assert "Access-Control-Expose-Headers" not in resp.headers
+
+    # A PUT with mismatched Origin-header should not receive any CORS headers
+    resp = test_client.put(
+        "/test", "http://testcors.localhost:5000/", headers={"Origin": "something.com"}
+    )
+    assert "Access-Control-Allow-Methods" not in resp.headers
+    assert "Access-Control-Expose-Headers" not in resp.headers
+
+    # Only a PUT with matching Origin-header should receive CORS headers
+    resp = test_client.put(
+        "/test", "http://testcors.localhost:5000/", headers={"Origin": valid_origin}
+    )
+    assert (
+        resp.headers["Access-Control-Allow-Methods"] == "HEAD, GET, PUT, POST, DELETE"
+    )
+    assert resp.headers["Access-Control-Expose-Headers"] == "ETag"
+
+
+def test_s3_server_post_cors_multiple_origins():
+    """Test that Moto only responds with the Origin that we that hosts the server"""
+    # github.com/getmoto/moto/issues/6003
+
+    cors_config_payload = """<CORSConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <CORSRule>
+    <AllowedOrigin>https://example.org</AllowedOrigin>
+    <AllowedOrigin>https://localhost:6789</AllowedOrigin>
+    <AllowedMethod>POST</AllowedMethod>
+  </CORSRule>
+</CORSConfiguration>
+    """
+
+    thread = ThreadedMotoServer(port="6789", verbose=False)
+    thread.start()
+
+    # Create the bucket
+    requests.put("http://testcors.localhost:6789/")
+    requests.put("http://testcors.localhost:6789/?cors", data=cors_config_payload)
+
+    # Test only our requested origin is returned
+    preflight_response = requests.options(
+        "http://testcors.localhost:6789/test2",
+        headers={
+            "Access-Control-Request-Method": "POST",
+            "Origin": "https://localhost:6789",
+        },
+    )
+    assert preflight_response.status_code == 200
+    assert (
+        preflight_response.headers["Access-Control-Allow-Origin"]
+        == "https://localhost:6789"
+    )
+    assert preflight_response.content == b""
+
+    # Verify a request with unknown origin fails
+    preflight_response = requests.options(
+        "http://testcors.localhost:6789/test2",
+        headers={
+            "Access-Control-Request-Method": "POST",
+            "Origin": "https://unknown.host",
+        },
+    )
+    assert preflight_response.status_code == 403
+    assert b"<Code>AccessForbidden</Code>" in preflight_response.content
+
+    # Verify we can use a wildcard anywhere in the origin
+    cors_config_payload = (
+        '<CORSConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><CORSRule>'
+        "<AllowedOrigin>https://*.google.com</AllowedOrigin>"
+        "<AllowedMethod>POST</AllowedMethod>"
+        "</CORSRule></CORSConfiguration>"
+    )
+    requests.put("http://testcors.localhost:6789/?cors", data=cors_config_payload)
+    for origin in ["https://sth.google.com", "https://a.google.com"]:
+        preflight_response = requests.options(
+            "http://testcors.localhost:6789/test2",
+            headers={"Access-Control-Request-Method": "POST", "Origin": origin},
+        )
+        assert preflight_response.status_code == 200
+        assert preflight_response.headers["Access-Control-Allow-Origin"] == origin
+
+    # Non-matching requests throw an error though - it does not act as a full wildcard
+    preflight_response = requests.options(
+        "http://testcors.localhost:6789/test2",
+        headers={
+            "Access-Control-Request-Method": "POST",
+            "Origin": "sth.microsoft.com",
+        },
+    )
+    assert preflight_response.status_code == 403
+    assert b"<Code>AccessForbidden</Code>" in preflight_response.content
+
+    # Verify we can use a wildcard as the origin
+    cors_config_payload = (
+        '<CORSConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><CORSRule>'
+        "<AllowedOrigin>*</AllowedOrigin>"
+        "<AllowedMethod>POST</AllowedMethod>"
+        "</CORSRule></CORSConfiguration>"
+    )
+    requests.put("http://testcors.localhost:6789/?cors", data=cors_config_payload)
+    for origin in ["https://a.google.com", "http://b.microsoft.com", "any"]:
+        preflight_response = requests.options(
+            "http://testcors.localhost:6789/test2",
+            headers={"Access-Control-Request-Method": "POST", "Origin": origin},
+        )
+        assert preflight_response.status_code == 200
+        assert preflight_response.headers["Access-Control-Allow-Origin"] == origin
+
+    thread.stop()
+
+
+def test_s3_metadata_keys_with_underscores():
+    if not settings.TEST_DECORATOR_MODE:
+        raise SkipTest("No point testing the ThreadedMotoServer in Server/Proxy-mode")
+    # Werkzeug's dev server drops headers with underscores in their names;
+    # MotoRequestHandler has to keep them, and keep their original spelling.
+    thread = ThreadedMotoServer(port=0, verbose=False)
+    thread.start()
+    host, port = thread.get_host_and_port()
+    bucket_name = str(uuid.uuid4())
+    try:
+        s3 = boto3.client(
+            "s3",
+            region_name="us-east-1",
+            endpoint_url=f"http://{host}:{port}",
+            aws_access_key_id="ak",
+            aws_secret_access_key="sk",
+        )
+        s3.create_bucket(Bucket=bucket_name)
+        s3.put_object(
+            Bucket=bucket_name,
+            Key="test-key",
+            Body=b"x",
+            Metadata={"transform_watermark": "t", "source": "s", "has_underscore": "h"},
+        )
+        metadata = s3.get_object(Bucket=bucket_name, Key="test-key")["Metadata"]
+        assert metadata == {
+            "transform_watermark": "t",
+            "source": "s",
+            "has_underscore": "h",
+        }
+    finally:
+        thread.stop()

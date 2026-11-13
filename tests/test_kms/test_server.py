@@ -1,21 +1,23 @@
 import json
-import sure  # noqa # pylint: disable=unused-import
 
 import moto.server as server
-from moto import mock_kms
+from moto import mock_aws
+from moto.utilities.constants import APPLICATION_AMZ_JSON_1_1
 
 """
 Test the different server responses
 """
 
 
-@mock_kms
+@mock_aws
 def test_list_keys():
     backend = server.create_backend_app("kms")
     test_client = backend.test_client()
+    headers = {
+        "X-Amz-Target": "TrentService.ListKeys",
+        "Content-Type": APPLICATION_AMZ_JSON_1_1,
+    }
+    res = test_client.post("/", headers=headers)
+    body = json.loads(res.data.decode("utf-8"))
 
-    res = test_client.get("/?Action=ListKeys")
-
-    json.loads(res.data.decode("utf-8")).should.equal(
-        {"Keys": [], "NextMarker": None, "Truncated": False}
-    )
+    assert body == {"Keys": [], "NextMarker": None, "Truncated": False}

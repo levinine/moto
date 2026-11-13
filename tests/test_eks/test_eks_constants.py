@@ -1,13 +1,13 @@
 """
 This file should only contain constants used for the EKS tests.
 """
+
 import re
 from enum import Enum
 
 from boto3 import Session
 
-from moto.core import ACCOUNT_ID
-from moto.eks import REGION as DEFAULT_REGION
+from moto.core import DEFAULT_ACCOUNT_ID as ACCOUNT_ID
 
 DEFAULT_ENCODING = "utf-8"
 DEFAULT_HTTP_HEADERS = {"Content-type": "application/json"}
@@ -15,7 +15,7 @@ DEFAULT_NAMESPACE = "namespace_1"
 FROZEN_TIME = "2013-11-27T01:42:00Z"
 MAX_FARGATE_LABELS = 5
 PARTITIONS = Session().get_available_partitions()
-REGION = Session().region_name or DEFAULT_REGION
+REGION = "us-east-1"
 SERVICE = "eks"
 SUBNET_IDS = ["subnet-12345ab", "subnet-67890cd"]
 
@@ -57,6 +57,12 @@ POD_EXECUTION_ROLE_ARN_VALUE = "arn:aws:iam::" + str(ACCOUNT_ID) + ":role/role_n
 
 REMOTE_ACCESS_KEY = "remoteAccess"
 REMOTE_ACCESS_VALUE = {"ec2SshKey": "eksKeypair"}
+
+REMOTE_NETWORK_CONFIG_KEY = "remoteNetworkConfig"
+REMOTE_NETWORK_CONFIG_VALUE = {
+    "remoteNodeNetworks": [{"cidrs": ["10.0.0.0/16", "10.1.0.0/16"]}],
+    "remotePodNetworks": [{"cidrs": ["172.16.0.0/16", "172.17.0.0/16"]}],
+}
 
 RESOURCES_VPC_CONFIG_KEY = "resourcesVpcConfig"
 RESOURCES_VPC_CONFIG_VALUE = {
@@ -101,6 +107,7 @@ LOGGING = (LOGGING_KEY, LOGGING_VALUE)
 NODEROLE_ARN = (NODEROLE_ARN_KEY, NODEROLE_ARN_VALUE)
 POD_EXECUTION_ROLE_ARN = (POD_EXECUTION_ROLE_ARN_KEY, POD_EXECUTION_ROLE_ARN_VALUE)
 REMOTE_ACCESS = (REMOTE_ACCESS_KEY, REMOTE_ACCESS_VALUE)
+REMOTE_NETWORK_CONFIG = (REMOTE_NETWORK_CONFIG_KEY, REMOTE_NETWORK_CONFIG_VALUE)
 RESOURCES_VPC_CONFIG = (RESOURCES_VPC_CONFIG_KEY, RESOURCES_VPC_CONFIG_VALUE)
 ROLE_ARN = (ROLE_ARN_KEY, ROLE_ARN_VALUE)
 SCALING_CONFIG = (SCALING_CONFIG_KEY, SCALING_CONFIG_VALUE)
@@ -137,6 +144,7 @@ class ClusterInputs:
         KUBERNETES_NETWORK_CONFIG,
         TAGS,
         VERSION,
+        REMOTE_NETWORK_CONFIG,
     ]
 
 
@@ -176,6 +184,12 @@ class ClusterAttributes:
     ISSUER = "issuer"
     NAME = "name"
     OIDC = "oidc"
+    ENCRYPTION_CONFIG = "encryptionConfig"
+    REMOTE_NETWORK_CONFIG = "remoteNetworkConfig"
+    KUBERNETES_NETWORK_CONFIG = "kubernetesNetworkConfig"
+    LOGGING = "logging"
+    CLIENT_REQUEST_TOKEN = "clientRequestToken"
+    RESOURCES_VPC_CONFIG = "resourcesVpcConfig"
 
 
 class FargateProfileAttributes:

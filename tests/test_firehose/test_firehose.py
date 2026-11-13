@@ -1,16 +1,14 @@
-"""Unit tests specific to basic Firehose Delivery Stream-related APIs."""
-from unittest import SkipTest
 import warnings
+from unittest import SkipTest
 
 import boto3
-from botocore.exceptions import ClientError
 import pytest
+from botocore.exceptions import ClientError
 
-from moto import mock_firehose
-from moto import settings
-from moto.core import ACCOUNT_ID
-from moto.core.utils import get_random_hex
+from moto import mock_aws, settings
+from moto.core import DEFAULT_ACCOUNT_ID as ACCOUNT_ID
 from moto.firehose.models import DeliveryStream
+from moto.moto_api._internal import mock_random
 
 TEST_REGION = "us-east-1" if settings.TEST_SERVER_MODE else "us-west-2"
 
@@ -23,7 +21,7 @@ def sample_s3_dest_config():
     }
 
 
-@mock_firehose
+@mock_aws
 def test_warnings():
     """Test features that raise a warning as they're unimplemented."""
     if settings.TEST_SERVER_MODE:
@@ -32,20 +30,8 @@ def test_warnings():
     client = boto3.client("firehose", region_name=TEST_REGION)
     s3_dest_config = sample_s3_dest_config()
 
-    # DeliveryStreamEncryption is not supported.
-    stream_name = f"test_warning_{get_random_hex(6)}"
-    with warnings.catch_warnings(record=True) as warn_msg:
-        client.create_delivery_stream(
-            DeliveryStreamName=stream_name,
-            ExtendedS3DestinationConfiguration=s3_dest_config,
-            DeliveryStreamEncryptionConfigurationInput={"KeyType": "AWS_OWNED_CMK"},
-        )
-    assert "server-side encryption enabled is not yet implemented" in str(
-        warn_msg[-1].message
-    )
-
     # Can't create a delivery stream for Splunk as it's unimplemented.
-    stream_name = f"test_splunk_destination_{get_random_hex(6)}"
+    stream_name = f"test_splunk_destination_{mock_random.get_random_hex(6)}"
     with warnings.catch_warnings(record=True) as warn_msg:
         client.create_delivery_stream(
             DeliveryStreamName=stream_name,
@@ -61,9 +47,9 @@ def test_warnings():
     )
 
     # Can't update a delivery stream to Splunk as it's unimplemented.
-    stream_name = f"test_update_splunk_destination_{get_random_hex(6)}"
+    stream_name = f"test_update_splunk_destination_{mock_random.get_random_hex(6)}"
     client.create_delivery_stream(
-        DeliveryStreamName=stream_name, S3DestinationConfiguration=s3_dest_config,
+        DeliveryStreamName=stream_name, S3DestinationConfiguration=s3_dest_config
     )
 
     with warnings.catch_warnings(record=True) as warn_msg:
@@ -82,12 +68,12 @@ def test_warnings():
     )
 
 
-@mock_firehose
+@mock_aws
 def test_create_delivery_stream_failures():
     """Test errors invoking create_delivery_stream()."""
     client = boto3.client("firehose", region_name=TEST_REGION)
     s3_dest_config = sample_s3_dest_config()
-    failure_name = f"test_failure_{get_random_hex(6)}"
+    failure_name = f"test_failure_{mock_random.get_random_hex(6)}"
 
     # Create too many streams.
     for idx in range(DeliveryStream.MAX_STREAMS_PER_REGION):
@@ -172,12 +158,12 @@ def test_create_delivery_stream_failures():
     )
 
 
-@mock_firehose
+@mock_aws
 def test_delete_delivery_stream():
     """Test successful and failed invocations of delete_delivery_stream()."""
     client = boto3.client("firehose", region_name=TEST_REGION)
     s3_dest_config = sample_s3_dest_config()
-    stream_name = f"test_delete_{get_random_hex(6)}"
+    stream_name = f"test_delete_{mock_random.get_random_hex(6)}"
 
     # Create a couple of streams to test with.
     for idx in range(5):
@@ -208,12 +194,12 @@ def test_delete_delivery_stream():
     assert hoses["DeliveryStreamNames"] == []
 
 
-@mock_firehose
+@mock_aws
 def test_describe_delivery_stream():
     """Test successful, failed invocations of describe_delivery_stream()."""
     client = boto3.client("firehose", region_name=TEST_REGION)
     s3_dest_config = sample_s3_dest_config()
-    stream_name = f"test_describe_{get_random_hex(6)}"
+    stream_name = f"test_describe_{mock_random.get_random_hex(6)}"
     role_arn = f"arn:aws:iam::{ACCOUNT_ID}:role/testrole"
 
     # Create delivery stream with S3 destination, kinesis type and source
@@ -248,7 +234,7 @@ def test_describe_delivery_stream():
     assert description["DeliveryStreamName"] == stream_name
     assert (
         description["DeliveryStreamARN"]
-        == f"arn:aws:firehose:{TEST_REGION}:{ACCOUNT_ID}:/delivery_stream/{stream_name}"
+        == f"arn:aws:firehose:{TEST_REGION}:{ACCOUNT_ID}:deliverystream/{stream_name}"
     )
     assert description["DeliveryStreamStatus"] == "ACTIVE"
     assert description["DeliveryStreamType"] == "KinesisStreamAsSource"
@@ -281,7 +267,7 @@ def test_describe_delivery_stream():
     assert description["DeliveryStreamName"] == stream_name
     assert (
         description["DeliveryStreamARN"]
-        == f"arn:aws:firehose:{TEST_REGION}:{ACCOUNT_ID}:/delivery_stream/{stream_name}"
+        == f"arn:aws:firehose:{TEST_REGION}:{ACCOUNT_ID}:deliverystream/{stream_name}"
     )
     assert description["DeliveryStreamStatus"] == "ACTIVE"
     assert description["DeliveryStreamType"] == "KinesisStreamAsSource"
@@ -366,12 +352,12 @@ def test_describe_delivery_stream():
     )
 
 
-@mock_firehose
+@mock_aws
 def test_list_delivery_streams():
     """Test successful and failed invocations of list_delivery_streams()."""
     client = boto3.client("firehose", region_name=TEST_REGION)
     s3_dest_config = sample_s3_dest_config()
-    stream_name = f"test_list_{get_random_hex(6)}"
+    stream_name = f"test_list_{mock_random.get_random_hex(6)}"
 
     # Create a couple of streams of both types to test with.
     for idx in range(5):
@@ -382,7 +368,7 @@ def test_list_delivery_streams():
         )
     for idx in range(5):
         client.create_delivery_stream(
-            DeliveryStreamName=f"{stream_name}-{idx+5}",
+            DeliveryStreamName=f"{stream_name}-{idx + 5}",
             DeliveryStreamType="KinesisStreamAsSource",
             S3DestinationConfiguration=s3_dest_config,
         )
@@ -406,7 +392,7 @@ def test_list_delivery_streams():
 
     hoses = client.list_delivery_streams(DeliveryStreamType="KinesisStreamAsSource")
     assert len(hoses["DeliveryStreamNames"]) == 5
-    expected_kinesis_stream_list = [f"{stream_name}-{x+5}" for x in range(5)]
+    expected_kinesis_stream_list = [f"{stream_name}-{x + 5}" for x in range(5)]
     assert hoses["DeliveryStreamNames"] == expected_kinesis_stream_list
     assert hoses["HasMoreDeliveryStreams"] is False
 
@@ -415,7 +401,7 @@ def test_list_delivery_streams():
         ExclusiveStartDeliveryStreamName=f"{stream_name}-5"
     )
     assert len(hoses["DeliveryStreamNames"]) == 4
-    expected_stream_list = [f"{stream_name}-{x+5}" for x in range(1, 5)]
+    expected_stream_list = [f"{stream_name}-{x + 5}" for x in range(1, 5)]
     assert hoses["DeliveryStreamNames"] == expected_stream_list
     assert hoses["HasMoreDeliveryStreams"] is False
 
@@ -444,7 +430,7 @@ def test_list_delivery_streams():
     assert hoses["HasMoreDeliveryStreams"] is False
 
 
-@mock_firehose
+@mock_aws
 def test_update_destination():
     """Test successful, failed invocations of update_destination()."""
     client = boto3.client("firehose", region_name=TEST_REGION)
@@ -463,7 +449,7 @@ def test_update_destination():
     assert f"Firehose foo under accountId {ACCOUNT_ID} not found" in err["Message"]
 
     # Create a delivery stream for testing purposes.
-    stream_name = f"test_update_{get_random_hex(6)}"
+    stream_name = f"test_update_{mock_random.get_random_hex(6)}"
     client.create_delivery_stream(
         DeliveryStreamName=stream_name,
         DeliveryStreamType="DirectPut",
@@ -504,8 +490,20 @@ def test_update_destination():
         "supported at this time"
     ) in err["Message"]
 
+    # An unknown destination id is reported back with the id that was given.
+    with pytest.raises(ClientError) as exc:
+        client.update_destination(
+            DeliveryStreamName=stream_name,
+            CurrentDeliveryStreamVersionId="1",
+            DestinationId="destinationId-000000000009",
+            ExtendedS3DestinationUpdate=s3_dest_config,
+        )
+    err = exc.value.response["Error"]
+    assert err["Code"] == "InvalidArgumentException"
+    assert "Destination Id destinationId-000000000009 not found" in err["Message"]
 
-@mock_firehose
+
+@mock_aws
 def test_lookup_name_from_arn():
     """Test delivery stream instance can be retrieved given ARN.
 
@@ -520,13 +518,13 @@ def test_lookup_name_from_arn():
     stream_name = "test_lookup"
 
     arn = client.create_delivery_stream(
-        DeliveryStreamName=stream_name, S3DestinationConfiguration=s3_dest_config,
+        DeliveryStreamName=stream_name, S3DestinationConfiguration=s3_dest_config
     )["DeliveryStreamARN"]
 
-    from moto.firehose.models import (  # pylint: disable=import-outside-toplevel
-        firehose_backends,
-    )
+    from moto.firehose.models import firehose_backends
 
-    delivery_stream = firehose_backends[TEST_REGION].lookup_name_from_arn(arn)
+    delivery_stream = firehose_backends[ACCOUNT_ID][TEST_REGION].lookup_name_from_arn(
+        arn
+    )
     assert delivery_stream.delivery_stream_arn == arn
     assert delivery_stream.delivery_stream_name == stream_name

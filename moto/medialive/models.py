@@ -1,17 +1,18 @@
 from collections import OrderedDict
-from uuid import uuid4
+from typing import Any
 
-from boto3 import Session
-
-from moto.core import BaseBackend, BaseModel
+from moto.core.base_backend import BackendDict, BaseBackend
+from moto.core.common_models import BaseModel
+from moto.moto_api._internal import mock_random
+from moto.utilities.utils import get_partition
 
 
 class Input(BaseModel):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, **kwargs: Any):
         self.arn = kwargs.get("arn")
         self.attached_channels = kwargs.get("attached_channels", [])
         self.destinations = kwargs.get("destinations", [])
-        self.input_id = kwargs.get("input_id")
+        self.id = kwargs.get("input_id")
         self.input_class = kwargs.get("input_class", "STANDARD")
         self.input_devices = kwargs.get("input_devices", [])
         self.input_source_type = kwargs.get("input_source_type", "STATIC")
@@ -23,29 +24,9 @@ class Input(BaseModel):
         # Possible states: 'CREATING'|'DETACHED'|'ATTACHED'|'DELETING'|'DELETED'
         self.state = kwargs.get("state")
         self.tags = kwargs.get("tags")
-        self.input_type = kwargs.get("input_type")
+        self.type = kwargs.get("input_type")
 
-    def to_dict(self):
-        data = {
-            "arn": self.arn,
-            "attachedChannels": self.attached_channels,
-            "destinations": self.destinations,
-            "id": self.input_id,
-            "inputClass": self.input_class,
-            "inputDevices": self.input_devices,
-            "inputSourceType": self.input_source_type,
-            "mediaConnectFlows": self.media_connect_flows,
-            "name": self.name,
-            "roleArn": self.role_arn,
-            "securityGroups": self.security_groups,
-            "sources": self.sources,
-            "state": self.state,
-            "tags": self.tags,
-            "type": self.input_type,
-        }
-        return data
-
-    def _resolve_transient_states(self):
+    def _resolve_transient_states(self) -> None:
         # Resolve transient states before second call
         # (to simulate AWS taking its sweet time with these things)
         if self.state in ["CREATING"]:
@@ -55,14 +36,14 @@ class Input(BaseModel):
 
 
 class Channel(BaseModel):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, **kwargs: Any):
         self.arn = kwargs.get("arn")
         self.cdi_input_specification = kwargs.get("cdi_input_specification")
         self.channel_class = kwargs.get("channel_class", "STANDARD")
         self.destinations = kwargs.get("destinations")
         self.egress_endpoints = kwargs.get("egress_endpoints", [])
         self.encoder_settings = kwargs.get("encoder_settings")
-        self.channel_id = kwargs.get("channel_id")
+        self.id = kwargs.get("channel_id")
         self.input_attachments = kwargs.get("input_attachments")
         self.input_specification = kwargs.get("input_specification")
         self.log_level = kwargs.get("log_level")
@@ -73,33 +54,11 @@ class Channel(BaseModel):
         self.tags = kwargs.get("tags")
         self._previous_state = None
 
-    def to_dict(self, exclude=None):
-        data = {
-            "arn": self.arn,
-            "cdiInputSpecification": self.cdi_input_specification,
-            "channelClass": self.channel_class,
-            "destinations": self.destinations,
-            "egressEndpoints": self.egress_endpoints,
-            "encoderSettings": self.encoder_settings,
-            "id": self.channel_id,
-            "inputAttachments": self.input_attachments,
-            "inputSpecification": self.input_specification,
-            "logLevel": self.log_level,
-            "name": self.name,
-            "pipelineDetails": self.pipeline_details,
-            "pipelinesRunningCount": 1
-            if self.channel_class == "SINGLE_PIPELINE"
-            else 2,
-            "roleArn": self.role_arn,
-            "state": self.state,
-            "tags": self.tags,
-        }
-        if exclude:
-            for key in exclude:
-                del data[key]
-        return data
+    @property
+    def pipelines_running_count(self) -> int:
+        return 1 if self.channel_class == "SINGLE_PIPELINE" else 2
 
-    def _resolve_transient_states(self):
+    def _resolve_transient_states(self) -> None:
         # Resolve transient states before second call
         # (to simulate AWS taking its sweet time with these things)
         if self.state in ["CREATING", "STOPPING"]:
@@ -114,34 +73,29 @@ class Channel(BaseModel):
 
 
 class MediaLiveBackend(BaseBackend):
-    def __init__(self, region_name=None):
-        super(MediaLiveBackend, self).__init__()
-        self.region_name = region_name
-        self._channels = OrderedDict()
-        self._inputs = OrderedDict()
-
-    def reset(self):
-        region_name = self.region_name
-        self.__dict__ = {}
-        self.__init__(region_name)
+    def __init__(self, region_name: str, account_id: str):
+        super().__init__(region_name, account_id)
+        self._channels: dict[str, Channel] = OrderedDict()
+        self._inputs: dict[str, Input] = OrderedDict()
 
     def create_channel(
         self,
-        cdi_input_specification,
-        channel_class,
-        destinations,
-        encoder_settings,
-        input_attachments,
-        input_specification,
-        log_level,
-        name,
-        request_id,
-        reserved,
-        role_arn,
-        tags,
-    ):
-        channel_id = uuid4().hex
-        arn = "arn:aws:medialive:channel:{}".format(channel_id)
+        cdi_input_specification: dict[str, Any],
+        channel_class: str,
+        destinations: list[dict[str, Any]],
+        encoder_settings: dict[str, Any],
+        input_attachments: list[dict[str, Any]],
+        input_specification: dict[str, str],
+        log_level: str,
+        name: str,
+        role_arn: str,
+        tags: dict[str, str],
+    ) -> Channel:
+        """
+        The RequestID and Reserved parameters are not yet implemented
+        """
+        channel_id = mock_random.uuid4().hex
+        arn = f"arn:{get_partition(self.region_name)}:medialive:channel:{channel_id}"
         channel = Channel(
             arn=arn,
             cdi_input_specification=cdi_input_specification,
@@ -162,47 +116,41 @@ class MediaLiveBackend(BaseBackend):
         self._channels[channel_id] = channel
         return channel
 
-    def list_channels(self, max_results, next_token):
-        channels = list(self._channels.values())
-        if max_results is not None:
-            channels = channels[:max_results]
-        response_channels = [
-            c.to_dict(exclude=["encoderSettings", "pipelineDetails"]) for c in channels
-        ]
-        return response_channels, next_token
+    def list_channels(self) -> list[Channel]:
+        return list(self._channels.values())
 
-    def describe_channel(self, channel_id):
+    def describe_channel(self, channel_id: str) -> Channel:
         channel = self._channels[channel_id]
         channel._resolve_transient_states()
-        return channel.to_dict()
+        return channel
 
-    def delete_channel(self, channel_id):
+    def delete_channel(self, channel_id: str) -> Channel:
         channel = self._channels[channel_id]
         channel.state = "DELETING"
-        return channel.to_dict()
+        return channel
 
-    def start_channel(self, channel_id):
+    def start_channel(self, channel_id: str) -> Channel:
         channel = self._channels[channel_id]
         channel.state = "STARTING"
-        return channel.to_dict()
+        return channel
 
-    def stop_channel(self, channel_id):
+    def stop_channel(self, channel_id: str) -> Channel:
         channel = self._channels[channel_id]
         channel.state = "STOPPING"
-        return channel.to_dict()
+        return channel
 
     def update_channel(
         self,
-        channel_id,
-        cdi_input_specification,
-        destinations,
-        encoder_settings,
-        input_attachments,
-        input_specification,
-        log_level,
-        name,
-        role_arn,
-    ):
+        channel_id: str,
+        cdi_input_specification: dict[str, str],
+        destinations: list[dict[str, Any]],
+        encoder_settings: dict[str, Any],
+        input_attachments: list[dict[str, Any]],
+        input_specification: dict[str, str],
+        log_level: str,
+        name: str,
+        role_arn: str,
+    ) -> Channel:
         channel = self._channels[channel_id]
         channel.cdi_input_specification = cdi_input_specification
         channel.destinations = destinations
@@ -221,20 +169,21 @@ class MediaLiveBackend(BaseBackend):
 
     def create_input(
         self,
-        destinations,
-        input_devices,
-        input_security_groups,
-        media_connect_flows,
-        name,
-        request_id,
-        role_arn,
-        sources,
-        tags,
-        type,
-        vpc,
-    ):
-        input_id = uuid4().hex
-        arn = "arn:aws:medialive:input:{}".format(input_id)
+        destinations: list[dict[str, str]],
+        input_devices: list[dict[str, str]],
+        input_security_groups: list[str],
+        media_connect_flows: list[dict[str, str]],
+        name: str,
+        role_arn: str,
+        sources: list[dict[str, str]],
+        tags: dict[str, str],
+        input_type: str,
+    ) -> Input:
+        """
+        The VPC and RequestId parameters are not yet implemented
+        """
+        input_id = mock_random.uuid4().hex
+        arn = f"arn:{get_partition(self.region_name)}:medialive:input:{input_id}"
         a_input = Input(
             arn=arn,
             input_id=input_id,
@@ -246,40 +195,35 @@ class MediaLiveBackend(BaseBackend):
             role_arn=role_arn,
             sources=sources,
             tags=tags,
-            input_type=type,
+            input_type=input_type,
             state="CREATING",
         )
         self._inputs[input_id] = a_input
         return a_input
 
-    def describe_input(self, input_id):
+    def describe_input(self, input_id: str) -> Input:
         a_input = self._inputs[input_id]
         a_input._resolve_transient_states()
-        return a_input.to_dict()
+        return a_input
 
-    def list_inputs(self, max_results, next_token):
-        inputs = list(self._inputs.values())
-        if max_results is not None:
-            inputs = inputs[:max_results]
-        response_inputs = [i.to_dict() for i in inputs]
-        return response_inputs, next_token
+    def list_inputs(self) -> list[Input]:
+        return list(self._inputs.values())
 
-    def delete_input(self, input_id):
+    def delete_input(self, input_id: str) -> None:
         a_input = self._inputs[input_id]
         a_input.state = "DELETING"
-        return a_input.to_dict()
 
     def update_input(
         self,
-        destinations,
-        input_devices,
-        input_id,
-        input_security_groups,
-        media_connect_flows,
-        name,
-        role_arn,
-        sources,
-    ):
+        destinations: list[dict[str, str]],
+        input_devices: list[dict[str, str]],
+        input_id: str,
+        input_security_groups: list[str],
+        media_connect_flows: list[dict[str, str]],
+        name: str,
+        role_arn: str,
+        sources: list[dict[str, str]],
+    ) -> Input:
         a_input = self._inputs[input_id]
         a_input.destinations = destinations
         a_input.input_devices = input_devices
@@ -291,10 +235,4 @@ class MediaLiveBackend(BaseBackend):
         return a_input
 
 
-medialive_backends = {}
-for region in Session().get_available_regions("medialive"):
-    medialive_backends[region] = MediaLiveBackend()
-for region in Session().get_available_regions("medialive", partition_name="aws-us-gov"):
-    medialive_backends[region] = MediaLiveBackend()
-for region in Session().get_available_regions("medialive", partition_name="aws-cn"):
-    medialive_backends[region] = MediaLiveBackend()
+medialive_backends = BackendDict(MediaLiveBackend, "medialive")

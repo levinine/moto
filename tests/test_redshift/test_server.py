@@ -1,17 +1,23 @@
-import sure  # noqa # pylint: disable=unused-import
+"""Test the different server responses."""
+
 import json
+import re
+import unittest
+
 import pytest
 import xmltodict
 
 import moto.server as server
-from moto import mock_redshift
-
-"""
-Test the different server responses
-"""
+from moto import mock_aws, settings
 
 
-@mock_redshift
+@pytest.fixture(scope="function", autouse=True)
+def skip_in_server_mode():
+    if settings.TEST_SERVER_MODE:
+        raise unittest.SkipTest("No point in testing this in ServerMode")
+
+
+@mock_aws
 def test_describe_clusters():
     backend = server.create_backend_app("redshift")
     test_client = backend.test_client()
@@ -19,10 +25,10 @@ def test_describe_clusters():
     res = test_client.get("/?Action=DescribeClusters")
 
     result = res.data.decode("utf-8")
-    result.should.contain("<Clusters></Clusters>")
+    assert "<Clusters></Clusters>" in result or "<Clusters/>" in result
 
 
-@mock_redshift
+@mock_aws
 def test_describe_clusters_with_json_content_type():
     backend = server.create_backend_app("redshift")
     test_client = backend.test_client()
@@ -31,13 +37,13 @@ def test_describe_clusters_with_json_content_type():
 
     result = json.loads(res.data.decode("utf-8"))
     del result["DescribeClustersResponse"]["ResponseMetadata"]
-    result.should.equal(
-        {"DescribeClustersResponse": {"DescribeClustersResult": {"Clusters": []}}}
-    )
+    assert result == {
+        "DescribeClustersResponse": {"DescribeClustersResult": {"Clusters": []}}
+    }
 
 
 @pytest.mark.parametrize("is_json", [True, False], ids=["JSON", "XML"])
-@mock_redshift
+@mock_aws
 def test_create_cluster(is_json):
     backend = server.create_backend_app("redshift")
     test_client = backend.test_client()
@@ -61,34 +67,31 @@ def test_create_cluster(is_json):
         result = xmltodict.parse(result, dict_constructor=dict)
 
     del result["CreateClusterResponse"]["ResponseMetadata"]
-    result.should.have.key("CreateClusterResponse")
-    result["CreateClusterResponse"].should.have.key("CreateClusterResult")
-    result["CreateClusterResponse"]["CreateClusterResult"].should.have.key("Cluster")
+    assert "CreateClusterResponse" in result
+    assert "CreateClusterResult" in result["CreateClusterResponse"]
+    assert "Cluster" in result["CreateClusterResponse"]["CreateClusterResult"]
     result = result["CreateClusterResponse"]["CreateClusterResult"]["Cluster"]
 
-    result.should.have.key("MasterUsername").equal("masteruser")
-    result.should.have.key("MasterUserPassword").equal("****")
-    result.should.have.key("ClusterVersion").equal("1.0")
-    result.should.have.key("ClusterSubnetGroupName").equal(None)
-    result.should.have.key("AvailabilityZone").equal("us-east-1a")
-    result.should.have.key("ClusterStatus").equal("creating")
-    result.should.have.key("NumberOfNodes").equal(1 if is_json else "1")
-    result.should.have.key("PubliclyAccessible").equal(None)
-    result.should.have.key("Encrypted").equal(None)
-    result.should.have.key("DBName").equal("dev")
-    result.should.have.key("NodeType").equal("ds2.xlarge")
-    result.should.have.key("ClusterIdentifier").equal("examplecluster")
-    result.should.have.key("Endpoint").should.have.key("Address").match(
-        "examplecluster.[a-z0-9]+.us-east-1.redshift.amazonaws.com"
+    assert result["MasterUsername"] == "masteruser"
+    assert result["ClusterVersion"] == "1.0"
+    assert result["AvailabilityZone"] == "us-east-1a"
+    assert result["ClusterStatus"] == "creating"
+    assert result["NumberOfNodes"] == (1 if is_json else "1")
+    assert result["PubliclyAccessible"] == (False if is_json else "false")
+    assert result["Encrypted"] == (False if is_json else "false")
+    assert result["DBName"] == "dev"
+    assert result["NodeType"] == "ds2.xlarge"
+    assert result["ClusterIdentifier"] == "examplecluster"
+    assert re.match(
+        "examplecluster.[a-z0-9]+.us-east-1.redshift.amazonaws.com",
+        result["Endpoint"]["Address"],
     )
-    result.should.have.key("Endpoint").should.have.key("Port").equal(
-        5439 if is_json else "5439"
-    )
-    result.should.have.key("ClusterCreateTime")
+    assert result["Endpoint"]["Port"] == (5439 if is_json else "5439")
+    assert "ClusterCreateTime" in result
 
 
 @pytest.mark.parametrize("is_json", [True, False], ids=["JSON", "XML"])
-@mock_redshift
+@mock_aws
 def test_create_cluster_multiple_params(is_json):
     backend = server.create_backend_app("redshift")
     test_client = backend.test_client()
@@ -122,41 +125,36 @@ def test_create_cluster_multiple_params(is_json):
         result = xmltodict.parse(result, dict_constructor=dict)
 
     del result["CreateClusterResponse"]["ResponseMetadata"]
-    result.should.have.key("CreateClusterResponse")
-    result["CreateClusterResponse"].should.have.key("CreateClusterResult")
-    result["CreateClusterResponse"]["CreateClusterResult"].should.have.key("Cluster")
+    assert "CreateClusterResponse" in result
+    assert "CreateClusterResult" in result["CreateClusterResponse"]
+    assert "Cluster" in result["CreateClusterResponse"]["CreateClusterResult"]
     result = result["CreateClusterResponse"]["CreateClusterResult"]["Cluster"]
 
-    result.should.have.key("MasterUsername").equal("masteruser")
-    result.should.have.key("MasterUserPassword").equal("****")
-    result.should.have.key("ClusterVersion").equal("2.0")
-    result.should.have.key("ClusterSubnetGroupName").equal(None)
-    result.should.have.key("AvailabilityZone").equal("us-east-1a")
-    result.should.have.key("ClusterStatus").equal("creating")
-    result.should.have.key("NumberOfNodes").equal(3 if is_json else "3")
-    result.should.have.key("PubliclyAccessible").equal(None)
-    result.should.have.key("Encrypted").equal("True")
-    result.should.have.key("DBName").equal("testdb")
-    result.should.have.key("NodeType").equal("ds2.xlarge")
-    result.should.have.key("ClusterIdentifier").equal("examplecluster")
-    result.should.have.key("Endpoint").should.have.key("Address").match(
-        "examplecluster.[a-z0-9]+.us-east-1.redshift.amazonaws.com"
+    assert result["MasterUsername"] == "masteruser"
+    assert result["ClusterVersion"] == "2.0"
+    assert result["AvailabilityZone"] == "us-east-1a"
+    assert result["ClusterStatus"] == "creating"
+    assert result["NumberOfNodes"] == (3 if is_json else "3")
+    assert result["PubliclyAccessible"] == (False if is_json else "false")
+    assert result["Encrypted"] == (True if is_json else "true")
+    assert result["DBName"] == "testdb"
+    assert result["NodeType"] == "ds2.xlarge"
+    assert result["ClusterIdentifier"] == "examplecluster"
+    assert re.match(
+        "examplecluster.[a-z0-9]+.us-east-1.redshift.amazonaws.com",
+        result["Endpoint"]["Address"],
     )
-    result.should.have.key("Endpoint").should.have.key("Port").equal(
-        1234 if is_json else "1234"
-    )
-    result.should.have.key("ClusterCreateTime")
-    result.should.have.key("Tags")
+    assert result["Endpoint"]["Port"] == (1234 if is_json else "1234")
+    assert "ClusterCreateTime" in result
+    assert "Tags" in result
     tags = result["Tags"]
     if not is_json:
-        tags = tags["item"]
-    tags.should.equal(
-        [{"Key": "key1", "Value": "val1"}, {"Key": "key2", "Value": "val2"}]
-    )
+        tags = tags["Tag"]
+    assert tags == [{"Key": "key1", "Value": "val1"}, {"Key": "key2", "Value": "val2"}]
 
 
 @pytest.mark.parametrize("is_json", [True, False], ids=["JSON", "XML"])
-@mock_redshift
+@mock_aws
 def test_create_and_describe_clusters(is_json):
     backend = server.create_backend_app("redshift")
     test_client = backend.test_client()
@@ -185,22 +183,20 @@ def test_create_and_describe_clusters(is_json):
         result = xmltodict.parse(result, dict_constructor=dict)
 
     del result["DescribeClustersResponse"]["ResponseMetadata"]
-    result.should.have.key("DescribeClustersResponse")
-    result["DescribeClustersResponse"].should.have.key("DescribeClustersResult")
-    result["DescribeClustersResponse"]["DescribeClustersResult"].should.have.key(
-        "Clusters"
-    )
+    assert "DescribeClustersResponse" in result
+    assert "DescribeClustersResult" in result["DescribeClustersResponse"]
+    assert "Clusters" in result["DescribeClustersResponse"]["DescribeClustersResult"]
     result = result["DescribeClustersResponse"]["DescribeClustersResult"]["Clusters"]
     if not is_json:
-        result = result["item"]
+        result = result["Cluster"]
 
-    result.should.have.length_of(2)
+    assert len(result) == 2
     for cluster in result:
-        cluster_names.should.contain(cluster["ClusterIdentifier"])
+        assert cluster["ClusterIdentifier"] in cluster_names
 
 
 @pytest.mark.parametrize("is_json", [True, False], ids=["JSON", "XML"])
-@mock_redshift
+@mock_aws
 def test_create_and_describe_cluster_security_group(is_json):
     backend = server.create_backend_app("redshift")
     test_client = backend.test_client()
@@ -230,15 +226,15 @@ def test_create_and_describe_cluster_security_group(is_json):
         "DescribeClusterSecurityGroupsResult"
     ]["ClusterSecurityGroups"]
     if not is_json:
-        groups = groups["item"]
+        groups = groups["ClusterSecurityGroup"]
 
     descriptions = [g["Description"] for g in groups]
-    descriptions.should.contain("desc for csg1")
-    descriptions.should.contain("desc for csg2")
+    assert "desc for csg1" in descriptions
+    assert "desc for csg2" in descriptions
 
     # Describe single SG
     describe_params = (
-        "/?Action=DescribeClusterSecurityGroups" "&ClusterSecurityGroupName=csg1"
+        "/?Action=DescribeClusterSecurityGroups&ClusterSecurityGroupName=csg1"
     )
     if is_json:
         describe_params += "&ContentType=JSON"
@@ -255,41 +251,41 @@ def test_create_and_describe_cluster_security_group(is_json):
     ]["ClusterSecurityGroups"]
 
     if is_json:
-        groups.should.have.length_of(1)
-        groups[0]["ClusterSecurityGroupName"].should.equal("csg1")
+        assert len(groups) == 1
+        assert groups[0]["ClusterSecurityGroupName"] == "csg1"
     else:
-        groups["item"]["ClusterSecurityGroupName"].should.equal("csg1")
+        assert groups["ClusterSecurityGroup"]["ClusterSecurityGroupName"] == "csg1"
 
 
 @pytest.mark.parametrize("is_json", [True, False], ids=["JSON", "XML"])
-@mock_redshift
+@mock_aws
 def test_describe_unknown_cluster_security_group(is_json):
     backend = server.create_backend_app("redshift")
     test_client = backend.test_client()
 
     describe_params = (
-        "/?Action=DescribeClusterSecurityGroups" "&ClusterSecurityGroupName=unknown"
+        "/?Action=DescribeClusterSecurityGroups&ClusterSecurityGroupName=unknown"
     )
     if is_json:
         describe_params += "&ContentType=JSON"
     res = test_client.get(describe_params)
 
-    res.status_code.should.equal(400)
+    assert res.status_code == 404
 
     if is_json:
         response = json.loads(res.data.decode("utf-8"))
     else:
         response = xmltodict.parse(res.data.decode("utf-8"), dict_constructor=dict)[
-            "RedshiftClientError"
+            "ErrorResponse"
         ]
     error = response["Error"]
 
-    error["Code"].should.equal("ClusterSecurityGroupNotFound")
-    error["Message"].should.equal("Security group unknown not found.")
+    assert error["Code"] == "ClusterSecurityGroupNotFound"
+    assert error["Message"] == "Security group unknown not found."
 
 
 @pytest.mark.parametrize("is_json", [True, False], ids=["JSON", "XML"])
-@mock_redshift
+@mock_aws
 def test_create_cluster_with_security_group(is_json):
     backend = server.create_backend_app("redshift")
     test_client = backend.test_client()
@@ -312,15 +308,15 @@ def test_create_cluster_with_security_group(is_json):
             response = xmltodict.parse(response, dict_constructor=dict)
 
         del response["CreateClusterSecurityGroupResponse"]["ResponseMetadata"]
-        response.should.have.key("CreateClusterSecurityGroupResponse")
+        assert "CreateClusterSecurityGroupResponse" in response
         response = response["CreateClusterSecurityGroupResponse"]
-        response.should.have.key("CreateClusterSecurityGroupResult")
+        assert "CreateClusterSecurityGroupResult" in response
         result = response["CreateClusterSecurityGroupResult"]
-        result.should.have.key("ClusterSecurityGroup")
+        assert "ClusterSecurityGroup" in result
         sg = result["ClusterSecurityGroup"]
-        sg.should.have.key("ClusterSecurityGroupName").being.equal(csg)
-        sg.should.have.key("Description").being.equal("desc for " + csg)
-        sg.should.have.key("EC2SecurityGroups").being.equal([] if is_json else None)
+        assert sg["ClusterSecurityGroupName"] == csg
+        assert sg["Description"] == "desc for " + csg
+        assert sg["EC2SecurityGroups"] == ([] if is_json else None)
 
     # Create Cluster with these security groups
     create_params = (
@@ -329,8 +325,8 @@ def test_create_cluster_with_security_group(is_json):
         "&MasterUsername=masteruser"
         "&MasterUserPassword=12345678Aa"
         "&NodeType=ds2.xlarge"
-        "&ClusterSecurityGroups.member.1=csg1"
-        "&ClusterSecurityGroups.member.2=csg2"
+        "&ClusterSecurityGroups.ClusterSecurityGroupName.1=csg1"
+        "&ClusterSecurityGroups.ClusterSecurityGroupName.2=csg2"
     )
     if is_json:
         create_params += "&ContentType=JSON"
@@ -344,17 +340,15 @@ def test_create_cluster_with_security_group(is_json):
         result = xmltodict.parse(result, dict_constructor=dict)
 
     del result["CreateClusterResponse"]["ResponseMetadata"]
-    result.should.have.key("CreateClusterResponse")
-    result["CreateClusterResponse"].should.have.key("CreateClusterResult")
-    result["CreateClusterResponse"]["CreateClusterResult"].should.have.key("Cluster")
+    assert "CreateClusterResponse" in result
+    assert "CreateClusterResult" in result["CreateClusterResponse"]
+    assert "Cluster" in result["CreateClusterResponse"]["CreateClusterResult"]
     result = result["CreateClusterResponse"]["CreateClusterResult"]["Cluster"]
 
     security_groups = result["ClusterSecurityGroups"]
     if not is_json:
-        security_groups = security_groups["item"]
+        security_groups = security_groups["ClusterSecurityGroup"]
 
-    security_groups.should.have.length_of(2)
+    assert len(security_groups) == 2
     for csg in security_group_names:
-        security_groups.should.contain(
-            {"ClusterSecurityGroupName": csg, "Status": "active"}
-        )
+        assert {"ClusterSecurityGroupName": csg, "Status": "active"} in security_groups

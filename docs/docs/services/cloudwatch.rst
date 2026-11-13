@@ -12,53 +12,61 @@
 cloudwatch
 ==========
 
-|start-h3| Example usage |end-h3|
-
-.. sourcecode:: python
-
-            @mock_cloudwatch
-            def test_cloudwatch_behaviour:
-                boto3.client("cloudwatch")
-                ...
-
-
-
 |start-h3| Implemented features for this service |end-h3|
 
+- [ ] associate_dataset_kms_key
+- [ ] create_resource_metrics_configuration
+- [ ] delete_alarm_mute_rule
 - [X] delete_alarms
 - [ ] delete_anomaly_detector
 - [X] delete_dashboards
-- [ ] delete_insight_rules
+- [X] delete_insight_rules
 - [ ] delete_metric_stream
+- [ ] delete_resource_metrics_configuration
+- [ ] describe_alarm_contributors
 - [ ] describe_alarm_history
-- [ ] describe_alarms
+- [X] describe_alarms
 - [ ] describe_alarms_for_metric
 - [ ] describe_anomaly_detectors
-- [ ] describe_insight_rules
-- [ ] disable_alarm_actions
-- [ ] disable_insight_rules
-- [ ] enable_alarm_actions
-- [ ] enable_insight_rules
+- [X] describe_insight_rules
+- [X] disable_alarm_actions
+- [X] disable_insight_rules
+- [ ] disassociate_dataset_kms_key
+- [X] enable_alarm_actions
+- [X] enable_insight_rules
+- [ ] get_alarm_mute_rule
 - [X] get_dashboard
+- [ ] get_dataset
 - [ ] get_insight_rule_report
 - [X] get_metric_data
 - [X] get_metric_statistics
 - [ ] get_metric_stream
 - [ ] get_metric_widget_image
+- [ ] get_otel_enrichment
+- [ ] get_resource_metrics_configuration
+- [ ] list_alarm_mute_rules
 - [X] list_dashboards
+- [ ] list_managed_insight_rules
 - [ ] list_metric_streams
 - [X] list_metrics
 - [X] list_tags_for_resource
+- [ ] put_alarm_mute_rule
 - [ ] put_anomaly_detector
 - [ ] put_composite_alarm
 - [X] put_dashboard
-- [ ] put_insight_rule
+- [X] put_insight_rule
+- [ ] put_log_alarm
+- [ ] put_managed_insight_rules
 - [X] put_metric_alarm
 - [X] put_metric_data
 - [ ] put_metric_stream
 - [X] set_alarm_state
 - [ ] start_metric_streams
+- [ ] start_otel_enrichment
 - [ ] stop_metric_streams
+- [ ] stop_otel_enrichment
 - [X] tag_resource
 - [X] untag_resource
+- [ ] update_otel_enrichment
+- [ ] update_resource_metrics_configuration
 

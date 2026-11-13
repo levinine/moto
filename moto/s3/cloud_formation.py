@@ -1,8 +1,10 @@
 from collections import OrderedDict
+from typing import Any
 
 
-def cfn_to_api_encryption(bucket_encryption_properties):
-
+def cfn_to_api_encryption(
+    bucket_encryption_properties: dict[str, Any],
+) -> dict[str, Any]:
     sse_algorithm = bucket_encryption_properties["ServerSideEncryptionConfiguration"][
         0
     ]["ServerSideEncryptionByDefault"]["SSEAlgorithm"]
@@ -16,18 +18,6 @@ def cfn_to_api_encryption(bucket_encryption_properties):
     rule = OrderedDict(
         {"ApplyServerSideEncryptionByDefault": apply_server_side_encryption_by_default}
     )
-    bucket_encryption = OrderedDict(
-        {"@xmlns": "http://s3.amazonaws.com/doc/2006-03-01/"}
-    )
-    bucket_encryption["Rule"] = rule
-    return bucket_encryption
-
-
-def is_replacement_update(properties):
-    properties_requiring_replacement_update = ["BucketName", "ObjectLockEnabled"]
-    return any(
-        [
-            property_requiring_replacement in properties
-            for property_requiring_replacement in properties_requiring_replacement_update
-        ]
+    return OrderedDict(
+        {"@xmlns": "http://s3.amazonaws.com/doc/2006-03-01/", "Rule": rule}
     )

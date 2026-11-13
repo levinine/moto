@@ -1,0 +1,98 @@
+name: Unit tests in Proxy Mode
+on: [workflow_call]
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["ubuntu-latest", "windows-latest"]
+        python-version: ["3.10", "3.11", "3.12"]
+        include:
+          - os: ubuntu-latest
+            path: ~/.cache/pip
+          - os: windows-latest
+            path: ~\AppData\Local\pip\Cache
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v7
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Get pip cache dir
+      id: pip-cache
+      run: |
+        echo "dir=$(pip cache dir)" >> $GITHUB_OUTPUT
+    - name: pip cache
+      uses: actions/cache@v6
+      with:
+        path: ${{ matrix.path }}
+        key: pip-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('**/setup.cfg') }}
+        restore-keys: |
+          pip-${{ runner.os }}-${{ matrix.python-version }}-
+    - name: Update pip
+      run: |
+        python -m pip install --upgrade pip
+    - name: Install project dependencies
+      run: |
+        pip install -r requirements-tests.txt
+        pip install .[all,server]
+    - name: Start MotoProxy on Linux
+      if: ${{ matrix.os == 'ubuntu-latest' }}
+      run: |
+        moto_proxy -H 0.0.0.0 -v > moto_proxy.log &
+    - name: Test ProxyMode on Linux
+      if: ${{ matrix.os == 'ubuntu-latest' }}
+      env:
+        TEST_PROXY_MODE: ${{ true }}
+      run: |
+        pytest -sv tests/test_acmpca tests/test_athena tests/test_awslambda tests/test_apigateway tests/test_core/test_proxy.py tests/test_s3
+    - name: Test ProxyMode on Windows
+      if: ${{ matrix.os == 'windows-latest' }}
+      shell: pwsh
+      env:
+        TEST_PROXY_MODE: ${{ true }}
+        MOTO_PORT: "5005"
+        MOTO_PATH: /moto-api/config
+      # This step does not test everything, because it takes ages on Windows for some reason
+      run: |
+        $proxy = Start-Process -FilePath moto_proxy -ArgumentList "-v" -PassThru -RedirectStandardOutput moto_proxy.log -RedirectStandardError moto_proxy-error.log
+        $exitCode = 1
+        try {
+          python scripts/ci_wait_for_server.py
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -eq 0) {
+            pytest -sv tests/test_acmpca tests/test_core/test_proxy.py
+            $exitCode = $LASTEXITCODE
+          }
+        } finally {
+          try {
+            if (-not $proxy.HasExited) {
+              $proxy.Kill()
+              if (-not $proxy.WaitForExit(10000)) {
+                throw "MotoProxy did not stop after termination"
+              }
+            }
+          } catch {
+            Write-Warning "Could not stop the owned MotoProxy process: $_"
+            if ($exitCode -eq 0) {
+              $exitCode = 1
+            }
+          }
+        }
+        exit $exitCode
+    - name: "Stop MotoProxy"
+      if: ${{ matrix.os == 'ubuntu-latest' }}
+      run: |
+        kill $(lsof -t -i:5005)
+    - name: Archive Proxy logs
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: motoproxy-${{ matrix.os }}-${{ matrix.python-version }}
+        path: |
+          moto_proxy*.log

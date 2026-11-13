@@ -12,17 +12,6 @@
 mediastore
 ==========
 
-|start-h3| Example usage |end-h3|
-
-.. sourcecode:: python
-
-            @mock_mediastore
-            def test_mediastore_behaviour:
-                boto3.client("mediastore")
-                ...
-
-
-
 |start-h3| Implemented features for this service |end-h3|
 
 - [X] create_container
@@ -37,6 +26,10 @@ mediastore
 - [X] get_lifecycle_policy
 - [X] get_metric_policy
 - [X] list_containers
+  
+Pagination is not yet implemented
+
+
 - [X] list_tags_for_resource
 - [X] put_container_policy
 - [ ] put_cors_policy

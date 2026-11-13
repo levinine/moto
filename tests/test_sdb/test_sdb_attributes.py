@@ -1,12 +1,11 @@
 import boto3
 import pytest
-import sure  # noqa # pylint: disable=unused-import
-
 from botocore.exceptions import ClientError
-from moto import mock_sdb
+
+from moto import mock_aws
 
 
-@mock_sdb
+@mock_aws
 def test_put_attributes_unknown_domain():
     sdb = boto3.client("sdb", region_name="eu-west-1")
     with pytest.raises(ClientError) as exc:
@@ -14,12 +13,12 @@ def test_put_attributes_unknown_domain():
             DomainName="aaaa", ItemName="asdf", Attributes=[{"Name": "a", "Value": "b"}]
         )
     err = exc.value.response["Error"]
-    err["Code"].should.equal("NoSuchDomain")
-    err["Message"].should.equal("The specified domain does not exist.")
-    err.should.have.key("BoxUsage")
+    assert err["Code"] == "NoSuchDomain"
+    assert err["Message"] == "The specified domain does not exist."
+    assert "BoxUsage" in err
 
 
-@mock_sdb
+@mock_aws
 def test_put_attributes_invalid_domain():
     sdb = boto3.client("sdb", region_name="eu-west-1")
     with pytest.raises(ClientError) as exc:
@@ -27,34 +26,34 @@ def test_put_attributes_invalid_domain():
             DomainName="a", ItemName="asdf", Attributes=[{"Name": "a", "Value": "b"}]
         )
     err = exc.value.response["Error"]
-    err["Code"].should.equal("InvalidParameterValue")
-    err["Message"].should.equal("Value (a) for parameter DomainName is invalid. ")
-    err.should.have.key("BoxUsage")
+    assert err["Code"] == "InvalidParameterValue"
+    assert err["Message"] == "Value (a) for parameter DomainName is invalid. "
+    assert "BoxUsage" in err
 
 
-@mock_sdb
+@mock_aws
 def test_get_attributes_unknown_domain():
     sdb = boto3.client("sdb", region_name="eu-west-1")
     with pytest.raises(ClientError) as exc:
         sdb.get_attributes(DomainName="aaaa", ItemName="asdf")
     err = exc.value.response["Error"]
-    err["Code"].should.equal("NoSuchDomain")
-    err["Message"].should.equal("The specified domain does not exist.")
-    err.should.have.key("BoxUsage")
+    assert err["Code"] == "NoSuchDomain"
+    assert err["Message"] == "The specified domain does not exist."
+    assert "BoxUsage" in err
 
 
-@mock_sdb
+@mock_aws
 def test_get_attributes_invalid_domain():
     sdb = boto3.client("sdb", region_name="eu-west-1")
     with pytest.raises(ClientError) as exc:
         sdb.get_attributes(DomainName="a", ItemName="asdf")
     err = exc.value.response["Error"]
-    err["Code"].should.equal("InvalidParameterValue")
-    err["Message"].should.equal("Value (a) for parameter DomainName is invalid. ")
-    err.should.have.key("BoxUsage")
+    assert err["Code"] == "InvalidParameterValue"
+    assert err["Message"] == "Value (a) for parameter DomainName is invalid. "
+    assert "BoxUsage" in err
 
 
-@mock_sdb
+@mock_aws
 def test_put_and_get_attributes():
     name = "mydomain"
     sdb = boto3.client("sdb", region_name="eu-west-1")
@@ -65,10 +64,10 @@ def test_put_and_get_attributes():
     )
 
     attrs = sdb.get_attributes(DomainName=name, ItemName="asdf")["Attributes"]
-    attrs.should.equal([{"Name": "a", "Value": "b"}])
+    assert attrs == [{"Name": "a", "Value": "b"}]
 
 
-@mock_sdb
+@mock_aws
 def test_put_multiple_and_get_attributes():
     name = "mydomain"
     sdb = boto3.client("sdb", region_name="eu-west-1")
@@ -88,19 +87,17 @@ def test_put_multiple_and_get_attributes():
     )
 
     attrs = sdb.get_attributes(DomainName=name, ItemName="asdf")["Attributes"]
-    attrs.should.equal(
-        [
-            {"Name": "a", "Value": "b"},
-            {"Name": "a", "Value": "c"},
-            {"Name": "d", "Value": "e"},
-        ]
-    )
+    assert attrs == [
+        {"Name": "a", "Value": "b"},
+        {"Name": "a", "Value": "c"},
+        {"Name": "d", "Value": "e"},
+    ]
 
     attrs = sdb.get_attributes(DomainName=name, ItemName="jklp")["Attributes"]
-    attrs.should.equal([{"Name": "a", "Value": "val"}])
+    assert attrs == [{"Name": "a", "Value": "val"}]
 
 
-@mock_sdb
+@mock_aws
 def test_put_replace_and_get_attributes():
     name = "mydomain"
     sdb = boto3.client("sdb", region_name="eu-west-1")
@@ -125,13 +122,13 @@ def test_put_replace_and_get_attributes():
     )
 
     attrs = sdb.get_attributes(DomainName=name, ItemName="asdf")["Attributes"]
-    attrs.should.have.length_of(3)
-    attrs.should.contain({"Name": "a", "Value": "f"})
-    attrs.should.contain({"Name": "d", "Value": "e"})
-    attrs.should.contain({"Name": "d", "Value": "g"})
+    assert len(attrs) == 3
+    assert {"Name": "a", "Value": "f"} in attrs
+    assert {"Name": "d", "Value": "e"} in attrs
+    assert {"Name": "d", "Value": "g"} in attrs
 
 
-@mock_sdb
+@mock_aws
 def test_put_and_get_multiple_attributes():
     name = "mydomain"
     sdb = boto3.client("sdb", region_name="eu-west-1")
@@ -144,12 +141,10 @@ def test_put_and_get_multiple_attributes():
     )
 
     attrs = sdb.get_attributes(DomainName=name, ItemName="asdf")["Attributes"]
-    attrs.should.equal(
-        [{"Name": "a", "Value": "b"}, {"Name": "attr2", "Value": "myvalue"}]
-    )
+    assert attrs == [{"Name": "a", "Value": "b"}, {"Name": "attr2", "Value": "myvalue"}]
 
 
-@mock_sdb
+@mock_aws
 def test_get_attributes_by_name():
     name = "mydomain"
     sdb = boto3.client("sdb", region_name="eu-west-1")
@@ -164,4 +159,4 @@ def test_get_attributes_by_name():
     attrs = sdb.get_attributes(
         DomainName=name, ItemName="asdf", AttributeNames=["attr2"]
     )["Attributes"]
-    attrs.should.equal([{"Name": "attr2", "Value": "myvalue"}])
+    assert attrs == [{"Name": "attr2", "Value": "myvalue"}]

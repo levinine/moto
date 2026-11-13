@@ -1,14 +1,9 @@
-import boto3
-import sure  # noqa # pylint: disable=unused-import
-from moto import (
-    mock_batch,
-    mock_iam,
-    mock_ec2,
-    mock_ecs,
-    mock_cloudformation,
-)
 import json
 from uuid import uuid4
+
+import boto3
+
+from moto import mock_aws
 
 DEFAULT_REGION = "eu-central-1"
 
@@ -36,11 +31,11 @@ def _setup(ec2_client, iam_client):
     )
     subnet_id = resp["Subnet"]["SubnetId"]
     resp = ec2_client.create_security_group(
-        Description="test_sg_desc", GroupName=str(uuid4())[0:6], VpcId=vpc_id
+        Description="test_sg_desc", GroupName=f"sg-{uuid4()}", VpcId=vpc_id
     )
     sg_id = resp["GroupId"]
 
-    role_name = str(uuid4())[0:6]
+    role_name = f"batch-role-{uuid4()}"
     resp = iam_client.create_role(
         RoleName=role_name, AssumeRolePolicyDocument="some_policy"
     )
@@ -53,11 +48,7 @@ def _setup(ec2_client, iam_client):
     return vpc_id, subnet_id, sg_id, iam_arn
 
 
-@mock_cloudformation()
-@mock_ec2
-@mock_ecs
-@mock_iam
-@mock_batch
+@mock_aws
 def test_create_env_cf():
     ec2_client, iam_client, _, _, _ = _get_clients()
     _, subnet_id, sg_id, iam_arn = _setup(ec2_client, iam_client)
@@ -76,7 +67,7 @@ def test_create_env_cf():
                         "InstanceTypes": ["optimal"],
                         "Subnets": [subnet_id],
                         "SecurityGroupIds": [sg_id],
-                        "InstanceRole": iam_arn.replace("role", "instance-profile"),
+                        "InstanceRole": iam_arn.replace(":role/", ":instance-profile/"),
                     },
                     "ServiceRole": iam_arn,
                 },
@@ -92,24 +83,15 @@ def test_create_env_cf():
     ]
 
     stack_resources = cf_conn.list_stack_resources(StackName=stack_id)
+    summary = stack_resources["StackResourceSummaries"][0]
 
-    stack_resources["StackResourceSummaries"][0]["ResourceStatus"].should.equal(
-        "CREATE_COMPLETE"
-    )
+    assert summary["ResourceStatus"] == "CREATE_COMPLETE"
     # Spot checks on the ARN
-    stack_resources["StackResourceSummaries"][0]["PhysicalResourceId"].startswith(
-        "arn:aws:batch:"
-    )
-    stack_resources["StackResourceSummaries"][0]["PhysicalResourceId"].should.contain(
-        stack_name
-    )
+    assert "arn:aws:batch:" in summary["PhysicalResourceId"]
+    assert stack_name in summary["PhysicalResourceId"]
 
 
-@mock_cloudformation()
-@mock_ec2
-@mock_ecs
-@mock_iam
-@mock_batch
+@mock_aws
 def test_create_job_queue_cf():
     ec2_client, iam_client, _, _, _ = _get_clients()
     _, subnet_id, sg_id, iam_arn = _setup(ec2_client, iam_client)
@@ -128,7 +110,7 @@ def test_create_job_queue_cf():
                         "InstanceTypes": ["optimal"],
                         "Subnets": [subnet_id],
                         "SecurityGroupIds": [sg_id],
-                        "InstanceRole": iam_arn.replace("role", "instance-profile"),
+                        "InstanceRole": iam_arn.replace(":role/", ":instance-profile/"),
                     },
                     "ServiceRole": iam_arn,
                 },
@@ -156,7 +138,7 @@ def test_create_job_queue_cf():
     ]
 
     stack_resources = cf_conn.list_stack_resources(StackName=stack_id)
-    len(stack_resources["StackResourceSummaries"]).should.equal(2)
+    assert len(stack_resources["StackResourceSummaries"]) == 2
 
     job_queue_resource = list(
         filter(
@@ -165,18 +147,14 @@ def test_create_job_queue_cf():
         )
     )[0]
 
-    job_queue_resource["ResourceStatus"].should.equal("CREATE_COMPLETE")
+    assert job_queue_resource["ResourceStatus"] == "CREATE_COMPLETE"
     # Spot checks on the ARN
     job_queue_resource["PhysicalResourceId"].startswith("arn:aws:batch:")
-    job_queue_resource["PhysicalResourceId"].should.contain(stack_name)
-    job_queue_resource["PhysicalResourceId"].should.contain("job-queue/")
+    assert stack_name in job_queue_resource["PhysicalResourceId"]
+    assert "job-queue/" in job_queue_resource["PhysicalResourceId"]
 
 
-@mock_cloudformation()
-@mock_ec2
-@mock_ecs
-@mock_iam
-@mock_batch
+@mock_aws
 def test_create_job_def_cf():
     ec2_client, iam_client, _, _, _ = _get_clients()
     _, subnet_id, sg_id, iam_arn = _setup(ec2_client, iam_client)
@@ -195,7 +173,7 @@ def test_create_job_def_cf():
                         "InstanceTypes": ["optimal"],
                         "Subnets": [subnet_id],
                         "SecurityGroupIds": [sg_id],
-                        "InstanceRole": iam_arn.replace("role", "instance-profile"),
+                        "InstanceRole": iam_arn.replace(":role/", ":instance-profile/"),
                     },
                     "ServiceRole": iam_arn,
                 },
@@ -248,7 +226,7 @@ def test_create_job_def_cf():
     ]
 
     stack_resources = cf_conn.list_stack_resources(StackName=stack_id)
-    len(stack_resources["StackResourceSummaries"]).should.equal(3)
+    assert len(stack_resources["StackResourceSummaries"]) == 3
 
     job_def_resource = list(
         filter(
@@ -257,11 +235,11 @@ def test_create_job_def_cf():
         )
     )[0]
 
-    job_def_resource["ResourceStatus"].should.equal("CREATE_COMPLETE")
+    assert job_def_resource["ResourceStatus"] == "CREATE_COMPLETE"
     # Spot checks on the ARN
     job_def_resource["PhysicalResourceId"].startswith("arn:aws:batch:")
-    job_def_resource["PhysicalResourceId"].should.contain(f"{stack_name}-JobDef")
-    job_def_resource["PhysicalResourceId"].should.contain("job-definition/")
+    assert f"{stack_name}-JobDef" in job_def_resource["PhysicalResourceId"]
+    assert "job-definition/" in job_def_resource["PhysicalResourceId"]
 
     # Test the linux parameter device host path
     # This ensures that batch is parsing the parameter dictionaries
@@ -275,4 +253,4 @@ def test_create_job_def_cf():
         "containerProperties"
     ]["linuxParameters"]["devices"][0]["hostPath"]
 
-    job_def_linux_device_host_path.should.equal("test-path")
+    assert job_def_linux_device_host_path == "test-path"

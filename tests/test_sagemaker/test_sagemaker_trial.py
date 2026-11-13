@@ -1,12 +1,14 @@
+import uuid
+
 import boto3
 
-from moto import mock_sagemaker
-from moto.sts.models import ACCOUNT_ID
+from moto import mock_aws
+from moto.core import DEFAULT_ACCOUNT_ID as ACCOUNT_ID
 
 TEST_REGION_NAME = "us-east-1"
 
 
-@mock_sagemaker
+@mock_aws
 def test_create_trial():
     client = boto3.client("sagemaker", region_name=TEST_REGION_NAME)
 
@@ -30,7 +32,39 @@ def test_create_trial():
     )
 
 
-@mock_sagemaker
+@mock_aws
+def test_list_trials():
+    client = boto3.client("sagemaker", region_name=TEST_REGION_NAME)
+
+    experiment_name = "some-experiment-name"
+
+    resp = client.create_experiment(ExperimentName=experiment_name)
+
+    trial_names = [f"some-trial-name-{i}" for i in range(10)]
+
+    for trial_name in trial_names:
+        resp = client.create_trial(ExperimentName=experiment_name, TrialName=trial_name)
+
+    resp = client.list_trials(MaxResults=1)
+
+    assert len(resp["TrialSummaries"]) == 1
+
+    next_token = resp["NextToken"]
+
+    resp = client.list_trials(MaxResults=2, NextToken=next_token)
+
+    assert len(resp["TrialSummaries"]) == 2
+
+    next_token = resp["NextToken"]
+
+    resp = client.list_trials(NextToken=next_token)
+
+    assert len(resp["TrialSummaries"]) == 7
+
+    assert resp.get("NextToken") is None
+
+
+@mock_aws
 def test_list_trials_by_trial_component_name():
     client = boto3.client("sagemaker", region_name=TEST_REGION_NAME)
 
@@ -52,7 +86,7 @@ def test_list_trials_by_trial_component_name():
     assert len(resp["TrialSummaries"]) == 0
 
 
-@mock_sagemaker
+@mock_aws
 def test_delete_trial():
     client = boto3.client("sagemaker", region_name=TEST_REGION_NAME)
 
@@ -72,7 +106,7 @@ def test_delete_trial():
     assert len(resp["TrialSummaries"]) == 0
 
 
-@mock_sagemaker
+@mock_aws
 def test_add_tags_to_trial():
     client = boto3.client("sagemaker", region_name=TEST_REGION_NAME)
 
@@ -99,7 +133,7 @@ def test_add_tags_to_trial():
     assert resp["Tags"] == tags
 
 
-@mock_sagemaker
+@mock_aws
 def test_delete_tags_to_trial():
     client = boto3.client("sagemaker", region_name=TEST_REGION_NAME)
 
@@ -126,3 +160,33 @@ def test_delete_tags_to_trial():
     resp = client.list_tags(ResourceArn=arn)
 
     assert resp["Tags"] == []
+
+
+@mock_aws
+def test_list_trial_tags():
+    client = boto3.client("sagemaker", region_name=TEST_REGION_NAME)
+
+    experiment_name = "some-experiment-name"
+    client.create_experiment(ExperimentName=experiment_name)
+
+    trial_name = "some-trial-name"
+    client.create_trial(ExperimentName=experiment_name, TrialName=trial_name)
+    resp = client.describe_trial(TrialName=trial_name)
+    resource_arn = resp["TrialArn"]
+
+    tags = []
+    for _ in range(80):
+        tags.append({"Key": str(uuid.uuid4()), "Value": "myValue"})
+
+    response = client.add_tags(ResourceArn=resource_arn, Tags=tags)
+    assert response["ResponseMetadata"]["HTTPStatusCode"] == 200
+
+    response = client.list_tags(ResourceArn=resource_arn)
+    assert len(response["Tags"]) == 50
+    assert response["Tags"] == tags[:50]
+
+    response = client.list_tags(
+        ResourceArn=resource_arn, NextToken=response["NextToken"]
+    )
+    assert len(response["Tags"]) == 30
+    assert response["Tags"] == tags[50:]

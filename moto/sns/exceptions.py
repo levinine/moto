@@ -1,62 +1,53 @@
-from moto.core.exceptions import RESTError
+from moto.core.exceptions import ServiceException
 
 
-class SNSNotFoundError(RESTError):
-    code = 404
-
-    def __init__(self, message, **kwargs):
-        super().__init__("NotFound", message, **kwargs)
+class SNSException(ServiceException):
+    pass
 
 
-class ResourceNotFoundError(RESTError):
-    code = 404
-
-    def __init__(self):
-        super(ResourceNotFoundError, self).__init__(
-            "ResourceNotFound", "Resource does not exist"
-        )
+class SNSNotFoundError(SNSException):
+    code = "NotFound"
 
 
-class DuplicateSnsEndpointError(RESTError):
-    code = 400
-
-    def __init__(self, message):
-        super(DuplicateSnsEndpointError, self).__init__("DuplicateEndpoint", message)
+class TopicNotFound(SNSNotFoundError):
+    message = "Topic does not exist"
 
 
-class SnsEndpointDisabled(RESTError):
-    code = 400
-
-    def __init__(self, message):
-        super(SnsEndpointDisabled, self).__init__("EndpointDisabled", message)
+class ResourceNotFoundError(SNSException):
+    code = "ResourceNotFound"
+    message = "Resource does not exist"
 
 
-class SNSInvalidParameter(RESTError):
-    code = 400
-
-    def __init__(self, message):
-        super(SNSInvalidParameter, self).__init__("InvalidParameter", message)
+class DuplicateSnsEndpointError(SNSException):
+    code = "InvalidParameter"
 
 
-class InvalidParameterValue(RESTError):
-    code = 400
-
-    def __init__(self, message):
-        super(InvalidParameterValue, self).__init__("InvalidParameterValue", message)
+class SnsEndpointDisabled(SNSException):
+    code = "EndpointDisabled"
 
 
-class TagLimitExceededError(RESTError):
-    code = 400
-
-    def __init__(self):
-        super(TagLimitExceededError, self).__init__(
-            "TagLimitExceeded",
-            "Could not complete request: tag quota of per resource exceeded",
-        )
+class SNSInvalidParameter(SNSException):
+    code = "InvalidParameter"
 
 
-class InternalError(RESTError):
-    code = 500
+class InvalidParameterValue(SNSException):
+    code = "InvalidParameter"
 
-    def __init__(self, message):
-        super(InternalError, self).__init__("InternalFailure", message)
+
+class TagLimitExceededError(SNSException):
+    code = "TagLimitExceeded"
+    message = "Could not complete request: tag quota of per resource exceeded"
+
+
+class InternalError(SNSException):
+    code = "InternalError"
+
+
+class TooManyEntriesInBatchRequest(SNSException):
+    code = "TooManyEntriesInBatchRequest"
+    message = "The batch request contains more entries than permissible."
+
+
+class BatchEntryIdsNotDistinct(SNSException):
+    code = "BatchEntryIdsNotDistinct"
+    message = "Two or more batch entries in the request have the same Id."

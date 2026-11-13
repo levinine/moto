@@ -1,24 +1,24 @@
-import sure  # noqa # pylint: disable=unused-import
+import json
 
 import moto.server as server
-from moto import mock_medialive
+from moto import mock_aws
 
 """
 Test the different server responses
 """
 
 
-@mock_medialive
+@mock_aws
 def test_medialive_list_channels():
     backend = server.create_backend_app("medialive")
     test_client = backend.test_client()
 
     res = test_client.get("/prod/channels")
     result = res.data.decode("utf-8")
-    result.should.contain('"channels": []')
+    assert json.loads(result) == {"channels": []}
 
 
-@mock_medialive
+@mock_aws
 def test_medialive_list_inputs():
     backend = server.create_backend_app("medialive")
     test_client = backend.test_client()
@@ -26,4 +26,4 @@ def test_medialive_list_inputs():
     res = test_client.get("/prod/inputs")
 
     result = res.data.decode("utf-8")
-    result.should.contain('"inputs": []')
+    assert json.loads(result) == {"inputs": []}

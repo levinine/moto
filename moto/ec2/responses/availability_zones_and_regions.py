@@ -1,45 +1,23 @@
-from moto.core.responses import BaseResponse
+from moto.core.responses import ActionResult
+
+from ._base_response import EC2BaseResponse
 
 
-class AvailabilityZonesAndRegions(BaseResponse):
-    def describe_availability_zones(self):
+class AvailabilityZonesAndRegions(EC2BaseResponse):
+    def describe_availability_zones(self) -> ActionResult:
         self.error_on_dryrun()
-        zones = self.ec2_backend.describe_availability_zones()
-        template = self.response_template(DESCRIBE_ZONES_RESPONSE)
-        return template.render(zones=zones)
+        filters = self._filters_from_querystring()
+        zone_names = self._get_param("ZoneNames", [])
+        zone_ids = self._get_param("ZoneIds", [])
+        zones = self.ec2_backend.describe_availability_zones(
+            filters, zone_names=zone_names, zone_ids=zone_ids
+        )
+        result = {"AvailabilityZones": zones}
+        return ActionResult(result)
 
-    def describe_regions(self):
+    def describe_regions(self) -> ActionResult:
         self.error_on_dryrun()
-        region_names = self._get_multi_param("RegionName")
+        region_names = self._get_param("RegionNames", [])
         regions = self.ec2_backend.describe_regions(region_names)
-        template = self.response_template(DESCRIBE_REGIONS_RESPONSE)
-        return template.render(regions=regions)
-
-
-DESCRIBE_REGIONS_RESPONSE = """<DescribeRegionsResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-   <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-   <regionInfo>
-      {% for region in regions %}
-          <item>
-             <regionName>{{ region.name }}</regionName>
-             <regionEndpoint>{{ region.endpoint }}</regionEndpoint>
-             <optInStatus>{{ region.opt_in_status }}</optInStatus>
-          </item>
-      {% endfor %}
-   </regionInfo>
-</DescribeRegionsResponse>"""
-
-DESCRIBE_ZONES_RESPONSE = """<DescribeAvailabilityZonesResponse xmlns="http://ec2.amazonaws.com/doc/2013-10-15/">
-   <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
-   <availabilityZoneInfo>
-   {% for zone in zones %}
-       <item>
-          <zoneName>{{ zone.name }}</zoneName>
-          <zoneState>available</zoneState>
-          <regionName>{{ zone.region_name }}</regionName>
-          <zoneId>{{ zone.zone_id }}</zoneId>
-          <messageSet/>
-       </item>
-   {% endfor %}
-   </availabilityZoneInfo>
-</DescribeAvailabilityZonesResponse>"""
+        result = {"Regions": regions}
+        return ActionResult(result)

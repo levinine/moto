@@ -1,51 +1,59 @@
 import json
+import re
+from typing import Any
+
 import boto3
+
+from moto.core.common_models import ConfigQueryModel
 from moto.core.exceptions import InvalidNextTokenException
-from moto.core.models import ConfigQueryModel
-from moto.iam import iam_backends
+from moto.iam.models import IAMBackend, iam_backends
+from moto.utilities.utils import ARN_PARTITION_REGEX
 
 
-class RoleConfigQuery(ConfigQueryModel):
+class RoleConfigQuery(ConfigQueryModel[IAMBackend]):
     def list_config_service_resources(
         self,
-        resource_ids,
-        resource_name,
-        limit,
-        next_token,
-        backend_region=None,
-        resource_region=None,
-        aggregator=None,
-    ):
+        account_id: str,
+        partition: str,
+        resource_ids: list[str] | None,
+        resource_name: str | None,
+        limit: int,
+        next_token: str | None,
+        backend_region: str | None = None,
+        resource_region: str | None = None,
+        aggregator: dict[str, Any] | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
         # IAM roles are "global" and aren't assigned into any availability zone
         # The resource ID is a AWS-assigned random string like "AROA0BSVNSZKXVHS00SBJ"
         # The resource name is a user-assigned string like "MyDevelopmentAdminRole"
         # Stored in moto backend with the AWS-assigned random string like "AROA0BSVNSZKXVHS00SBJ"
 
         # Grab roles from backend; need the full values since names and id's are different
-        role_list = list(self.backends["global"].roles.values())
+        role_list = list(self.backends[account_id][partition].roles.values())
 
         if not role_list:
             return [], None
 
         # Filter by resource name or ids
-        if resource_name or resource_ids:
-            filtered_roles = []
-            # resource_name takes precedence over resource_ids
-            if resource_name:
-                for role in role_list:
-                    if role.name == resource_name:
-                        filtered_roles = [role]
-                        break
-                # but if both are passed, it must be a subset
-                if filtered_roles and resource_ids:
-                    if filtered_roles[0].id not in resource_ids:
-                        return [], None
-            else:
-                for role in role_list:
-                    if role.id in resource_ids:
-                        filtered_roles.append(role)
+        # resource_name takes precedence over resource_ids
+        filtered_roles = []
+        if resource_name:
+            for role in role_list:
+                if role.name == resource_name:
+                    filtered_roles = [role]
+                    break
+            # but if both are passed, it must be a subset
+            if filtered_roles and resource_ids:
+                if filtered_roles[0].id not in resource_ids:
+                    return [], None
 
             # Filtered roles are now the subject for the listing
+            role_list = filtered_roles
+
+        elif resource_ids:
+            for role in role_list:
+                if role.id in resource_ids:
+                    filtered_roles.append(role)
             role_list = filtered_roles
 
         if aggregator:
@@ -59,7 +67,7 @@ class RoleConfigQuery(ConfigQueryModel):
             aggregator_sources = aggregator.get(
                 "account_aggregation_sources"
             ) or aggregator.get("organization_aggregation_source")
-            for source in aggregator_sources:
+            for source in aggregator_sources:  # type: ignore[union-attr]
                 source_dict = source.__dict__
                 if source_dict.get("all_aws_regions", False):
                     aggregated_regions = boto3.Session().get_available_regions("config")
@@ -72,10 +80,7 @@ class RoleConfigQuery(ConfigQueryModel):
                 for role in role_list:
                     duplicate_role_list.append(
                         {
-                            "_id": "{}{}".format(
-                                role.id, region
-                            ),  # this is only for sorting, isn't returned outside of this functin
-                            "type": "AWS::IAM::Role",
+                            "_id": f"{role.id}{region}",  # this is only for sorting, isn't returned outside of this function
                             "id": role.id,
                             "name": role.name,
                             "region": region,
@@ -87,7 +92,10 @@ class RoleConfigQuery(ConfigQueryModel):
         else:
             # Non-aggregated queries are in the else block, and we can treat these like a normal config resource
             # Pagination logic, sort by role id
-            sorted_roles = sorted(role_list, key=lambda role: role.id)
+            sorted_roles = [
+                {"_id": role.id, "id": role.id, "name": role.name, "region": "global"}
+                for role in sorted(role_list, key=lambda role: role.id)
+            ]
 
         new_token = None
 
@@ -100,42 +108,47 @@ class RoleConfigQuery(ConfigQueryModel):
                 start = next(
                     index
                     for (index, r) in enumerate(sorted_roles)
-                    if next_token == (r["_id"] if aggregator else r.id)
+                    if next_token == r["_id"]
                 )
             except StopIteration:
                 raise InvalidNextTokenException()
 
         # Get the list of items to collect:
-        role_list = sorted_roles[start : (start + limit)]
+        collected_role_list = sorted_roles[start : (start + limit)]
 
         if len(sorted_roles) > (start + limit):
             record = sorted_roles[start + limit]
-            new_token = record["_id"] if aggregator else record.id
+            new_token = record["_id"]
 
         return (
             [
                 {
                     "type": "AWS::IAM::Role",
-                    "id": role["id"] if aggregator else role.id,
-                    "name": role["name"] if aggregator else role.name,
-                    "region": role["region"] if aggregator else "global",
+                    "id": role["id"],
+                    "name": role["name"],
+                    "region": role["region"],
                 }
-                for role in role_list
+                for role in collected_role_list
             ],
             new_token,
         )
 
     def get_config_resource(
-        self, resource_id, resource_name=None, backend_region=None, resource_region=None
-    ):
-
-        role = self.backends["global"].roles.get(resource_id, {})
+        self,
+        account_id: str,
+        partition: str,
+        resource_id: str,
+        resource_name: str | None = None,
+        backend_region: str | None = None,
+        resource_region: str | None = None,
+    ) -> dict[str, Any] | None:
+        role = self.backends[account_id][partition].roles.get(resource_id)
 
         if not role:
-            return
+            return None
 
         if resource_name and role.name != resource_name:
-            return
+            return None
 
         # Format the role to the AWS Config format:
         config_data = role.to_config_dict()
@@ -151,23 +164,27 @@ class RoleConfigQuery(ConfigQueryModel):
         return config_data
 
 
-class PolicyConfigQuery(ConfigQueryModel):
+class PolicyConfigQuery(ConfigQueryModel[IAMBackend]):
     def list_config_service_resources(
         self,
-        resource_ids,
-        resource_name,
-        limit,
-        next_token,
-        backend_region=None,
-        resource_region=None,
-        aggregator=None,
-    ):
+        account_id: str,
+        partition: str,
+        resource_ids: list[str] | None,
+        resource_name: str | None,
+        limit: int,
+        next_token: str | None,
+        backend_region: str | None = None,
+        resource_region: str | None = None,
+        aggregator: dict[str, Any] | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
         # IAM policies are "global" and aren't assigned into any availability zone
         # The resource ID is a AWS-assigned random string like "ANPA0BSVNSZK00SJSPVUJ"
         # The resource name is a user-assigned string like "my-development-policy"
         # Stored in moto backend with the arn like "arn:aws:iam::123456789012:policy/my-development-policy"
 
-        policy_list = list(self.backends["global"].managed_policies.values())
+        policy_list = list(
+            self.backends[account_id][partition].managed_policies.values()
+        )
 
         # We don't want to include AWS Managed Policies. This technically needs to
         # respect the configuration recorder's 'includeGlobalResourceTypes' setting,
@@ -175,7 +192,9 @@ class PolicyConfigQuery(ConfigQueryModel):
         # custom configuration recorders, we'll just behave as default.
         policy_list = list(
             filter(
-                lambda policy: not policy.arn.startswith("arn:aws:iam::aws"),
+                lambda policy: not re.match(
+                    ARN_PARTITION_REGEX + ":iam::aws", policy.arn
+                ),
                 policy_list,
             )
         )
@@ -184,25 +203,25 @@ class PolicyConfigQuery(ConfigQueryModel):
             return [], None
 
         # Filter by resource name or ids
-        if resource_name or resource_ids:
-            filtered_policies = []
-            # resource_name takes precedence over resource_ids
-            if resource_name:
-                for policy in policy_list:
-                    if policy.name == resource_name:
-                        filtered_policies = [policy]
-                        break
-                # but if both are passed, it must be a subset
-                if filtered_policies and resource_ids:
-                    if filtered_policies[0].id not in resource_ids:
-                        return [], None
-
-            else:
-                for policy in policy_list:
-                    if policy.id in resource_ids:
-                        filtered_policies.append(policy)
+        # resource_name takes precedence over resource_ids
+        filtered_policies = []
+        if resource_name:
+            for policy in policy_list:
+                if policy.name == resource_name:
+                    filtered_policies = [policy]
+                    break
+            # but if both are passed, it must be a subset
+            if filtered_policies and resource_ids:
+                if filtered_policies[0].id not in resource_ids:
+                    return [], None
 
             # Filtered roles are now the subject for the listing
+            policy_list = filtered_policies
+
+        elif resource_ids:
+            for policy in policy_list:
+                if policy.id in resource_ids:
+                    filtered_policies.append(policy)
             policy_list = filtered_policies
 
         if aggregator:
@@ -216,7 +235,7 @@ class PolicyConfigQuery(ConfigQueryModel):
             aggregator_sources = aggregator.get(
                 "account_aggregation_sources"
             ) or aggregator.get("organization_aggregation_source")
-            for source in aggregator_sources:
+            for source in aggregator_sources:  # type: ignore[union-attr]
                 source_dict = source.__dict__
                 if source_dict.get("all_aws_regions", False):
                     aggregated_regions = boto3.Session().get_available_regions("config")
@@ -229,10 +248,7 @@ class PolicyConfigQuery(ConfigQueryModel):
                 for policy in policy_list:
                     duplicate_policy_list.append(
                         {
-                            "_id": "{}{}".format(
-                                policy.id, region
-                            ),  # this is only for sorting, isn't returned outside of this functin
-                            "type": "AWS::IAM::Policy",
+                            "_id": f"{policy.id}{region}",  # this is only for sorting, isn't returned outside of this function
                             "id": policy.id,
                             "name": policy.name,
                             "region": region,
@@ -247,7 +263,15 @@ class PolicyConfigQuery(ConfigQueryModel):
         else:
             # Non-aggregated queries are in the else block, and we can treat these like a normal config resource
             # Pagination logic, sort by role id
-            sorted_policies = sorted(policy_list, key=lambda role: role.id)
+            sorted_policies = [
+                {
+                    "_id": policy.id,
+                    "id": policy.id,
+                    "name": policy.name,
+                    "region": "global",
+                }
+                for policy in sorted(policy_list, key=lambda role: role.id)
+            ]
 
         new_token = None
 
@@ -260,48 +284,56 @@ class PolicyConfigQuery(ConfigQueryModel):
                 start = next(
                     index
                     for (index, p) in enumerate(sorted_policies)
-                    if next_token == (p["_id"] if aggregator else p.id)
+                    if next_token == p["_id"]
                 )
             except StopIteration:
                 raise InvalidNextTokenException()
 
         # Get the list of items to collect:
-        policy_list = sorted_policies[start : (start + limit)]
+        collected_policy_list = sorted_policies[start : (start + limit)]
 
         if len(sorted_policies) > (start + limit):
             record = sorted_policies[start + limit]
-            new_token = record["_id"] if aggregator else record.id
+            new_token = record["_id"]
 
         return (
             [
                 {
                     "type": "AWS::IAM::Policy",
-                    "id": policy["id"] if aggregator else policy.id,
-                    "name": policy["name"] if aggregator else policy.name,
-                    "region": policy["region"] if aggregator else "global",
+                    "id": policy["id"],
+                    "name": policy["name"],
+                    "region": policy["region"],
                 }
-                for policy in policy_list
+                for policy in collected_policy_list
             ],
             new_token,
         )
 
     def get_config_resource(
-        self, resource_id, resource_name=None, backend_region=None, resource_region=None
-    ):
+        self,
+        account_id: str,
+        partition: str,
+        resource_id: str,
+        resource_name: str | None = None,
+        backend_region: str | None = None,
+        resource_region: str | None = None,
+    ) -> dict[str, Any] | None:
         # policies are listed in the backend as arns, but we have to accept the PolicyID as the resource_id
         # we'll make a really crude search for it
         policy = None
-        for arn in self.backends["global"].managed_policies.keys():
-            policy_candidate = self.backends["global"].managed_policies[arn]
+        for arn in self.backends[account_id][partition].managed_policies.keys():
+            policy_candidate = self.backends[account_id][partition].managed_policies[
+                arn
+            ]
             if policy_candidate.id == resource_id:
                 policy = policy_candidate
                 break
 
         if not policy:
-            return
+            return None
 
         if resource_name and policy.name != resource_name:
-            return
+            return None
 
         # Format the policy to the AWS Config format:
         config_data = policy.to_config_dict()

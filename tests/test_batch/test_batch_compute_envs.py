@@ -1,19 +1,24 @@
-from . import _get_clients, _setup
-import pytest
-import sure  # noqa # pylint: disable=unused-import
-from moto import mock_batch, mock_iam, mock_ec2, mock_ecs, settings
 from uuid import uuid4
 
+import pytest
+from botocore.exceptions import ClientError
 
-# Yes, yes it talks to all the things
-@mock_ec2
-@mock_ecs
-@mock_iam
-@mock_batch
-def test_create_managed_compute_environment():
+from moto import mock_aws, settings
+
+from . import _get_clients, _setup
+
+
+@mock_aws
+@pytest.mark.parametrize("use_arn_for_instance_role", [True, False])
+def test_create_managed_compute_environment(use_arn_for_instance_role):
     ec2_client, iam_client, ecs_client, _, batch_client = _get_clients()
     _, subnet_id, sg_id, iam_arn = _setup(ec2_client, iam_client)
 
+    instance_role = (
+        iam_arn.replace(":role/", ":instance-profile/")
+        if use_arn_for_instance_role
+        else iam_arn.split("/")[-1]
+    )
     compute_name = str(uuid4())
     resp = batch_client.create_compute_environment(
         computeEnvironmentName=compute_name,
@@ -29,15 +34,15 @@ def test_create_managed_compute_environment():
             "subnets": [subnet_id],
             "securityGroupIds": [sg_id],
             "ec2KeyPair": "string",
-            "instanceRole": iam_arn.replace("role", "instance-profile"),
+            "instanceRole": instance_role,
             "tags": {"string": "string"},
             "bidPercentage": 123,
             "spotIamFleetRole": "string",
         },
         serviceRole=iam_arn,
     )
-    resp.should.contain("computeEnvironmentArn")
-    resp["computeEnvironmentName"].should.equal(compute_name)
+    assert "computeEnvironmentArn" in resp
+    assert resp["computeEnvironmentName"] == compute_name
 
     our_env = batch_client.describe_compute_environments(
         computeEnvironments=[compute_name]
@@ -47,18 +52,152 @@ def test_create_managed_compute_environment():
     if not settings.TEST_SERVER_MODE:
         # Can't verify this in ServerMode, as other tests may have created instances
         resp = ec2_client.describe_instances()
-        resp.should.contain("Reservations")
-        len(resp["Reservations"]).should.equal(3)
+        assert "Reservations" in resp
+        assert len(resp["Reservations"]) == 3
 
     # Should have created 1 ECS cluster
     all_clusters = ecs_client.list_clusters()["clusterArns"]
-    all_clusters.should.contain(our_env["ecsClusterArn"])
+    assert our_env["ecsClusterArn"] in all_clusters
 
 
-@mock_ec2
-@mock_ecs
-@mock_iam
-@mock_batch
+@mock_aws
+@pytest.mark.parametrize("use_arn_for_instance_role", [True, False])
+def test_create_managed_compute_environment_with_tags(use_arn_for_instance_role):
+    ec2_client, iam_client, ecs_client, _, batch_client = _get_clients()
+    _, subnet_id, sg_id, iam_arn = _setup(ec2_client, iam_client)
+
+    instance_role = (
+        iam_arn.replace(":role/", ":instance-profile/")
+        if use_arn_for_instance_role
+        else iam_arn.split("/")[-1]
+    )
+    compute_name = str(uuid4())
+    resp = batch_client.create_compute_environment(
+        computeEnvironmentName=compute_name,
+        type="MANAGED",
+        state="ENABLED",
+        computeResources={
+            "type": "EC2",
+            "minvCpus": 5,
+            "maxvCpus": 10,
+            "desiredvCpus": 5,
+            "instanceTypes": ["t2.small", "t2.medium"],
+            "imageId": "some_image_id",
+            "subnets": [subnet_id],
+            "securityGroupIds": [sg_id],
+            "ec2KeyPair": "string",
+            "instanceRole": instance_role,
+            "tags": {"string": "string"},
+            "bidPercentage": 123,
+            "spotIamFleetRole": "string",
+        },
+        serviceRole=iam_arn,
+        tags={"name": "compute-environment-1"},
+    )
+    assert "computeEnvironmentArn" in resp
+    assert resp["computeEnvironmentName"] == compute_name
+
+    our_env = batch_client.describe_compute_environments(
+        computeEnvironments=[compute_name]
+    )["computeEnvironments"][0]
+
+    # Given a t2.medium is 2 vcpu and t2.small is 1, therefore 2 mediums and 1 small should be created
+    if not settings.TEST_SERVER_MODE:
+        # Can't verify this in ServerMode, as other tests may have created instances
+        resp = ec2_client.describe_instances()
+        assert "Reservations" in resp
+        assert len(resp["Reservations"]) == 3
+
+    # Should have created 1 ECS cluster
+    all_clusters = ecs_client.list_clusters()["clusterArns"]
+    assert our_env["ecsClusterArn"] in all_clusters
+
+    assert "tags" in our_env
+    assert len(our_env["tags"]) == 1
+
+
+@mock_aws
+def test_create_managed_compute_environment_with_instance_family():
+    """
+    The InstanceType parameter can have multiple values:
+    instance_type     t2.small
+    instance_family   t2       <-- What we're testing here
+    'optimal'
+    unknown value
+    """
+    ec2_client, iam_client, _, _, batch_client = _get_clients()
+    _, subnet_id, sg_id, iam_arn = _setup(ec2_client, iam_client)
+
+    compute_name = str(uuid4())
+    batch_client.create_compute_environment(
+        computeEnvironmentName=compute_name,
+        type="MANAGED",
+        state="ENABLED",
+        computeResources={
+            "type": "EC2",
+            "minvCpus": 5,
+            "maxvCpus": 10,
+            "desiredvCpus": 5,
+            "instanceTypes": ["t2"],
+            "imageId": "some_image_id",
+            "subnets": [subnet_id],
+            "securityGroupIds": [sg_id],
+            "ec2KeyPair": "string",
+            "instanceRole": iam_arn.replace(":role/", ":instance-profile/"),
+            "tags": {"string": "string"},
+            "bidPercentage": 123,
+            "spotIamFleetRole": "string",
+        },
+        serviceRole=iam_arn,
+    )
+
+    our_env = batch_client.describe_compute_environments(
+        computeEnvironments=[compute_name]
+    )["computeEnvironments"][0]
+    assert our_env["computeResources"]["instanceTypes"] == ["t2"]
+
+
+@mock_aws
+def test_create_managed_compute_environment_with_unknown_instance_type():
+    """
+    The InstanceType parameter can have multiple values:
+    instance_type     t2.small
+    instance_family   t2
+    'optimal'
+    unknown value              <-- What we're testing here
+    """
+    ec2_client, iam_client, _, _, batch_client = _get_clients()
+    _, subnet_id, sg_id, iam_arn = _setup(ec2_client, iam_client)
+
+    compute_name = str(uuid4())
+    with pytest.raises(ClientError) as exc:
+        batch_client.create_compute_environment(
+            computeEnvironmentName=compute_name,
+            type="MANAGED",
+            state="ENABLED",
+            computeResources={
+                "type": "EC2",
+                "minvCpus": 5,
+                "maxvCpus": 10,
+                "desiredvCpus": 5,
+                "instanceTypes": ["unknown"],
+                "imageId": "some_image_id",
+                "subnets": [subnet_id],
+                "securityGroupIds": [sg_id],
+                "ec2KeyPair": "string",
+                "instanceRole": iam_arn.replace(":role/", ":instance-profile/"),
+                "tags": {"string": "string"},
+                "bidPercentage": 123,
+                "spotIamFleetRole": "string",
+            },
+            serviceRole=iam_arn,
+        )
+    err = exc.value.response["Error"]
+    assert err["Code"] == "InvalidParameterValue"
+    assert err["Message"] == "Instance type unknown does not exist"
+
+
+@mock_aws
 def test_create_unmanaged_compute_environment():
     ec2_client, iam_client, ecs_client, _, batch_client = _get_clients()
     _, _, _, iam_arn = _setup(ec2_client, iam_client)
@@ -70,33 +209,30 @@ def test_create_unmanaged_compute_environment():
         state="ENABLED",
         serviceRole=iam_arn,
     )
-    resp.should.contain("computeEnvironmentArn")
-    resp["computeEnvironmentName"].should.equal(compute_name)
+    assert "computeEnvironmentArn" in resp
+    assert resp["computeEnvironmentName"] == compute_name
 
     our_env = batch_client.describe_compute_environments(
         computeEnvironments=[compute_name]
     )["computeEnvironments"][0]
-    our_env.should.have.key("ecsClusterArn")
+    assert "ecsClusterArn" in our_env
 
     # Its unmanaged so no instances should be created
     if not settings.TEST_SERVER_MODE:
         # Can't verify this in ServerMode, as other tests may have created instances
         resp = ec2_client.describe_instances()
-        resp.should.contain("Reservations")
-        len(resp["Reservations"]).should.equal(0)
+        assert "Reservations" in resp
+        assert len(resp["Reservations"]) == 0
 
     # Should have created 1 ECS cluster
     all_clusters = ecs_client.list_clusters()["clusterArns"]
-    all_clusters.should.contain(our_env["ecsClusterArn"])
+    assert our_env["ecsClusterArn"] in all_clusters
 
 
 # TODO create 1000s of tests to test complex option combinations of create environment
 
 
-@mock_ec2
-@mock_ecs
-@mock_iam
-@mock_batch
+@mock_aws
 def test_describe_compute_environment():
     ec2_client, iam_client, _, _, batch_client = _get_clients()
     _, _, _, iam_arn = _setup(ec2_client, iam_client)
@@ -114,22 +250,19 @@ def test_describe_compute_environment():
 
     all_envs = batch_client.describe_compute_environments()["computeEnvironments"]
     our_envs = [e for e in all_envs if e["computeEnvironmentName"] == compute_name]
-    our_envs.should.have.length_of(1)
-    our_envs[0]["computeEnvironmentName"].should.equal(compute_name)
-    our_envs[0]["computeEnvironmentArn"].should.equal(compute_arn)
-    our_envs[0].should.have.key("ecsClusterArn")
-    our_envs[0].should.have.key("state").equal("ENABLED")
-    our_envs[0].should.have.key("status").equal("VALID")
+    assert len(our_envs) == 1
+    assert our_envs[0]["computeEnvironmentName"] == compute_name
+    assert our_envs[0]["computeEnvironmentArn"] == compute_arn
+    assert "ecsClusterArn" in our_envs[0]
+    assert our_envs[0]["state"] == "ENABLED"
+    assert our_envs[0]["status"] == "VALID"
 
     # Test filtering
     resp = batch_client.describe_compute_environments(computeEnvironments=["test1"])
-    len(resp["computeEnvironments"]).should.equal(0)
+    assert len(resp["computeEnvironments"]) == 0
 
 
-@mock_ec2
-@mock_ecs
-@mock_iam
-@mock_batch
+@mock_aws
 def test_delete_unmanaged_compute_environment():
     ec2_client, iam_client, ecs_client, _, batch_client = _get_clients()
     _, _, _, iam_arn = _setup(ec2_client, iam_client)
@@ -150,16 +283,15 @@ def test_delete_unmanaged_compute_environment():
 
     all_envs = batch_client.describe_compute_environments()["computeEnvironments"]
     all_names = [e["computeEnvironmentName"] for e in all_envs]
-    all_names.shouldnt.contain(compute_name)
+    assert compute_name not in all_names
 
-    all_clusters = ecs_client.list_clusters()["clusterArns"]
-    all_clusters.shouldnt.contain(our_env["ecsClusterArn"])
+    cluster = ecs_client.describe_clusters(clusters=[our_env["ecsClusterArn"]])[
+        "clusters"
+    ][0]
+    assert cluster["status"] == "INACTIVE"
 
 
-@mock_ec2
-@mock_ecs
-@mock_iam
-@mock_batch
+@mock_aws
 def test_delete_managed_compute_environment():
     ec2_client, iam_client, ecs_client, _, batch_client = _get_clients()
     _, subnet_id, sg_id, iam_arn = _setup(ec2_client, iam_client)
@@ -179,7 +311,7 @@ def test_delete_managed_compute_environment():
             "subnets": [subnet_id],
             "securityGroupIds": [sg_id],
             "ec2KeyPair": "string",
-            "instanceRole": iam_arn.replace("role", "instance-profile"),
+            "instanceRole": iam_arn.replace(":role/", ":instance-profile/"),
             "tags": {"string": "string"},
             "bidPercentage": 123,
             "spotIamFleetRole": "string",
@@ -195,24 +327,23 @@ def test_delete_managed_compute_environment():
 
     all_envs = batch_client.describe_compute_environments()["computeEnvironments"]
     all_names = [e["computeEnvironmentName"] for e in all_envs]
-    all_names.shouldnt.contain(compute_name)
+    assert compute_name not in all_names
 
     if not settings.TEST_SERVER_MODE:
         # Too many instances to know which one is ours in ServerMode
         resp = ec2_client.describe_instances()
-        resp.should.contain("Reservations")
-        len(resp["Reservations"]).should.equal(3)
+        assert "Reservations" in resp
+        assert len(resp["Reservations"]) == 3
         for reservation in resp["Reservations"]:
-            reservation["Instances"][0]["State"]["Name"].should.equal("terminated")
+            assert reservation["Instances"][0]["State"]["Name"] == "terminated"
 
-    all_clusters = ecs_client.list_clusters()["clusterArns"]
-    all_clusters.shouldnt.contain(our_env["ecsClusterArn"])
+    cluster = ecs_client.describe_clusters(clusters=[our_env["ecsClusterArn"]])[
+        "clusters"
+    ][0]
+    assert cluster["status"] == "INACTIVE"
 
 
-@mock_ec2
-@mock_ecs
-@mock_iam
-@mock_batch
+@mock_aws
 def test_update_unmanaged_compute_environment_state():
     ec2_client, iam_client, _, _, batch_client = _get_clients()
     _, _, _, iam_arn = _setup(ec2_client, iam_client)
@@ -231,15 +362,45 @@ def test_update_unmanaged_compute_environment_state():
 
     all_envs = batch_client.describe_compute_environments()["computeEnvironments"]
     our_envs = [e for e in all_envs if e["computeEnvironmentName"] == compute_name]
-    our_envs.should.have.length_of(1)
-    our_envs[0]["state"].should.equal("DISABLED")
+    assert len(our_envs) == 1
+    assert our_envs[0]["state"] == "DISABLED"
+
+
+@mock_aws
+def test_update_iam_role():
+    ec2_client, iam_client, _, _, batch_client = _get_clients()
+    _, _, _, iam_arn = _setup(ec2_client, iam_client)
+    iam_arn2 = iam_client.create_role(RoleName="r", AssumeRolePolicyDocument="sp")[
+        "Role"
+    ]["Arn"]
+
+    compute_name = str(uuid4())
+    batch_client.create_compute_environment(
+        computeEnvironmentName=compute_name,
+        type="UNMANAGED",
+        state="ENABLED",
+        serviceRole=iam_arn,
+    )
+
+    batch_client.update_compute_environment(
+        computeEnvironment=compute_name, serviceRole=iam_arn2
+    )
+
+    all_envs = batch_client.describe_compute_environments()["computeEnvironments"]
+    our_envs = [e for e in all_envs if e["computeEnvironmentName"] == compute_name]
+    assert len(our_envs) == 1
+    assert our_envs[0]["serviceRole"] == iam_arn2
+
+    with pytest.raises(ClientError) as exc:
+        batch_client.update_compute_environment(
+            computeEnvironment=compute_name, serviceRole="unknown"
+        )
+    err = exc.value.response["Error"]
+    assert err["Code"] == "InvalidParameterValue"
 
 
 @pytest.mark.parametrize("compute_env_type", ["FARGATE", "FARGATE_SPOT"])
-@mock_ec2
-@mock_ecs
-@mock_iam
-@mock_batch
+@mock_aws
 def test_create_fargate_managed_compute_environment(compute_env_type):
     ec2_client, iam_client, ecs_client, _, batch_client = _get_clients()
     _, subnet_id, sg_id, iam_arn = _setup(ec2_client, iam_client)
@@ -257,14 +418,70 @@ def test_create_fargate_managed_compute_environment(compute_env_type):
         },
         serviceRole=iam_arn,
     )
-    resp.should.contain("computeEnvironmentArn")
-    resp["computeEnvironmentName"].should.equal(compute_name)
+    assert "computeEnvironmentArn" in resp
+    assert resp["computeEnvironmentName"] == compute_name
 
     our_env = batch_client.describe_compute_environments(
         computeEnvironments=[compute_name]
     )["computeEnvironments"][0]
 
-    our_env["computeResources"]["type"].should.equal(compute_env_type)
+    assert our_env["computeResources"]["type"] == compute_env_type
     # Should have created 1 ECS cluster
     all_clusters = ecs_client.list_clusters()["clusterArns"]
-    all_clusters.should.contain(our_env["ecsClusterArn"])
+    assert our_env["ecsClusterArn"] in all_clusters
+
+
+@mock_aws
+def test_create_ec2_managed_compute_environment__without_required_params():
+    ec2_client, iam_client, _, _, batch_client = _get_clients()
+    _, subnet_id, _, iam_arn = _setup(ec2_client, iam_client)
+
+    env_name = "ec2-env"
+
+    with pytest.raises(ClientError) as exc:
+        batch_client.create_compute_environment(
+            computeEnvironmentName=env_name,
+            type="MANAGED",
+            state="ENABLED",
+            computeResources={"type": "EC2", "maxvCpus": 1, "subnets": [subnet_id]},
+            serviceRole=iam_arn,
+        )
+    err = exc.value.response["Error"]
+    assert err["Code"] == "ClientException"
+    assert (
+        "Error executing request, Exception : Instance role is required."
+        in err["Message"]
+    )
+
+    with pytest.raises(ClientError) as exc:
+        batch_client.create_compute_environment(
+            computeEnvironmentName=env_name,
+            type="MANAGED",
+            state="ENABLED",
+            computeResources={
+                "type": "EC2",
+                "maxvCpus": 1,
+                "subnets": [subnet_id],
+                "instanceRole": iam_arn.replace(":role/", ":instance-profile/"),
+            },
+            serviceRole=iam_arn,
+        )
+    err = exc.value.response["Error"]
+    assert err["Code"] == "ClientException"
+    assert (
+        "Error executing request, Exception : Resource minvCpus is required."
+        in err["Message"]
+    )
+
+    with pytest.raises(ClientError) as exc:
+        batch_client.create_compute_environment(
+            computeEnvironmentName=env_name,
+            type="UNMANGED",
+            state="ENABLED",
+        )
+    err = exc.value.response["Error"]
+    assert err["Code"] == "ClientException"
+    assert (
+        "Error executing request, Exception : ServiceRole is required.,"
+        in err["Message"]
+    )

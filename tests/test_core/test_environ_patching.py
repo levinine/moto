@@ -1,17 +1,35 @@
 import os
-import sure  # noqa # pylint: disable=unused-import
-from moto import mock_ec2, mock_s3
+from unittest.mock import patch
+
+from moto import mock_aws
 
 KEY = "AWS_ACCESS_KEY_ID"
 
 
-def test_aws_keys_are_patched():
-    with mock_ec2():
-        patched_value = os.environ[KEY]
-        patched_value.should.equal("foobar_key")
+def test_aws_keys_are_patched() -> None:
+    with mock_aws():
+        assert os.environ[KEY] == "FOOBARKEY"
 
 
-def test_aws_keys_can_be_none():
+def test_aws_keys_are_not_patched_when_user_configured() -> None:
+    with patch.dict(os.environ, {"AWS_ACCESS_KEY_ID": "diff_value"}):
+        # Sanity check
+        assert os.environ["AWS_ACCESS_KEY_ID"] == "diff_value"
+
+        # Moto will not mock the credentials, and we see the 'original' value
+        with mock_aws(config={"core": {"mock_credentials": False}}):
+            assert os.environ[KEY] == "diff_value"
+
+            # Nested mocks are possible
+            # For the duration of the inner mock, Moto will patch the credentials
+            with mock_aws(config={"core": {"mock_credentials": True}}):
+                assert os.environ[KEY] == "FOOBARKEY"
+
+            # The moment the inner patch ends, we're back to the 'original' value
+            assert os.environ[KEY] == "diff_value"
+
+
+def test_aws_keys_can_be_none() -> None:
     """
     Verify that the os.environ[KEY] can be None
     Patching the None-value shouldn't be an issue
@@ -24,9 +42,8 @@ def test_aws_keys_can_be_none():
         pass  # Value might not be set on this system in the first place
     try:
         # Verify that the os.environ[KEY] is patched
-        with mock_s3():
-            patched_value = os.environ[KEY]
-            patched_value.should.equal("foobar_key")
+        with mock_aws():
+            assert os.environ[KEY] == "FOOBARKEY"
         # Verify that the os.environ[KEY] is unpatched, and reverts to None
         assert os.environ.get(KEY) is None
     finally:

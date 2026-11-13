@@ -1,10 +1,7 @@
-import sure  # noqa # pylint: disable=unused-import
+import re
+from datetime import datetime
 
 import moto.server as server
-
-"""
-Test the different server responses
-"""
 
 
 def test_ses_list_identities():
@@ -12,4 +9,17 @@ def test_ses_list_identities():
     test_client = backend.test_client()
 
     res = test_client.get("/?Action=ListIdentities")
-    res.data.should.contain(b"ListIdentitiesResponse")
+    assert b"ListIdentitiesResponse" in res.data
+
+
+def test_ses_get_send_statistics():
+    backend = server.create_backend_app("ses")
+    test_client = backend.test_client()
+
+    res = test_client.get("/?Action=GetSendStatistics")
+    assert b"GetSendStatisticsResponse" in res.data
+
+    # Timestamps must be in ISO 8601 format
+    groups = re.search("<Timestamp>(.*)</Timestamp>", res.data.decode("utf-8"))
+    timestamp = groups.groups()[0]
+    datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%fZ")

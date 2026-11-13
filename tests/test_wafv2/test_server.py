@@ -1,23 +1,33 @@
-import sure  # noqa # pylint: disable=unused-import
+import unittest
+
+import pytest
 
 import moto.server as server
-from moto import mock_wafv2
-from .test_helper_functions import CREATE_WEB_ACL_BODY, LIST_WEB_ACL_BODY
-from moto.core import ACCOUNT_ID
+from moto import mock_aws, settings
+from moto.core import DEFAULT_ACCOUNT_ID as ACCOUNT_ID
+from moto.utilities.constants import APPLICATION_AMZ_JSON_1_1
+
+from .test_helper_functions import CREATE_WEB_ACL_BODY
 
 CREATE_WEB_ACL_HEADERS = {
     "X-Amz-Target": "AWSWAF_20190729.CreateWebACL",
-    "Content-Type": "application/json",
+    "Content-Type": APPLICATION_AMZ_JSON_1_1,
 }
 
 
 LIST_WEB_ACL_HEADERS = {
     "X-Amz-Target": "AWSWAF_20190729.ListWebACLs",
-    "Content-Type": "application/json",
+    "Content-Type": APPLICATION_AMZ_JSON_1_1,
 }
 
 
-@mock_wafv2
+@pytest.fixture(scope="function", autouse=True)
+def skip_in_server_mode():
+    if settings.TEST_SERVER_MODE:
+        raise unittest.SkipTest("No point testing this in ServerMode")
+
+
+@mock_aws
 def test_create_web_acl():
     backend = server.create_backend_app("wafv2")
     test_client = backend.test_client()
@@ -32,7 +42,7 @@ def test_create_web_acl():
     web_acl = res.json["Summary"]
     assert web_acl.get("Name") == "John"
     assert web_acl.get("ARN").startswith(
-        "arn:aws:wafv2:us-east-1:{}:regional/webacl/John/".format(ACCOUNT_ID)
+        f"arn:aws:wafv2:us-east-1:{ACCOUNT_ID}:regional/webacl/John/"
     )
 
     # Duplicate name - should raise error
@@ -43,9 +53,9 @@ def test_create_web_acl():
     )
     assert res.status_code == 400
     assert (
-        b"AWS WAF could not perform the operation because some resource in your request is a duplicate of an existing one."
-        in res.data
-    )
+        b"AWS WAF could not perform the operation because some resource "
+        b"in your request is a duplicate of an existing one."
+    ) in res.data
     assert b"WafV2DuplicateItem" in res.data
 
     res = test_client.post(
@@ -55,11 +65,11 @@ def test_create_web_acl():
     )
     web_acl = res.json["Summary"]
     assert web_acl.get("ARN").startswith(
-        "arn:aws:wafv2:global:{}:global/webacl/Carl/".format(ACCOUNT_ID)
+        f"arn:aws:wafv2:us-east-1:{ACCOUNT_ID}:global/webacl/Carl/"
     )
 
 
-@mock_wafv2
+@mock_aws
 def test_list_web_ac_ls():
     backend = server.create_backend_app("wafv2")
     test_client = backend.test_client()
@@ -80,7 +90,7 @@ def test_list_web_ac_ls():
         json=CREATE_WEB_ACL_BODY("Sarah", "CLOUDFRONT"),
     )
     res = test_client.post(
-        "/", headers=LIST_WEB_ACL_HEADERS, json=LIST_WEB_ACL_BODY("REGIONAL")
+        "/", headers=LIST_WEB_ACL_HEADERS, json={"Scope": "REGIONAL"}
     )
     assert res.status_code == 200
 
@@ -90,7 +100,7 @@ def test_list_web_ac_ls():
     assert web_acls[1]["Name"] == "JohnSon"
 
     res = test_client.post(
-        "/", headers=LIST_WEB_ACL_HEADERS, json=LIST_WEB_ACL_BODY("CLOUDFRONT")
+        "/", headers=LIST_WEB_ACL_HEADERS, json={"Scope": "CLOUDFRONT"}
     )
     assert res.status_code == 200
     web_acls = res.json["WebACLs"]

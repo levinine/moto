@@ -3,27 +3,26 @@
 Simple AD directories are used for test data, but the operations are
 common to the other directory types.
 """
+
 from datetime import datetime, timezone
 
 import boto3
-from botocore.exceptions import ClientError
 import pytest
+from botocore.exceptions import ClientError
 
-from moto import mock_ds
-from moto.core.utils import get_random_hex
-from moto.ec2 import mock_ec2
+from moto import mock_aws
+from moto.moto_api._internal import mock_random
 
-from .test_ds_simple_ad_directory import create_test_directory, TEST_REGION
+from .test_ds_simple_ad_directory import TEST_REGION, create_test_directory
 
 
-@mock_ec2
-@mock_ds
+@mock_aws
 def test_ds_delete_directory():
     """Test good and bad invocations of delete_directory()."""
     client = boto3.client("ds", region_name=TEST_REGION)
 
     # Delete a directory when there are none.
-    random_directory_id = f"d-{get_random_hex(10)}"
+    random_directory_id = f"d-{mock_random.get_random_hex(10)}"
     with pytest.raises(ClientError) as exc:
         client.delete_directory(DirectoryId=random_directory_id)
     err = exc.value.response["Error"]
@@ -36,8 +35,18 @@ def test_ds_delete_directory():
     result = client.delete_directory(DirectoryId=directory_id)
     assert result["DirectoryId"] == directory_id
 
+    # Verify there are no dictionaries, network interfaces or associated
+    # security groups.
+    result = client.describe_directories()
+    assert len(result["DirectoryDescriptions"]) == 0
+    result = ec2_client.describe_network_interfaces()
+    assert len(result["NetworkInterfaces"]) == 0
+    result = ec2_client.describe_security_groups()
+    for group in result["SecurityGroups"]:
+        assert "directory controllers" not in group["Description"]
+
     # Attempt to delete a non-existent directory.
-    nonexistent_id = f"d-{get_random_hex(10)}"
+    nonexistent_id = f"d-{mock_random.get_random_hex(10)}"
     with pytest.raises(ClientError) as exc:
         client.delete_directory(DirectoryId=nonexistent_id)
     err = exc.value.response["Error"]
@@ -45,7 +54,7 @@ def test_ds_delete_directory():
     assert f"Directory {nonexistent_id} does not exist" in err["Message"]
 
     # Attempt to use an invalid directory ID.
-    bad_id = get_random_hex(3)
+    bad_id = mock_random.get_random_hex(3)
     with pytest.raises(ClientError) as exc:
         client.delete_directory(DirectoryId=bad_id)
     err = exc.value.response["Error"]
@@ -57,8 +66,7 @@ def test_ds_delete_directory():
     ) in err["Message"]
 
 
-@mock_ec2
-@mock_ds
+@mock_aws
 def test_ds_get_directory_limits():
     """Test return value for directory limits."""
     client = boto3.client("ds", region_name=TEST_REGION)
@@ -83,8 +91,7 @@ def test_ds_get_directory_limits():
     assert not limits["ConnectedDirectoriesCurrentCount"]
 
 
-@mock_ec2
-@mock_ds
+@mock_aws
 def test_ds_describe_directories():
     """Test good and bad invocations of describe_directories()."""
     client = boto3.client("ds", region_name=TEST_REGION)
@@ -116,6 +123,7 @@ def test_ds_describe_directories():
         assert dir_info["Type"] == "SimpleAD"
         assert dir_info["VpcSettings"]["VpcId"].startswith("vpc-")
         assert len(dir_info["VpcSettings"]["SubnetIds"]) == 2
+        assert dir_info["VpcSettings"]["SecurityGroupId"].startswith("sg-")
         assert len(dir_info["DnsIpAddrs"]) == 2
     assert "NextToken" not in result
 
@@ -125,7 +133,7 @@ def test_ds_describe_directories():
     assert result["DirectoryDescriptions"][0]["DirectoryId"] == directory_ids[5]
 
     # Test with a bad directory ID.
-    bad_id = get_random_hex(3)
+    bad_id = mock_random.get_random_hex(3)
     with pytest.raises(ClientError) as exc:
         client.describe_directories(DirectoryIds=[bad_id])
     err = exc.value.response["Error"]
@@ -155,8 +163,7 @@ def test_ds_describe_directories():
     assert result["DirectoryDescriptions"][0]["DirectoryId"] == directory_ids[5]
 
 
-@mock_ec2
-@mock_ds
+@mock_aws
 def test_ds_create_alias():
     """Test good and bad invocations of create_alias()."""
     client = boto3.client("ds", region_name=TEST_REGION)
@@ -166,19 +173,19 @@ def test_ds_create_alias():
     directory_id = create_test_directory(client, ec2_client)
 
     # Bad format.
-    bad_alias = f"d-{get_random_hex(10)}"
+    bad_alias = f"d-{mock_random.get_random_hex(10)}"
     with pytest.raises(ClientError) as exc:
         client.create_alias(DirectoryId=directory_id, Alias=bad_alias)
     err = exc.value.response["Error"]
     assert err["Code"] == "ValidationException"
     assert (
-        fr"Value '{bad_alias}' at 'alias' failed to satisfy constraint: "
-        fr"Member must satisfy regular expression pattern: "
-        fr"^(?!D-|d-)([\da-zA-Z]+)([-]*[\da-zA-Z])*$"
+        rf"Value '{bad_alias}' at 'alias' failed to satisfy constraint: "
+        rf"Member must satisfy regular expression pattern: "
+        rf"^(?!D-|d-)([\da-zA-Z]+)([-]*[\da-zA-Z])*$"
     ) in err["Message"]
 
     # Too long.
-    bad_alias = f"d-{get_random_hex(62)}"
+    bad_alias = f"d-{mock_random.get_random_hex(62)}"
     with pytest.raises(ClientError) as exc:
         client.create_alias(DirectoryId=directory_id, Alias=bad_alias)
     err = exc.value.response["Error"]
@@ -189,7 +196,7 @@ def test_ds_create_alias():
     ) in err["Message"]
 
     # Just right.
-    good_alias = f"{get_random_hex(10)}"
+    good_alias = f"{mock_random.get_random_hex(10)}"
     result = client.create_alias(DirectoryId=directory_id, Alias=good_alias)
     assert result["DirectoryId"] == directory_id
     assert result["Alias"] == good_alias
@@ -199,7 +206,7 @@ def test_ds_create_alias():
     assert directory["AccessUrl"] == f"{good_alias}.awsapps.com"
 
     # Attempt to create another alias for the same directory.
-    another_good_alias = f"{get_random_hex(10)}"
+    another_good_alias = f"{mock_random.get_random_hex(10)}"
     with pytest.raises(ClientError) as exc:
         client.create_alias(DirectoryId=directory_id, Alias=another_good_alias)
     err = exc.value.response["Error"]
@@ -218,8 +225,7 @@ def test_ds_create_alias():
     assert f"Alias '{good_alias}' already exists." in err["Message"]
 
 
-@mock_ec2
-@mock_ds
+@mock_aws
 def test_ds_enable_sso():
     """Test good and bad invocations of enable_sso()."""
     client = boto3.client("ds", region_name=TEST_REGION)
@@ -242,7 +248,7 @@ def test_ds_enable_sso():
 
     # Password must be less than 128 chars in length.
     good_username = "test"
-    bad_password = f"bad_password{get_random_hex(128)}"
+    bad_password = f"bad_password{mock_random.get_random_hex(128)}"
     with pytest.raises(ClientError) as exc:
         client.enable_sso(
             DirectoryId=directory_id, UserName=good_username, Password=bad_password
@@ -264,8 +270,8 @@ def test_ds_enable_sso():
     err = exc.value.response["Error"]
     assert err["Code"] == "ValidationException"
     assert (
-        fr"Value '{bad_username}' at 'userName' failed to satisfy constraint: "
-        fr"Member must satisfy regular expression pattern: ^[a-zA-Z0-9._-]+$"
+        rf"Value '{bad_username}' at 'userName' failed to satisfy constraint: "
+        rf"Member must satisfy regular expression pattern: ^[a-zA-Z0-9._-]+$"
     ) in err["Message"]
 
     # Valid execution.
@@ -275,8 +281,7 @@ def test_ds_enable_sso():
     assert directory["SsoEnabled"]
 
 
-@mock_ec2
-@mock_ds
+@mock_aws
 def test_ds_disable_sso():
     """Test good and bad invocations of disable_sso()."""
     client = boto3.client("ds", region_name=TEST_REGION)
@@ -287,7 +292,7 @@ def test_ds_disable_sso():
 
     # Password must be less than 128 chars in length.
     good_username = "test"
-    bad_password = f"bad_password{get_random_hex(128)}"
+    bad_password = f"bad_password{mock_random.get_random_hex(128)}"
     with pytest.raises(ClientError) as exc:
         client.disable_sso(
             DirectoryId=directory_id, UserName=good_username, Password=bad_password
@@ -309,8 +314,8 @@ def test_ds_disable_sso():
     err = exc.value.response["Error"]
     assert err["Code"] == "ValidationException"
     assert (
-        fr"Value '{bad_username}' at 'userName' failed to satisfy constraint: "
-        fr"Member must satisfy regular expression pattern: ^[a-zA-Z0-9._-]+$"
+        rf"Value '{bad_username}' at 'userName' failed to satisfy constraint: "
+        rf"Member must satisfy regular expression pattern: ^[a-zA-Z0-9._-]+$"
     ) in err["Message"]
 
     # Valid execution.  First enable SSO, as the default is disabled SSO.
@@ -320,3 +325,252 @@ def test_ds_disable_sso():
     result = client.describe_directories()
     directory = result["DirectoryDescriptions"][0]
     assert not directory["SsoEnabled"]
+
+
+@mock_aws
+def test_create_trust():
+    client = boto3.client("ds", region_name=TEST_REGION)
+    ec2_client = boto3.client("ec2", region_name=TEST_REGION)
+    directory_id = create_test_directory(client, ec2_client)
+
+    # Create a trust
+    trust_id = client.create_trust(
+        DirectoryId=directory_id,
+        RemoteDomainName="example.com",
+        TrustPassword="password",
+        TrustDirection="One-Way: Outgoing",
+        TrustType="External",
+    )["TrustId"]
+
+    assert trust_id is not None
+
+    # Describe the trust
+    trusts = client.describe_trusts(DirectoryId=directory_id)["Trusts"]
+    assert len(trusts) == 1
+    assert trusts[0]["TrustId"] == trust_id
+    assert trusts[0]["DirectoryId"] == directory_id
+
+
+@mock_aws
+def test_describe_trusts():
+    client = boto3.client("ds", region_name=TEST_REGION)
+    ec2_client = boto3.client("ec2", region_name=TEST_REGION)
+    directory_id = create_test_directory(client, ec2_client)
+
+    # Create several trusts
+    trust_ids = []
+    for x in range(5):
+        trust_id = client.create_trust(
+            DirectoryId=directory_id,
+            RemoteDomainName=f"example{x}.com",
+            TrustPassword="P@ssword1234!",
+            TrustDirection="One-Way: Outgoing",
+            TrustType="External",
+        )["TrustId"]
+        trust_ids.append(trust_id)
+
+    # Describe the trusts
+    trusts = client.describe_trusts(DirectoryId=directory_id)["Trusts"]
+    assert len(trusts) == 5
+    for idx, trust in enumerate(trusts):
+        assert trust["TrustId"] == trust_ids[idx]
+        assert trust["DirectoryId"] == directory_id
+
+    # Describe a single trust
+    trust = client.describe_trusts(DirectoryId=directory_id, TrustIds=[trust_ids[2]])[
+        "Trusts"
+    ][0]
+    assert trust["TrustId"] == trust_ids[2]
+
+    # Describe multiple trusts
+    trusts = client.describe_trusts(DirectoryId=directory_id, TrustIds=trust_ids[1:3])[
+        "Trusts"
+    ]
+    assert len(trusts) == 2
+    assert trusts[0]["TrustId"] == trust_ids[1]
+    assert trusts[1]["TrustId"] == trust_ids[2]
+
+    # Describe all the trusts in the account
+    trusts = client.describe_trusts()["Trusts"]
+    assert len(trusts) == 5
+
+
+@mock_aws
+def test_describe_trusts_pagination():
+    client = boto3.client("ds", region_name=TEST_REGION)
+    ec2_client = boto3.client("ec2", region_name=TEST_REGION)
+    directory_id = create_test_directory(client, ec2_client)
+    trust_ids = [
+        client.create_trust(
+            DirectoryId=directory_id,
+            RemoteDomainName=f"example{x}.com",
+            TrustPassword="P@ssword1234!",
+            TrustDirection="One-Way: Outgoing",
+            TrustType="External",
+        )["TrustId"]
+        for x in range(3)
+    ]
+
+    page = client.describe_trusts(DirectoryId=directory_id, TrustIds=trust_ids, Limit=2)
+    assert len(page["Trusts"]) == 2
+    assert "NextToken" in page
+
+    pages = client.get_paginator("describe_trusts").paginate(
+        DirectoryId=directory_id, TrustIds=trust_ids, PaginationConfig={"PageSize": 2}
+    )
+    assert [t["TrustId"] for page in pages for t in page["Trusts"]] == trust_ids
+
+
+@mock_aws
+def test_delete_trust():
+    client = boto3.client("ds", region_name=TEST_REGION)
+    ec2_client = boto3.client("ec2", region_name=TEST_REGION)
+    directory_id = create_test_directory(client, ec2_client)
+
+    # Create several trusts
+    trust_ids = []
+    for x in range(2):
+        trust_id = client.create_trust(
+            DirectoryId=directory_id,
+            RemoteDomainName=f"example{x}.com",
+            TrustPassword="P@ssword1234!",
+            TrustDirection="One-Way: Outgoing",
+            TrustType="External",
+        )["TrustId"]
+        trust_ids.append(trust_id)
+
+    # Verify the expected trusts exist
+    trusts = client.describe_trusts(DirectoryId=directory_id)["Trusts"]
+    assert len(trusts) == 2
+
+    # Delete a trust
+    resp = client.delete_trust(TrustId=trust_ids[0])
+    assert resp["TrustId"] == trust_ids[0]
+
+    # Verify the trust was deleted
+    trusts = client.describe_trusts(DirectoryId=directory_id)["Trusts"]
+    assert len(trusts) == 1
+    assert trusts[0]["TrustId"] != trust_ids[0]
+
+    # Test deleting a trust that doesn't exist
+    with pytest.raises(ClientError) as exc:
+        client.delete_trust(TrustId="t-1234567890")
+    err = exc.value.response["Error"]
+    assert err["Code"] == "EntityDoesNotExistException"
+
+
+@mock_aws
+def test_ldaps_exceptions_non_microsoftad():
+    """Test LDAPS operations on non-Microsoft AD directories."""
+
+    client = boto3.client("ds", region_name=TEST_REGION)
+    ec2_client = boto3.client("ec2", region_name=TEST_REGION)
+
+    directory_id = create_test_directory(client, ec2_client)
+
+    # Test enabling LDAPS on a non-Microsoft AD directory.
+    with pytest.raises(ClientError) as exc:
+        client.enable_ldaps(DirectoryId=directory_id, Type="Client")
+    err = exc.value.response["Error"]
+    assert err["Code"] == "UnsupportedOperationException"
+
+    # Test describe_ldaps_settings on a non-Microsoft AD directory.
+    with pytest.raises(ClientError) as exc:
+        client.describe_ldaps_settings(DirectoryId=directory_id, Type="Client")
+    err = exc.value.response["Error"]
+    assert err["Code"] == "UnsupportedOperationException"
+
+    # Test disable_ldaps on a non-Microsoft AD directory.
+    with pytest.raises(ClientError) as exc:
+        client.disable_ldaps(DirectoryId=directory_id, Type="Client")
+    err = exc.value.response["Error"]
+    assert err["Code"] == "UnsupportedOperationException"
+
+
+@mock_aws
+def test_settings_exception_non_microsoftad():
+    """Test Settings operations on non-Microsoft AD directories."""
+
+    client = boto3.client("ds", region_name=TEST_REGION)
+    ec2_client = boto3.client("ec2", region_name=TEST_REGION)
+
+    directory_id = create_test_directory(client, ec2_client)
+    # Test describing Settings on a non-Microsoft AD directory.
+    with pytest.raises(ClientError) as exc:
+        client.describe_settings(DirectoryId=directory_id)
+    err = exc.value.response["Error"]
+    assert err["Code"] == "InvalidParameterException"
+
+
+@mock_aws
+def test_create_log_subscription():
+    client = boto3.client("ds", region_name=TEST_REGION)
+    ec2_client = boto3.client("ec2", region_name=TEST_REGION)
+    log_group_name = "my-test-log-group"
+
+    directory_id = create_test_directory(client, ec2_client)
+    client.create_log_subscription(
+        DirectoryId=directory_id, LogGroupName=log_group_name
+    )
+
+    # Test creating log subscription invalid directory
+    with pytest.raises(ClientError) as exc:
+        client.create_log_subscription(
+            DirectoryId="d-1234567890", LogGroupName=log_group_name
+        )
+    err = exc.value.response["Error"]
+    assert err["Code"] == "EntityDoesNotExistException"
+
+    # Test creating another log subscription directory
+    with pytest.raises(ClientError) as exc:
+        client.create_log_subscription(
+            DirectoryId=directory_id, LogGroupName="another_log-group"
+        )
+    err = exc.value.response["Error"]
+    assert err["Code"] == "EntityAlreadyExistsException"
+
+
+@mock_aws
+def test_list_log_subscriptions():
+    client = boto3.client("ds", region_name=TEST_REGION)
+    ec2_client = boto3.client("ec2", region_name=TEST_REGION)
+
+    directory_id = create_test_directory(client, ec2_client)
+    directory_id2 = create_test_directory(client, ec2_client)
+
+    client.create_log_subscription(DirectoryId=directory_id, LogGroupName="test-1")
+    client.create_log_subscription(DirectoryId=directory_id2, LogGroupName="test-2")
+
+    # Test listing all log subscriptions
+    result = client.list_log_subscriptions()
+    assert len(result["LogSubscriptions"]) == 2
+
+    # Test listing log subscriptions for a specific directory
+    result = client.list_log_subscriptions(DirectoryId=directory_id)
+    assert len(result["LogSubscriptions"]) == 1
+    assert result["LogSubscriptions"][0]["LogGroupName"] == "test-1"
+
+
+@mock_aws
+def test_delete_log_subscription():
+    client = boto3.client("ds", region_name=TEST_REGION)
+    ec2_client = boto3.client("ec2", region_name=TEST_REGION)
+
+    directory_id = create_test_directory(client, ec2_client)
+    directory_id2 = create_test_directory(client, ec2_client)
+
+    client.create_log_subscription(DirectoryId=directory_id, LogGroupName="test-1")
+    client.create_log_subscription(DirectoryId=directory_id2, LogGroupName="test-2")
+
+    # Test listing all log subscriptions
+    result = client.list_log_subscriptions()
+    assert len(result["LogSubscriptions"]) == 2
+
+    # Delete log subscription and verify it was deleted
+    client.delete_log_subscription(DirectoryId=directory_id)
+    result = client.list_log_subscriptions(DirectoryId=directory_id)
+    assert len(result["LogSubscriptions"]) == 0
+
+    result = client.list_log_subscriptions()
+    assert len(result["LogSubscriptions"]) == 1
+    assert result["LogSubscriptions"][0]["LogGroupName"] == "test-2"

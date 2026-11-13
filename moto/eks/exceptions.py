@@ -1,33 +1,27 @@
-import json
+from typing import Any
 
-from moto.core.exceptions import AWSError
+from moto.core.exceptions import ServiceException
 
 
-class EKSError(AWSError):
-    def __init__(self, *args, **kwargs):
-        super(AWSError, self).__init__()
-        self.description = json.dumps(kwargs)
-        self.headers = {"status": self.STATUS, "x-amzn-ErrorType": self.TYPE}
-
-    def response(self):
-        return self.STATUS, self.headers, self.description
+class EKSError(ServiceException):
+    def __init__(self, message: str, **kwargs: Any):
+        super().__init__(message)
+        # Error members modeled for some exceptions, e.g. clusterName, nodegroupName
+        for key, value in kwargs.items():
+            setattr(self, key, value)
 
 
 class ResourceInUseException(EKSError):
-    TYPE = "ResourceInUseException"
-    STATUS = 409
+    code = "ResourceInUseException"
 
 
 class ResourceNotFoundException(EKSError):
-    TYPE = "ResourceNotFoundException"
-    STATUS = 404
+    code = "ResourceNotFoundException"
 
 
 class InvalidParameterException(EKSError):
-    TYPE = "InvalidParameterException"
-    STATUS = 400
+    code = "InvalidParameterException"
 
 
 class InvalidRequestException(EKSError):
-    TYPE = "InvalidRequestException"
-    STATUS = 400
+    code = "InvalidRequestException"

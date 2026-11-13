@@ -12,45 +12,65 @@
 kinesis
 =======
 
-|start-h3| Example usage |end-h3|
-
-.. sourcecode:: python
-
-            @mock_kinesis
-            def test_kinesis_behaviour:
-                boto3.client("kinesis")
-                ...
-
-
-
 |start-h3| Implemented features for this service |end-h3|
 
 - [X] add_tags_to_stream
+- [ ] create_channel
 - [X] create_stream
 - [X] decrease_stream_retention_period
+- [ ] delete_channel
+- [X] delete_resource_policy
+  
+Remove resource policy with a matching given resource arn.
+
+
 - [X] delete_stream
-- [ ] deregister_stream_consumer
-- [ ] describe_limits
+- [X] deregister_stream_consumer
+- [ ] describe_account_settings
+- [ ] describe_channel
+- [X] describe_limits
+  Return fixed Kinesis limits.
+
 - [X] describe_stream
-- [ ] describe_stream_consumer
+- [X] describe_stream_consumer
 - [X] describe_stream_summary
-- [ ] disable_enhanced_monitoring
-- [ ] enable_enhanced_monitoring
+- [X] disable_enhanced_monitoring
+- [X] enable_enhanced_monitoring
 - [X] get_records
+- [X] get_resource_policy
+  
+Get resource policy with a matching given resource arn.
+
+
 - [X] get_shard_iterator
 - [X] increase_stream_retention_period
+- [ ] list_channels
 - [X] list_shards
-- [ ] list_stream_consumers
+- [X] list_stream_consumers
 - [X] list_streams
+- [ ] list_tags_for_resource
 - [X] list_tags_for_stream
 - [X] merge_shards
 - [X] put_record
 - [X] put_records
-- [ ] register_stream_consumer
+- [X] put_resource_policy
+  
+Creates/updates resource policy and return policy object
+
+
+- [X] register_stream_consumer
 - [X] remove_tags_from_stream
 - [X] split_shard
-- [ ] start_stream_encryption
-- [ ] stop_stream_encryption
+- [X] start_stream_encryption
+- [X] stop_stream_encryption
 - [ ] subscribe_to_shard
-- [ ] update_shard_count
+- [ ] tag_resource
+- [ ] untag_resource
+- [ ] update_account_settings
+- [ ] update_channel
+- [ ] update_max_record_size
+- [X] update_shard_count
+- [X] update_stream_mode
+- [ ] update_stream_record_distribution_strategy
+- [ ] update_stream_warm_throughput
 

@@ -1,15 +1,15 @@
 import boto3
 import pytest
-import sure  # noqa # pylint: disable=unused-import
 
-from moto import settings
-from moto.ec2 import mock_ec2, ec2_backend
-from moto.emr import mock_emr
+from moto import mock_aws, settings
+from moto.core import DEFAULT_ACCOUNT_ID as ACCOUNT_ID
+from moto.ec2 import ec2_backends
 from moto.emr.utils import EmrSecurityGroupManager
 
+ec2_backend = ec2_backends[ACCOUNT_ID]["us-east-1"]
 
-@mock_emr
-@mock_ec2
+
+@mock_aws
 def test_default_emr_security_groups_get_created_on_first_job_flow():
     ec2 = boto3.resource("ec2", region_name="us-east-1")
     ec2_client = boto3.client("ec2", region_name="us-east-1")
@@ -38,9 +38,9 @@ def test_default_emr_security_groups_get_created_on_first_job_flow():
     assert len(_get_default_security_groups()) == 0
 
     client = boto3.client("emr", region_name="us-east-1")
-    run_job_flow_params = dict(
-        ReleaseLabel="emr-5.29.0",
-        Instances={
+    run_job_flow_params = {
+        "ReleaseLabel": "emr-5.29.0",
+        "Instances": {
             "KeepJobFlowAliveWhenNoSteps": True,
             "Ec2SubnetId": subnet.id,
             "InstanceGroups": [
@@ -60,11 +60,11 @@ def test_default_emr_security_groups_get_created_on_first_job_flow():
                 },
             ],
         },
-        JobFlowRole="EMR_EC2_DefaultRole",
-        Name="test-emr-cluster-security-groups",
-        ServiceRole="EMR_DefaultRole",
-        VisibleToAllUsers=True,
-    )
+        "JobFlowRole": "EMR_EC2_DefaultRole",
+        "Name": "test-emr-cluster-security-groups",
+        "ServiceRole": "EMR_DefaultRole",
+        "VisibleToAllUsers": True,
+    }
     cluster_id = client.run_job_flow(**run_job_flow_params)["JobFlowId"]
 
     # Default security groups should have been created.
@@ -86,14 +86,12 @@ def test_default_emr_security_groups_get_created_on_first_job_flow():
 @pytest.mark.skipif(
     settings.TEST_SERVER_MODE, reason="Can't modify backend directly in server mode."
 )
-class TestEmrSecurityGroupManager(object):
-
+class TestEmrSecurityGroupManager:
     mocks = []
 
-    def setup(self):
-        self.mocks = [mock_ec2()]
-        for mock in self.mocks:
-            mock.start()
+    def setup_method(self):
+        self.mock = mock_aws()
+        self.mock.start()
         ec2_client = boto3.client("ec2", region_name="us-east-1")
         ec2 = boto3.resource("ec2", region_name="us-east-1")
         vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
@@ -101,9 +99,8 @@ class TestEmrSecurityGroupManager(object):
         self.ec2 = ec2
         self.ec2_client = ec2_client
 
-    def teardown(self):
-        for mock in self.mocks:
-            mock.stop()
+    def teardown_method(self):
+        self.mock.stop()
 
     def _create_default_client_supplied_security_groups(self):
         master = self.ec2.create_security_group(
@@ -135,13 +132,17 @@ class TestEmrSecurityGroupManager(object):
         return self._describe_security_groups(group_names)
 
     def test_emr_security_groups_get_created_if_non_existent(self):
-        manager = EmrSecurityGroupManager(ec2_backend, self.vpc_id)
+        manager = EmrSecurityGroupManager(
+            ec2_backends[ACCOUNT_ID]["us-east-1"], self.vpc_id
+        )
         assert len(self._default_emr_security_groups()) == 0
         manager.manage_security_groups(None, None, None)
         assert len(self._default_emr_security_groups()) == 3
 
     def test_emr_security_groups_do_not_get_created_if_already_exist(self):
-        manager = EmrSecurityGroupManager(ec2_backend, self.vpc_id)
+        manager = EmrSecurityGroupManager(
+            ec2_backends[ACCOUNT_ID]["us-east-1"], self.vpc_id
+        )
         assert len(self._default_emr_security_groups()) == 0
         manager.manage_security_groups(None, None, None)
         emr_security_groups = self._default_emr_security_groups()
@@ -160,7 +161,9 @@ class TestEmrSecurityGroupManager(object):
             client_slave,
             client_service,
         ) = self._create_default_client_supplied_security_groups()
-        manager = EmrSecurityGroupManager(ec2_backend, self.vpc_id)
+        manager = EmrSecurityGroupManager(
+            ec2_backends[ACCOUNT_ID]["us-east-1"], self.vpc_id
+        )
         manager.manage_security_groups(
             client_master.id, client_slave.id, client_service.id
         )
@@ -173,7 +176,9 @@ class TestEmrSecurityGroupManager(object):
         assert len(self._default_emr_security_groups()) == 0
 
     def test_client_supplied_invalid_security_group_identifier_raises_error(self):
-        manager = EmrSecurityGroupManager(ec2_backend, self.vpc_id)
+        manager = EmrSecurityGroupManager(
+            ec2_backends[ACCOUNT_ID]["us-east-1"], self.vpc_id
+        )
         args_bad = [
             ("sg-invalid", None, None),
             (None, "sg-invalid", None),
@@ -190,7 +195,9 @@ class TestEmrSecurityGroupManager(object):
             client_slave,
             client_service,
         ) = self._create_default_client_supplied_security_groups()
-        manager = EmrSecurityGroupManager(ec2_backend, self.vpc_id)
+        manager = EmrSecurityGroupManager(
+            ec2_backends[ACCOUNT_ID]["us-east-1"], self.vpc_id
+        )
         manager.manage_security_groups(
             client_master.id, client_slave.id, client_service.id
         )

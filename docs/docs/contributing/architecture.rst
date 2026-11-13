@@ -18,7 +18,7 @@ This has multiple benefits:
 
 Botocore utilizes an event-based architecture. Events such as `creating-client-class` and `before-send` are emitted for all boto3-requests.
 
-When the decorator starts, Moto registers a hook into the `before-send`-event that allows us to intercept the HTTP-request that was about to be send.
+When the decorator starts, Moto registers a hook into the `before-send`-event that allows us to intercept the HTTP-request that was about to be sent.
 For every intercepted request, Moto figures out which service/feature is called based on the HTTP request prepared by `boto3`, and calls our own stub instead.
 
 
@@ -31,7 +31,7 @@ For each request we need to know two things:
  #. Which service is this request for?
  #. Which feature is called?
 
-When using one ore more decorators, Moto will load all urls from `{service}/urls.py::url_bases`.
+When using one or more decorators, Moto will load all urls from `{service}/urls.py::url_bases`.
 Incoming requests are matched against those to figure out which service the request has to go to.
 After that, we try to find right feature by looking at:
 

@@ -1,44 +1,42 @@
-"""Unit tests for emrcontainers-supported APIs."""
 import re
-from datetime import datetime, timezone, timedelta
+from datetime import timedelta
 from unittest import SkipTest
+from unittest.mock import patch
 
 import boto3
 import pytest
-import sure  # noqa # pylint: disable=unused-import
-from botocore.exceptions import ClientError, ParamValidationError
+from botocore.exceptions import ClientError
+from dateutil.tz import tzutc
 
-from moto import mock_emrcontainers, settings
-from moto.core import ACCOUNT_ID
-from unittest.mock import patch
+from moto import mock_aws, settings
+from moto.core import DEFAULT_ACCOUNT_ID as ACCOUNT_ID
+from moto.core.utils import utcnow
 
-from moto.emrcontainers import REGION as DEFAULT_REGION
+DEFAULT_REGION = "us-east-1"
 
 
-@pytest.fixture(scope="function")
-def client():
-    with mock_emrcontainers():
+@pytest.fixture(scope="function", name="client")
+def fixture_client():
+    with mock_aws():
         yield boto3.client("emr-containers", region_name=DEFAULT_REGION)
 
 
-@pytest.fixture(scope="function")
-def virtual_cluster_factory(client):
+@pytest.fixture(scope="function", name="virtual_cluster_factory")
+def fixture_virtual_cluster_factory(client):
     if settings.TEST_SERVER_MODE:
         raise SkipTest("Cant manipulate time in server mode")
 
     cluster_state = ["RUNNING", "TERMINATING", "TERMINATED", "ARRESTED"]
 
     cluster_list = []
-    for i in range(len(cluster_state)):
-        with patch(
-            "moto.emrcontainers.models.VIRTUAL_CLUSTER_STATUS", cluster_state[i]
-        ):
+    for idx, state in enumerate(cluster_state):
+        with patch("moto.emrcontainers.models.VIRTUAL_CLUSTER_STATUS", state):
             resp = client.create_virtual_cluster(
                 name="test-emr-virtual-cluster",
                 containerProvider={
                     "type": "EKS",
                     "id": "test-eks-cluster",
-                    "info": {"eksInfo": {"namespace": f"emr-container-{i}"}},
+                    "info": {"eksInfo": {"namespace": f"emr-container-{idx}"}},
                 },
             )
 
@@ -47,13 +45,16 @@ def virtual_cluster_factory(client):
     yield cluster_list
 
 
-@pytest.fixture()
-def job_factory(client, virtual_cluster_factory):
+@pytest.fixture(name="job_factory")
+def fixture_job_factory(client, virtual_cluster_factory):
     virtual_cluster_id = virtual_cluster_factory[0]
     default_job_driver = {
         "sparkSubmitJobDriver": {
             "entryPoint": "s3://code/pi.py",
-            "sparkSubmitParameters": "--conf spark.executor.instances=2 --conf spark.executor.memory=2G --conf spark.driver.memory=2G --conf spark.executor.cores=4",
+            "sparkSubmitParameters": (
+                "--conf spark.executor.instances=2 --conf spark.executor.memory=2G "
+                "--conf spark.driver.memory=2G --conf spark.executor.cores=4"
+            ),
         }
     }
     default_execution_role_arn = f"arn:aws:iam::{ACCOUNT_ID}:role/iamrole-emrcontainers"
@@ -70,10 +71,10 @@ def job_factory(client, virtual_cluster_factory):
     ]
 
     job_list = []
-    for i in range(len(job_state)):
-        with patch("moto.emrcontainers.models.JOB_STATUS", job_state[i]):
+    for idx, state in enumerate(job_state):
+        with patch("moto.emrcontainers.models.JOB_STATUS", state):
             resp = client.start_job_run(
-                name=f"test_job_{i}",
+                name=f"test_job_{idx}",
                 virtualClusterId=virtual_cluster_id,
                 executionRoleArn=default_execution_role_arn,
                 releaseLabel=default_release_label,
@@ -87,7 +88,7 @@ def job_factory(client, virtual_cluster_factory):
 
 class TestCreateVirtualCluster:
     @staticmethod
-    @mock_emrcontainers
+    @mock_aws
     def test_create_virtual_cluster(client):
         resp = client.create_virtual_cluster(
             name="test-emr-virtual-cluster",
@@ -109,7 +110,7 @@ class TestCreateVirtualCluster:
         assert cluster_count == 1
 
     @staticmethod
-    @mock_emrcontainers
+    @mock_aws
     def test_create_virtual_cluster_on_same_namespace(client):
         client.create_virtual_cluster(
             name="test-emr-virtual-cluster",
@@ -168,16 +169,19 @@ class TestDescribeVirtualCluster:
         resp = self.client.describe_virtual_cluster(id=self.virtual_cluster_ids[0])
 
         expected_resp = {
-            "arn": f"arn:aws:emr-containers:us-east-1:{ACCOUNT_ID}:/virtualclusters/{self.virtual_cluster_ids[0]}",
+            "arn": (
+                f"arn:aws:emr-containers:us-east-1:{ACCOUNT_ID}:"
+                f"/virtualclusters/{self.virtual_cluster_ids[0]}"
+            ),
             "containerProvider": {
                 "id": "test-eks-cluster",
                 "info": {"eksInfo": {"namespace": "emr-container-0"}},
                 "type": "EKS",
             },
             "createdAt": (
-                datetime.today()
+                utcnow()
                 .replace(hour=0, minute=0, second=0, microsecond=0)
-                .replace(tzinfo=timezone.utc)
+                .replace(tzinfo=tzutc())
             ),
             "id": self.virtual_cluster_ids[0],
             "name": "test-emr-virtual-cluster",
@@ -197,7 +201,7 @@ class TestDescribeVirtualCluster:
 
 
 class TestListVirtualClusters:
-    today = datetime.now()
+    today = utcnow()
     yesterday = today - timedelta(days=1)
     tomorrow = today + timedelta(days=1)
 
@@ -250,16 +254,25 @@ class TestListVirtualClusters:
     def test_next_token(self):
         resp = self.client.list_virtual_clusters(maxResults=2)
         assert len(resp["virtualClusters"]) == 2
+        assert "nextToken" in resp
 
         resp = self.client.list_virtual_clusters(nextToken=resp["nextToken"])
         assert len(resp["virtualClusters"]) == 2
+        assert "nextToken" not in resp
+
+        resp = self.client.list_virtual_clusters(maxResults=4)
+        assert len(resp["virtualClusters"]) == 4
+        assert "nextToken" not in resp
 
 
 class TestStartJobRun:
     default_job_driver = {
         "sparkSubmitJobDriver": {
             "entryPoint": "s3://code/pi.py",
-            "sparkSubmitParameters": "--conf spark.executor.instances=2 --conf spark.executor.memory=2G --conf spark.driver.memory=2G --conf spark.executor.cores=4",
+            "sparkSubmitParameters": (
+                "--conf spark.executor.instances=2 --conf spark.executor.memory=2G"
+                "--conf spark.driver.memory=2G --conf spark.executor.cores=4"
+            ),
         }
     }
 
@@ -300,27 +313,11 @@ class TestStartJobRun:
 
         assert re.match(r"[a-z,0-9]{19}", resp["id"])
         assert resp["name"] == "test_job"
-        assert (
-            resp["arn"]
-            == f"arn:aws:emr-containers:us-east-1:{ACCOUNT_ID}:/virtualclusters/{self.virtual_cluster_id}/jobruns/{resp['id']}"
+        assert resp["arn"] == (
+            f"arn:aws:emr-containers:us-east-1:{ACCOUNT_ID}:"
+            f"/virtualclusters/{self.virtual_cluster_id}/jobruns/{resp['id']}"
         )
         assert resp["virtualClusterId"] == self.virtual_cluster_id
-
-    def test_invalid_execution_role_arn(self):
-        with pytest.raises(ParamValidationError) as exc:
-            self.client.start_job_run(
-                name="test_job",
-                virtualClusterId="foobaa",
-                executionRoleArn="foobaa",
-                releaseLabel="foobaa",
-                jobDriver={},
-            )
-
-        assert exc.typename == "ParamValidationError"
-        assert (
-            "Parameter validation failed:\nInvalid length for parameter executionRoleArn, value: 6, valid min length: 20"
-            in exc.value.args
-        )
 
     def test_invalid_virtual_cluster_id(self):
         with pytest.raises(ClientError) as exc:
@@ -405,7 +402,7 @@ class TestCancelJobRun:
         err = exc.value.response["Error"]
 
         assert err["Code"] == "ResourceNotFoundException"
-        assert err["Message"] == f"Job run 123456789abcdefghij doesn't exist."
+        assert err["Message"] == "Job run 123456789abcdefghij doesn't exist."
 
     def test_wrong_job_state(self):
         with pytest.raises(ClientError) as exc:
@@ -423,7 +420,7 @@ class TestCancelJobRun:
 
 
 class TestListJobRuns:
-    today = datetime.now()
+    today = utcnow()
     yesterday = today - timedelta(days=1)
     tomorrow = today + timedelta(days=1)
 
@@ -504,17 +501,21 @@ class TestDescribeJobRun:
         )
 
         expected = {
-            "arn": f"arn:aws:emr-containers:us-east-1:{ACCOUNT_ID}:/virtualclusters/{self.virtual_cluster_id}/jobruns/{self.job_list[2]}",
+            "arn": (
+                f"arn:aws:emr-containers:us-east-1:{ACCOUNT_ID}"
+                f":/virtualclusters/{self.virtual_cluster_id}"
+                f"/jobruns/{self.job_list[2]}"
+            ),
             "createdAt": (
-                datetime.today()
+                utcnow()
                 .replace(hour=0, minute=0, second=0, microsecond=0)
-                .replace(tzinfo=timezone.utc)
+                .replace(tzinfo=tzutc())
             ),
             "executionRoleArn": f"arn:aws:iam::{ACCOUNT_ID}:role/iamrole-emrcontainers",
             "finishedAt": (
-                datetime.today()
+                utcnow()
                 .replace(hour=0, minute=1, second=0, microsecond=0)
-                .replace(tzinfo=timezone.utc)
+                .replace(tzinfo=tzutc())
             ),
             "id": self.job_list[2],
             "jobDriver": {
@@ -577,4 +578,4 @@ class TestDescribeJobRun:
         err = exc.value.response["Error"]
 
         assert err["Code"] == "ResourceNotFoundException"
-        assert err["Message"] == f"Job run 123456789abcdefghij doesn't exist."
+        assert err["Message"] == "Job run 123456789abcdefghij doesn't exist."

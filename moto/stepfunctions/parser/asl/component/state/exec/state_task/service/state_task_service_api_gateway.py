@@ -1,0 +1,305 @@
+from __future__ import annotations
+
+import http
+import json
+import logging
+from json import JSONDecodeError
+from typing import Any, Final, TypedDict
+from urllib.parse import urlencode, urljoin
+
+import requests
+from requests import Response
+
+from moto.moto_api._internal import mock_random
+from moto.stepfunctions.parser.api import HistoryEventType, TaskFailedEventDetails
+from moto.stepfunctions.parser.asl.component.common.error_name.custom_error_name import (
+    CustomErrorName,
+)
+from moto.stepfunctions.parser.asl.component.common.error_name.failure_event import (
+    FailureEvent,
+)
+from moto.stepfunctions.parser.asl.component.state.exec.state_task.credentials import (
+    StateCredentials,
+)
+from moto.stepfunctions.parser.asl.component.state.exec.state_task.service.resource import (
+    ResourceCondition,
+    ResourceRuntimePart,
+)
+from moto.stepfunctions.parser.asl.component.state.exec.state_task.service.state_task_service_callback import (
+    StateTaskServiceCallback,
+)
+from moto.stepfunctions.parser.asl.eval.environment import Environment
+from moto.stepfunctions.parser.asl.eval.event.event_detail import EventDetails
+
+LOG = logging.getLogger(__name__)
+
+_SUPPORTED_INTEGRATION_PATTERNS: set[ResourceCondition] = {
+    ResourceCondition.WaitForTaskToken,
+}
+
+APPLICATION_JSON = "application/json"
+HEADER_CONTENT_TYPE = "Content-Type"
+PATH_USER_REQUEST = "_user_request_"
+
+ApiEndpoint = str
+Headers = dict
+Stage = str
+Path = str
+QueryParameters = dict
+RequestBody = dict | str
+ResponseBody = dict | str
+StatusCode = int
+StatusText = str
+AllowNullValues = bool
+
+
+class Method(str):
+    GET = "GET"
+    POST = "POST"
+    PUT = "PUT"
+    DELETE = "DELETE"
+    PATCH = "PATCH"
+    HEAD = "HEAD"
+    OPTIONS = "OPTIONS"
+
+
+class AuthType(str):
+    NO_AUTH = "NO_AUTH"
+    IAM_ROLE = "IAM_ROLE"
+    RESOURCE_POLICY = "RESOURCE_POLICY"
+
+
+class TaskParameters(TypedDict):
+    ApiEndpoint: ApiEndpoint
+    Method: Method
+    Headers: Headers | None
+    Stage: Stage | None
+    Path: Path | None
+    QueryParameters: QueryParameters | None
+    RequestBody: RequestBody | None
+    AllowNullValues: AllowNullValues | None
+    AuthType: AuthType | None
+
+
+class InvokeOutput(TypedDict):
+    Headers: Headers
+    ResponseBody: ResponseBody
+    StatusCode: StatusCode
+    StatusText: StatusText
+
+
+class SupportedApiCalls(str):
+    invoke = "invoke"
+
+
+class SfnGatewayException(Exception):
+    parameters: Final[TaskParameters]
+    response: Final[Response]
+
+    def __init__(self, parameters: TaskParameters, response: Response):
+        self.parameters = parameters
+        self.response = response
+
+
+class StateTaskServiceApiGateway(StateTaskServiceCallback):
+    _SUPPORTED_API_PARAM_BINDINGS: Final[dict[str, set[str]]] = {
+        SupportedApiCalls.invoke: {
+            "ApiEndpoint",
+            "Method",
+            "Headers",
+            "Stage",
+            "Path",
+            "QueryParameters",
+            "RequestBody",
+            "AllowNullValues",
+            "AuthType",
+        }
+    }
+
+    _FORBIDDEN_HTTP_HEADERS_PREFIX: Final[set[str]] = {"X-Forwarded", "X-Amz", "X-Amzn"}
+    _FORBIDDEN_HTTP_HEADERS: Final[set[str]] = {
+        "Authorization",
+        "Connection",
+        "Content-md5",
+        "Expect",
+        "Host",
+        "Max-Forwards",
+        "Proxy-Authenticate",
+        "Server",
+        "TE",
+        "Transfer-Encoding",
+        "Trailer",
+        "Upgrade",
+        "Via",
+        "Www-Authenticate",
+    }
+
+    def __init__(self):
+        super().__init__(supported_integration_patterns=_SUPPORTED_INTEGRATION_PATTERNS)
+
+    def _get_supported_parameters(self) -> set[str] | None:
+        return self._SUPPORTED_API_PARAM_BINDINGS.get(self.resource.api_action.lower())
+
+    def _normalise_parameters(
+        self,
+        parameters: dict[str, Any],
+        boto_service_name: str | None = None,
+        service_action_name: str | None = None,
+    ) -> None:
+        # ApiGateway does not support botocore request relay.
+        pass
+
+    def _normalise_response(
+        self,
+        response: Any,
+        boto_service_name: str | None = None,
+        service_action_name: str | None = None,
+    ) -> None:
+        # ApiGateway does not support botocore request relay.
+        pass
+
+    @staticmethod
+    def _query_parameters_of(parameters: TaskParameters) -> str | None:
+        query_parameters = parameters.get("QueryParameters") or {}
+        # AWS omits keys without a value, whatever the value of AllowNullValues
+        present = {
+            key: value
+            for key, value in query_parameters.items()
+            if value not in (None, [])
+        }
+        if not present:
+            return None
+        return f"?{urlencode(present, doseq=True)}"
+
+    @staticmethod
+    def _headers_of(parameters: TaskParameters) -> dict | None:
+        given_headers = parameters.get("Headers") or {}
+        headers = {}
+        if given_headers:
+            for key, value in given_headers.items():
+                # TODO: the following check takes place at parse time.
+                if key in StateTaskServiceApiGateway._FORBIDDEN_HTTP_HEADERS:
+                    raise ValueError(
+                        f"The 'Headers' field contains unsupported values: {key}"
+                    )
+                for (
+                    forbidden_prefix
+                ) in StateTaskServiceApiGateway._FORBIDDEN_HTTP_HEADERS_PREFIX:
+                    if key.startswith(forbidden_prefix):
+                        raise ValueError(
+                            f"The 'Headers' field contains unsupported values: {key}"
+                        )
+                if isinstance(value, list):
+                    headers[key] = ", ".join(value)
+                else:
+                    headers[key] = value
+            if parameters.get("RequestBody") is not None:
+                headers[HEADER_CONTENT_TYPE] = APPLICATION_JSON
+        headers["Accept"] = APPLICATION_JSON
+        return headers
+
+    @staticmethod
+    def _invoke_url_of(parameters: TaskParameters) -> str:
+        given_api_endpoint = parameters["ApiEndpoint"]
+        api_endpoint = given_api_endpoint
+
+        url_base = api_endpoint + "/"
+        # http://localhost:4566/restapis/<api-id>/<stage>/_user_request_/<path>(?<query-parameters>)?
+        url_tail = "/".join(
+            [
+                parameters.get("Stage") or "",
+                PATH_USER_REQUEST,
+                parameters.get("Path") or "",
+            ]
+        )
+        query_str = StateTaskServiceApiGateway._query_parameters_of(parameters) or ""
+        invoke_url = urljoin(url_base, url_tail) + query_str
+        return invoke_url
+
+    @staticmethod
+    def _invoke_output_of(response: Response) -> InvokeOutput:
+        status_code = response.status_code
+        status_text = http.HTTPStatus(status_code).phrase
+
+        headers = dict(response.headers)
+
+        try:
+            response_body = response.json()
+        except JSONDecodeError:
+            response_body = response.text
+            if response_body == json.dumps({}):
+                response_body = {}
+
+        headers.pop("server", None)
+        if "date" in headers:
+            headers["Date"] = [headers.pop("date")]
+        headers[HEADER_CONTENT_TYPE] = [APPLICATION_JSON]
+        if "Content-Length" in headers:
+            headers["Content-Length"] = [headers["Content-Length"]]
+        # TODO: add support for the following generated fields.
+        headers["Connection"] = ["keep-alive"]
+        headers["x-amz-apigw-id"] = [str(mock_random.uuid4())]
+        headers["X-Amz-Cf-Id"] = [str(mock_random.uuid4())]
+        headers["X-Amz-Cf-Pop"] = [str(mock_random.uuid4())]
+        headers["x-amzn-RequestId"] = [str(mock_random.uuid4())]
+        headers["X-Amzn-Trace-Id"] = [str(mock_random.uuid4())]
+        headers["X-Cache"] = ["Miss from cloudfront"]
+        headers["Via"] = ["UNSUPPORTED"]
+
+        return InvokeOutput(
+            Headers=headers,
+            ResponseBody=response_body,
+            StatusCode=status_code,
+            StatusText=status_text,
+        )
+
+    def _from_error(self, env: Environment, ex: Exception) -> FailureEvent:
+        if isinstance(ex, SfnGatewayException):
+            error_name = f"ApiGateway.{ex.response.status_code}"
+            cause = ex.response.text
+        else:
+            ex_name = ex.__class__.__name__
+            error_name = f"ApiGateway.{ex_name}"
+            cause = str(ex)
+        return FailureEvent(
+            env=env,
+            error_name=CustomErrorName(error_name),
+            event_type=HistoryEventType.TaskFailed,
+            event_details=EventDetails(
+                taskFailedEventDetails=TaskFailedEventDetails(
+                    error=error_name,
+                    cause=cause,  # TODO: add support for cause decoration.
+                    resource=self._get_sfn_resource(),
+                    resourceType=self._get_sfn_resource_type(),
+                )
+            ),
+        )
+
+    def _eval_service_task(
+        self,
+        env: Environment,
+        resource_runtime_part: ResourceRuntimePart,
+        normalised_parameters: dict,
+        state_credentials: StateCredentials,
+    ):
+        task_parameters: TaskParameters = normalised_parameters
+
+        method = task_parameters["Method"]
+        invoke_url = self._invoke_url_of(task_parameters)
+        headers = self._headers_of(task_parameters)
+        json_data = task_parameters.get("RequestBody")
+
+        # RequestBody is only supported for PATCH, POST, and PUT
+        # AWS drops it for other methods
+        if method not in {Method.PATCH, Method.POST, Method.PUT}:
+            json_data = None
+
+        response: Response = getattr(requests, method.lower())(
+            invoke_url, headers=headers, json=json_data
+        )
+
+        if not 200 <= response.status_code < 300:
+            raise SfnGatewayException(parameters=task_parameters, response=response)
+
+        invoke_output = self._invoke_output_of(response)
+        env.stack.append(invoke_output)

@@ -1,54 +1,56 @@
 import re
 import time
-
-from boto3 import Session
+from collections.abc import Iterable
 from datetime import datetime
-from moto.core import ACCOUNT_ID, BaseBackend, BaseModel
-from moto.core.utils import iso_8601_datetime_without_milliseconds
+from typing import Any
+
+from moto.core.base_backend import BackendDict, BaseBackend
+from moto.core.common_models import BaseModel
+from moto.core.utils import iso_8601_datetime_without_milliseconds, utcnow
+from moto.utilities.tagging_service import TaggingService
+from moto.utilities.utils import get_partition
+
 from .exceptions import (
-    S3BucketDoesNotExistException,
     InsufficientSnsTopicPolicyException,
+    S3BucketDoesNotExistException,
+    TrailNameInvalidChars,
+    TrailNameNotEndingCorrectly,
+    TrailNameNotStartingCorrectly,
     TrailNameTooLong,
     TrailNameTooShort,
-    TrailNameNotStartingCorrectly,
-    TrailNameNotEndingCorrectly,
-    TrailNameInvalidChars,
     TrailNotFoundException,
 )
 
 
-def datetime2int(date):
+def datetime2int(date: datetime) -> int:
     return int(time.mktime(date.timetuple()))
 
 
-class TrailStatus(object):
-    def __init__(self):
+class TrailStatus:
+    def __init__(self) -> None:
         self.is_logging = False
-        self.latest_delivery_time = ""
-        self.latest_delivery_attempt = ""
-        self.start_logging_time = None
-        self.started = None
-        self.stopped = None
+        self.latest_delivery_time: int | None = None
+        self.latest_delivery_attempt: str | None = ""
+        self.started: datetime | None = None
+        self.stopped: datetime | None = None
 
-    def start_logging(self):
+    def start_logging(self) -> None:
         self.is_logging = True
-        self.started = datetime.utcnow()
-        self.latest_delivery_time = datetime2int(datetime.utcnow())
-        self.latest_delivery_attempt = iso_8601_datetime_without_milliseconds(
-            datetime.utcnow()
-        )
+        self.started = utcnow()
+        self.latest_delivery_time = datetime2int(utcnow())
+        self.latest_delivery_attempt = iso_8601_datetime_without_milliseconds(utcnow())
 
-    def stop_logging(self):
+    def stop_logging(self) -> None:
         self.is_logging = False
-        self.stopped = datetime.utcnow()
+        self.stopped = utcnow()
 
-    def description(self):
+    def description(self) -> dict[str, Any]:
         if self.is_logging:
-            self.latest_delivery_time = datetime2int(datetime.utcnow())
+            self.latest_delivery_time = datetime2int(utcnow())
             self.latest_delivery_attempt = iso_8601_datetime_without_milliseconds(
-                datetime.utcnow()
+                utcnow()
             )
-        desc = {
+        desc: dict[str, Any] = {
             "IsLogging": self.is_logging,
             "LatestDeliveryAttemptTime": self.latest_delivery_attempt,
             "LatestNotificationAttemptTime": "",
@@ -74,16 +76,23 @@ class TrailStatus(object):
 class Trail(BaseModel):
     def __init__(
         self,
-        region_name,
-        trail_name,
-        bucket_name,
-        s3_key_prefix,
-        sns_topic_name,
-        is_multi_region,
-        log_validation,
-        is_org_trail,
+        account_id: str,
+        region_name: str,
+        trail_name: str,
+        bucket_name: str,
+        s3_key_prefix: str,
+        sns_topic_name: str,
+        is_global: bool,
+        is_multi_region: bool,
+        log_validation: bool,
+        is_org_trail: bool,
+        cw_log_group_arn: str,
+        cw_role_arn: str,
+        kms_key_id: str,
     ):
+        self.account_id = account_id
         self.region_name = region_name
+        self.partition = get_partition(region_name)
         self.trail_name = trail_name
         self.bucket_name = bucket_name
         self.s3_key_prefix = s3_key_prefix
@@ -91,22 +100,29 @@ class Trail(BaseModel):
         self.is_multi_region = is_multi_region
         self.log_validation = log_validation
         self.is_org_trail = is_org_trail
+        self.include_global_service_events = is_global
+        self.cw_log_group_arn = cw_log_group_arn
+        self.cw_role_arn = cw_role_arn
+        self.kms_key_id = kms_key_id
         self.check_name()
         self.check_bucket_exists()
         self.check_topic_exists()
         self.status = TrailStatus()
+        self.event_selectors: list[dict[str, Any]] = []
+        self.advanced_event_selectors: list[dict[str, Any]] = []
+        self.insight_selectors: list[dict[str, str]] = []
 
     @property
-    def arn(self):
-        return f"arn:aws:cloudtrail:{self.region_name}:{ACCOUNT_ID}:trail/{self.trail_name}"
+    def arn(self) -> str:
+        return f"arn:{get_partition(self.region_name)}:cloudtrail:{self.region_name}:{self.account_id}:trail/{self.trail_name}"
 
     @property
-    def topic_arn(self):
+    def topic_arn(self) -> str | None:
         if self.sns_topic_name:
-            return f"arn:aws:sns:{self.region_name}:{ACCOUNT_ID}:{self.sns_topic_name}"
+            return f"arn:{get_partition(self.region_name)}:sns:{self.region_name}:{self.account_id}:{self.sns_topic_name}"
         return None
 
-    def check_name(self):
+    def check_name(self) -> None:
         if len(self.trail_name) < 3:
             raise TrailNameTooShort(actual_length=len(self.trail_name))
         if len(self.trail_name) > 128:
@@ -118,21 +134,21 @@ class Trail(BaseModel):
         if not re.match(r"^[.\-_0-9a-zA-Z]+$", self.trail_name):
             raise TrailNameInvalidChars()
 
-    def check_bucket_exists(self):
-        from moto.s3 import s3_backend
+    def check_bucket_exists(self) -> None:
+        from moto.s3.models import s3_backends
 
         try:
-            s3_backend.get_bucket(self.bucket_name)
+            s3_backends[self.account_id][self.partition].get_bucket(self.bucket_name)
         except Exception:
             raise S3BucketDoesNotExistException(
                 f"S3 bucket {self.bucket_name} does not exist!"
             )
 
-    def check_topic_exists(self):
-        if self.sns_topic_name:
+    def check_topic_exists(self) -> None:
+        if self.topic_arn:
             from moto.sns import sns_backends
 
-            sns_backend = sns_backends[self.region_name]
+            sns_backend = sns_backends[self.account_id][self.region_name]
             try:
                 sns_backend.get_topic(self.topic_arn)
             except Exception:
@@ -140,30 +156,87 @@ class Trail(BaseModel):
                     "SNS Topic does not exist or the topic policy is incorrect!"
                 )
 
-    def start_logging(self):
+    def start_logging(self) -> None:
         self.status.start_logging()
 
-    def stop_logging(self):
+    def stop_logging(self) -> None:
         self.status.stop_logging()
 
-    def short(self):
+    def put_event_selectors(
+        self,
+        event_selectors: list[dict[str, Any]],
+        advanced_event_selectors: list[dict[str, Any]],
+    ) -> None:
+        if event_selectors:
+            self.event_selectors = event_selectors
+        elif advanced_event_selectors:
+            self.event_selectors = []
+            self.advanced_event_selectors = advanced_event_selectors
+
+    def get_event_selectors(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        return self.event_selectors, self.advanced_event_selectors
+
+    def put_insight_selectors(self, insight_selectors: list[dict[str, str]]) -> None:
+        self.insight_selectors.extend(insight_selectors)
+
+    def get_insight_selectors(self) -> list[dict[str, str]]:
+        return self.insight_selectors
+
+    def update(
+        self,
+        s3_bucket_name: str | None,
+        s3_key_prefix: str | None,
+        sns_topic_name: str | None,
+        include_global_service_events: bool | None,
+        is_multi_region_trail: bool | None,
+        enable_log_file_validation: bool | None,
+        is_organization_trail: bool | None,
+        cw_log_group_arn: str | None,
+        cw_role_arn: str | None,
+        kms_key_id: str | None,
+    ) -> None:
+        if s3_bucket_name is not None:
+            self.bucket_name = s3_bucket_name
+        if s3_key_prefix is not None:
+            self.s3_key_prefix = s3_key_prefix
+        if sns_topic_name is not None:
+            self.sns_topic_name = sns_topic_name
+        if include_global_service_events is not None:
+            self.include_global_service_events = include_global_service_events
+        if is_multi_region_trail is not None:
+            self.is_multi_region = is_multi_region_trail
+        if enable_log_file_validation is not None:
+            self.log_validation = enable_log_file_validation
+        if is_organization_trail is not None:
+            self.is_org_trail = is_organization_trail
+        if cw_log_group_arn is not None:
+            self.cw_log_group_arn = cw_log_group_arn
+        if cw_role_arn is not None:
+            self.cw_role_arn = cw_role_arn
+        if kms_key_id is not None:
+            self.kms_key_id = kms_key_id
+
+    def short(self) -> dict[str, str]:
         return {
             "Name": self.trail_name,
             "TrailARN": self.arn,
             "HomeRegion": self.region_name,
         }
 
-    def description(self, include_region=False):
+    def description(self, include_region: bool = False) -> dict[str, Any]:
         desc = {
             "Name": self.trail_name,
             "S3BucketName": self.bucket_name,
-            "IncludeGlobalServiceEvents": True,
+            "IncludeGlobalServiceEvents": self.include_global_service_events,
             "IsMultiRegionTrail": self.is_multi_region,
             "TrailARN": self.arn,
             "LogFileValidationEnabled": self.log_validation,
             "IsOrganizationTrail": self.is_org_trail,
             "HasCustomEventSelectors": False,
             "HasInsightSelectors": False,
+            "CloudWatchLogsLogGroupArn": self.cw_log_group_arn,
+            "CloudWatchLogsRoleArn": self.cw_role_arn,
+            "KmsKeyId": self.kms_key_id,
         }
         if self.s3_key_prefix is not None:
             desc["S3KeyPrefix"] = self.s3_key_prefix
@@ -178,97 +251,177 @@ class Trail(BaseModel):
 class CloudTrailBackend(BaseBackend):
     """Implementation of CloudTrail APIs."""
 
-    def __init__(self, region_name):
-        self.region_name = region_name
-        self.trails = dict()
+    def __init__(self, region_name: str, account_id: str):
+        super().__init__(region_name, account_id)
+        self.trails: dict[str, Trail] = {}
+        self.tagging_service = TaggingService(tag_name="TagsList")
 
     def create_trail(
         self,
-        name,
-        bucket_name,
-        s3_key_prefix,
-        sns_topic_name,
-        is_multi_region,
-        log_validation,
-        is_org_trail,
-    ):
+        name: str,
+        bucket_name: str,
+        s3_key_prefix: str,
+        sns_topic_name: str,
+        is_global: bool,
+        is_multi_region: bool,
+        log_validation: bool,
+        is_org_trail: bool,
+        cw_log_group_arn: str,
+        cw_role_arn: str,
+        kms_key_id: str,
+        tags_list: list[dict[str, str]],
+    ) -> Trail:
         trail = Trail(
+            self.account_id,
             self.region_name,
             name,
             bucket_name,
             s3_key_prefix,
             sns_topic_name,
+            is_global,
             is_multi_region,
             log_validation,
             is_org_trail,
+            cw_log_group_arn,
+            cw_role_arn,
+            kms_key_id,
         )
         self.trails[name] = trail
+        self.tagging_service.tag_resource(trail.arn, tags_list)
         return trail
 
-    def get_trail(self, name):
-        if len(name) < 3:
-            raise TrailNameTooShort(actual_length=len(name))
-        if name not in self.trails:
-            raise TrailNotFoundException(name)
-        return self.trails[name]
+    def get_trail(self, name_or_arn: str) -> Trail:
+        if len(name_or_arn) < 3:
+            raise TrailNameTooShort(actual_length=len(name_or_arn))
+        if name_or_arn in self.trails:
+            return self.trails[name_or_arn]
+        for trail in self.trails.values():
+            if trail.arn == name_or_arn:
+                return trail
+        raise TrailNotFoundException(account_id=self.account_id, name=name_or_arn)
 
-    def get_trail_status(self, name):
+    def get_trail_status(self, name: str) -> TrailStatus:
         if len(name) < 3:
             raise TrailNameTooShort(actual_length=len(name))
-        trail_name = next(
+
+        all_trails = self.describe_trails(include_shadow_trails=True)
+        trail = next(
             (
-                trail.trail_name
-                for trail in self.trails.values()
+                trail
+                for trail in all_trails
                 if trail.trail_name == name or trail.arn == name
             ),
             None,
         )
-        if not trail_name:
+        if not trail:
             # This particular method returns the ARN as part of the error message
-            arn = f"arn:aws:cloudtrail:{self.region_name}:{ACCOUNT_ID}:trail/{name}"
-            raise TrailNotFoundException(name=arn)
-        trail = self.trails[trail_name]
+            arn = f"arn:{get_partition(self.region_name)}:cloudtrail:{self.region_name}:{self.account_id}:trail/{name}"
+            raise TrailNotFoundException(account_id=self.account_id, name=arn)
         return trail.status
 
-    def describe_trails(self, include_shadow_trails):
+    def describe_trails(self, include_shadow_trails: bool) -> Iterable[Trail]:
         all_trails = []
         if include_shadow_trails:
-            for backend in cloudtrail_backends.values():
-                all_trails.extend(backend.trails.values())
+            current_account = cloudtrail_backends[self.account_id]
+            for backend in current_account.values():
+                for trail in backend.trails.values():
+                    if trail.is_multi_region or trail.region_name == self.region_name:
+                        all_trails.append(trail)
         else:
             all_trails.extend(self.trails.values())
         return all_trails
 
-    def list_trails(self):
+    def list_trails(self) -> Iterable[Trail]:
         return self.describe_trails(include_shadow_trails=True)
 
-    def start_logging(self, name):
-        trail = self.trails[name]
+    def start_logging(self, name: str) -> None:
+        trail = self.get_trail(name)
         trail.start_logging()
 
-    def stop_logging(self, name):
-        trail = self.trails[name]
+    def stop_logging(self, name: str) -> None:
+        trail = self.get_trail(name)
         trail.stop_logging()
 
-    def delete_trail(self, name):
+    def delete_trail(self, name: str) -> None:
         if name in self.trails:
             del self.trails[name]
 
-    def reset(self):
-        """Re-initialize all attributes for this instance."""
-        region_name = self.region_name
-        self.__dict__ = {}
-        self.__init__(region_name)
+    def update_trail(
+        self,
+        name: str,
+        s3_bucket_name: str,
+        s3_key_prefix: str,
+        sns_topic_name: str,
+        include_global_service_events: bool,
+        is_multi_region_trail: bool,
+        enable_log_file_validation: bool,
+        is_organization_trail: bool,
+        cw_log_group_arn: str,
+        cw_role_arn: str,
+        kms_key_id: str,
+    ) -> Trail:
+        trail = self.get_trail(name_or_arn=name)
+        trail.update(
+            s3_bucket_name=s3_bucket_name,
+            s3_key_prefix=s3_key_prefix,
+            sns_topic_name=sns_topic_name,
+            include_global_service_events=include_global_service_events,
+            is_multi_region_trail=is_multi_region_trail,
+            enable_log_file_validation=enable_log_file_validation,
+            is_organization_trail=is_organization_trail,
+            cw_log_group_arn=cw_log_group_arn,
+            cw_role_arn=cw_role_arn,
+            kms_key_id=kms_key_id,
+        )
+        return trail
+
+    def put_event_selectors(
+        self,
+        trail_name: str,
+        event_selectors: list[dict[str, Any]],
+        advanced_event_selectors: list[dict[str, Any]],
+    ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+        trail = self.get_trail(trail_name)
+        trail.put_event_selectors(event_selectors, advanced_event_selectors)
+        trail_arn = trail.arn
+        return trail_arn, event_selectors, advanced_event_selectors
+
+    def get_event_selectors(
+        self, trail_name: str
+    ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+        trail = self.get_trail(trail_name)
+        event_selectors, advanced_event_selectors = trail.get_event_selectors()
+        return trail.arn, event_selectors, advanced_event_selectors
+
+    def add_tags(self, resource_id: str, tags_list: list[dict[str, str]]) -> None:
+        self.tagging_service.tag_resource(resource_id, tags_list)
+
+    def remove_tags(self, resource_id: str, tags_list: list[dict[str, str]]) -> None:
+        self.tagging_service.untag_resource_using_tags(resource_id, tags_list)
+
+    def list_tags(self, resource_id_list: list[str]) -> list[dict[str, Any]]:
+        """
+        Pagination is not yet implemented
+        """
+        resp: list[dict[str, Any]] = [{"ResourceId": r_id} for r_id in resource_id_list]
+        for item in resp:
+            item["TagsList"] = self.tagging_service.list_tags_for_resource(
+                item["ResourceId"]
+            )["TagsList"]
+        return resp
+
+    def put_insight_selectors(
+        self, trail_name: str, insight_selectors: list[dict[str, str]]
+    ) -> tuple[str, list[dict[str, str]]]:
+        trail = self.get_trail(trail_name)
+        trail.put_insight_selectors(insight_selectors)
+        return trail.arn, insight_selectors
+
+    def get_insight_selectors(
+        self, trail_name: str
+    ) -> tuple[str, list[dict[str, str]]]:
+        trail = self.get_trail(trail_name)
+        return trail.arn, trail.get_insight_selectors()
 
 
-cloudtrail_backends = {}
-for available_region in Session().get_available_regions("cloudtrail"):
-    cloudtrail_backends[available_region] = CloudTrailBackend(available_region)
-for available_region in Session().get_available_regions(
-    "cloudtrail", partition_name="aws-us-gov"
-):
-    cloudtrail_backends[available_region] = CloudTrailBackend(available_region)
-for available_region in Session().get_available_regions(
-    "cloudtrail", partition_name="aws-cn"
-):
-    cloudtrail_backends[available_region] = CloudTrailBackend(available_region)
+cloudtrail_backends = BackendDict(CloudTrailBackend, "cloudtrail")

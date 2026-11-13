@@ -1,2 +1,5 @@
-def make_arn_for_lexicon(account_id, name, region_name):
-    return "arn:aws:polly:{0}:{1}:lexicon/{2}".format(region_name, account_id, name)
+from moto.utilities.utils import get_partition
+
+
+def make_arn_for_lexicon(account_id: str, name: str, region_name: str) -> str:
+    return f"arn:{get_partition(region_name)}:polly:{region_name}:{account_id}:lexicon/{name}"

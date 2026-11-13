@@ -1,11 +1,13 @@
-import boto3
+import json
+from typing import Any
 from uuid import uuid4
 
+import boto3
 
 DEFAULT_REGION = "eu-central-1"
 
 
-def _get_clients():
+def _get_clients() -> tuple[Any, Any, Any, Any, Any]:
     return (
         boto3.client("ec2", region_name=DEFAULT_REGION),
         boto3.client("iam", region_name=DEFAULT_REGION),
@@ -15,7 +17,7 @@ def _get_clients():
     )
 
 
-def _setup(ec2_client, iam_client):
+def _setup(ec2_client: Any, iam_client: Any) -> tuple[str, str, str, str]:
     """
     Do prerequisite setup
     :return: VPC ID, Subnet ID, Security group ID, IAM Role ARN
@@ -28,13 +30,26 @@ def _setup(ec2_client, iam_client):
     )
     subnet_id = resp["Subnet"]["SubnetId"]
     resp = ec2_client.create_security_group(
-        Description="test_sg_desc", GroupName=str(uuid4())[0:6], VpcId=vpc_id
+        Description="test_sg_desc", GroupName=f"sg-{uuid4()}", VpcId=vpc_id
     )
     sg_id = resp["GroupId"]
 
-    role_name = f"{str(uuid4())[0:6]}"
+    role_name = f"batch-role-{uuid4()}"
+    assume_role_policy = json.dumps(
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {"Service": "batch.amazonaws.com"},
+                    "Action": "sts:AssumeRole",
+                }
+            ],
+        }
+    )
+
     resp = iam_client.create_role(
-        RoleName=role_name, AssumeRolePolicyDocument="some_policy"
+        RoleName=role_name, AssumeRolePolicyDocument=assume_role_policy
     )
     iam_arn = resp["Role"]["Arn"]
     iam_client.create_instance_profile(InstanceProfileName=role_name)

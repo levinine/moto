@@ -1,13 +1,15 @@
-import boto3
 import io
-import sure  # noqa # pylint: disable=unused-import
-import zipfile
-from botocore.exceptions import ClientError
-from moto import mock_cloudformation, mock_iam, mock_lambda, mock_s3, mock_sqs
-import pytest
+import json
 import re
+import zipfile
 from string import Template
 from uuid import uuid4
+
+import boto3
+import pytest
+from botocore.exceptions import ClientError
+
+from moto import mock_aws
 
 
 def random_stack_name():
@@ -53,6 +55,26 @@ template = Template(
 }"""
 )
 
+
+code_image_template = {
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Resources": {
+        "LambdaFunction": {
+            "Type": "AWS::Lambda::Function",
+            "Properties": {
+                "FunctionName": "ContainerLambdaFunction",
+                "Role": "dummy-role-arn",
+                "Code": {
+                    "ImageUri": "123456789012.dkr.ecr.us-west-2.amazonaws.com/my-lambda-container:latest"
+                },
+                "PackageType": "Image",
+                "MemorySize": 128,
+                "Timeout": 30,
+            },
+        }
+    },
+}
+
 event_source_mapping_template = Template(
     """{
     "AWSTemplateFormatVersion": "2010-09-09",
@@ -71,9 +93,7 @@ event_source_mapping_template = Template(
 )
 
 
-@mock_cloudformation
-@mock_lambda
-@mock_s3
+@mock_aws
 def test_lambda_can_be_updated_by_cloudformation():
     s3 = boto3.client("s3", "us-east-1")
     cf = boto3.client("cloudformation", region_name="us-east-1")
@@ -83,29 +103,24 @@ def test_lambda_can_be_updated_by_cloudformation():
     created_fn_name = get_created_function_name(cf, stack)
     # Verify function has been created
     created_fn = lmbda.get_function(FunctionName=created_fn_name)
-    created_fn["Configuration"]["Handler"].should.equal(
-        "lambda_function.lambda_handler1"
-    )
-    created_fn["Configuration"]["Runtime"].should.equal("python3.7")
-    created_fn["Code"]["Location"].should.match("/test1.zip")
+    assert created_fn["Configuration"]["Handler"] == "lambda_function.lambda_handler1"
+    assert created_fn["Configuration"]["Runtime"] == "python3.9"
+    assert "/test1.zip" in created_fn["Code"]["Location"]
     # Update CF stack
     cf.update_stack(StackName=stack_name, TemplateBody=body2)
     updated_fn_name = get_created_function_name(cf, stack)
     # Verify function has been updated
     updated_fn = lmbda.get_function(FunctionName=updated_fn_name)
-    updated_fn["Configuration"]["FunctionArn"].should.equal(
-        created_fn["Configuration"]["FunctionArn"]
+    assert (
+        updated_fn["Configuration"]["FunctionArn"]
+        == created_fn["Configuration"]["FunctionArn"]
     )
-    updated_fn["Configuration"]["Handler"].should.equal(
-        "lambda_function.lambda_handler2"
-    )
-    updated_fn["Configuration"]["Runtime"].should.equal("python3.8")
-    updated_fn["Code"]["Location"].should.match("/test2.zip")
+    assert updated_fn["Configuration"]["Handler"] == "lambda_function.lambda_handler2"
+    assert updated_fn["Configuration"]["Runtime"] == "python3.10"
+    assert "/test2.zip" in updated_fn["Code"]["Location"]
 
 
-@mock_cloudformation
-@mock_lambda
-@mock_s3
+@mock_aws
 def test_lambda_can_be_deleted_by_cloudformation():
     s3 = boto3.client("s3", "us-east-1")
     cf = boto3.client("cloudformation", region_name="us-east-1")
@@ -117,13 +132,29 @@ def test_lambda_can_be_deleted_by_cloudformation():
     # Verify function was deleted
     with pytest.raises(ClientError) as e:
         lmbda.get_function(FunctionName=created_fn_name)
-    e.value.response["Error"]["Code"].should.equal("ResourceNotFoundException")
+    assert e.value.response["Error"]["Code"] == "ResourceNotFoundException"
 
 
-@mock_cloudformation
-@mock_lambda
-@mock_s3
-@mock_sqs
+@mock_aws
+def test_lambda_with_code_image_can_be_created():
+    our_template = code_image_template.copy()
+    our_template["Resources"]["LambdaFunction"]["Properties"]["Role"] = get_role_arn()
+    stack_name = f"stack{str(uuid4())[0:6]}"
+    cf = boto3.client("cloudformation", region_name="us-east-1")
+    cf.create_stack(StackName=stack_name, TemplateBody=json.dumps(code_image_template))
+
+    lmbda = boto3.client("lambda", region_name="us-east-1")
+    functions = lmbda.list_functions()["Functions"]
+    function_names = [f["FunctionName"] for f in functions]
+    assert "ContainerLambdaFunction" in function_names
+
+    cf.delete_stack(StackName=stack_name)
+    functions = lmbda.list_functions()["Functions"]
+    function_names = [f["FunctionName"] for f in functions]
+    assert "ContainerLambdaFunction" not in function_names
+
+
+@mock_aws
 def test_event_source_mapping_create_from_cloudformation_json():
     sqs = boto3.resource("sqs", region_name="us-east-1")
     s3 = boto3.client("s3", "us-east-1")
@@ -139,7 +170,7 @@ def test_event_source_mapping_create_from_cloudformation_json():
         "FunctionArn"
     ]
 
-    template = event_source_mapping_template.substitute(
+    esm_template = event_source_mapping_template.substitute(
         {
             "resource_name": "Foo",
             "batch_size": 1,
@@ -149,19 +180,16 @@ def test_event_source_mapping_create_from_cloudformation_json():
         }
     )
 
-    cf.create_stack(StackName=random_stack_name(), TemplateBody=template)
+    cf.create_stack(StackName=random_stack_name(), TemplateBody=esm_template)
     event_sources = lmbda.list_event_source_mappings(FunctionName=created_fn_name)
 
-    event_sources["EventSourceMappings"].should.have.length_of(1)
+    assert len(event_sources["EventSourceMappings"]) == 1
     event_source = event_sources["EventSourceMappings"][0]
-    event_source["EventSourceArn"].should.be.equal(queue.attributes["QueueArn"])
-    event_source["FunctionArn"].should.be.equal(created_fn_arn)
+    assert event_source["EventSourceArn"] == queue.attributes["QueueArn"]
+    assert event_source["FunctionArn"] == created_fn_arn
 
 
-@mock_cloudformation
-@mock_lambda
-@mock_s3
-@mock_sqs
+@mock_aws
 def test_event_source_mapping_delete_stack():
     sqs = boto3.resource("sqs", region_name="us-east-1")
     s3 = boto3.client("s3", "us-east-1")
@@ -174,7 +202,7 @@ def test_event_source_mapping_delete_stack():
     _, lambda_stack = create_stack(cf, s3)
     created_fn_name = get_created_function_name(cf, lambda_stack)
 
-    template = event_source_mapping_template.substitute(
+    esm_template = event_source_mapping_template.substitute(
         {
             "resource_name": "Foo",
             "batch_size": 1,
@@ -184,21 +212,20 @@ def test_event_source_mapping_delete_stack():
         }
     )
 
-    esm_stack = cf.create_stack(StackName=random_stack_name(), TemplateBody=template)
+    esm_stack = cf.create_stack(
+        StackName=random_stack_name(), TemplateBody=esm_template
+    )
     event_sources = lmbda.list_event_source_mappings(FunctionName=created_fn_name)
 
-    event_sources["EventSourceMappings"].should.have.length_of(1)
+    assert len(event_sources["EventSourceMappings"]) == 1
 
     cf.delete_stack(StackName=esm_stack["StackId"])
     event_sources = lmbda.list_event_source_mappings(FunctionName=created_fn_name)
 
-    event_sources["EventSourceMappings"].should.have.length_of(0)
+    assert len(event_sources["EventSourceMappings"]) == 0
 
 
-@mock_cloudformation
-@mock_lambda
-@mock_s3
-@mock_sqs
+@mock_aws
 def test_event_source_mapping_update_from_cloudformation_json():
     sqs = boto3.resource("sqs", region_name="us-east-1")
     s3 = boto3.client("s3", "us-east-1")
@@ -226,8 +253,8 @@ def test_event_source_mapping_update_from_cloudformation_json():
     event_sources = lmbda.list_event_source_mappings(FunctionName=created_fn_name)
     original_esm = event_sources["EventSourceMappings"][0]
 
-    original_esm["State"].should.equal("Enabled")
-    original_esm["BatchSize"].should.equal(1)
+    assert original_esm["State"] == "Enabled"
+    assert original_esm["BatchSize"] == 1
 
     # Update
     new_template = event_source_mapping_template.substitute(
@@ -244,14 +271,11 @@ def test_event_source_mapping_update_from_cloudformation_json():
     event_sources = lmbda.list_event_source_mappings(FunctionName=created_fn_name)
     updated_esm = event_sources["EventSourceMappings"][0]
 
-    updated_esm["State"].should.equal("Disabled")
-    updated_esm["BatchSize"].should.equal(10)
+    assert updated_esm["State"] == "Disabled"
+    assert updated_esm["BatchSize"] == 10
 
 
-@mock_cloudformation
-@mock_lambda
-@mock_s3
-@mock_sqs
+@mock_aws
 def test_event_source_mapping_delete_from_cloudformation_json():
     sqs = boto3.resource("sqs", region_name="us-east-1")
     s3 = boto3.client("s3", "us-east-1")
@@ -279,8 +303,8 @@ def test_event_source_mapping_delete_from_cloudformation_json():
     event_sources = lmbda.list_event_source_mappings(FunctionName=created_fn_name)
     original_esm = event_sources["EventSourceMappings"][0]
 
-    original_esm["State"].should.equal("Enabled")
-    original_esm["BatchSize"].should.equal(1)
+    assert original_esm["State"] == "Enabled"
+    assert original_esm["BatchSize"] == 1
 
     # Update with deletion of old resources
     new_template = event_source_mapping_template.substitute(
@@ -296,12 +320,12 @@ def test_event_source_mapping_delete_from_cloudformation_json():
     cf.update_stack(StackName=stack_name, TemplateBody=new_template)
     event_sources = lmbda.list_event_source_mappings(FunctionName=created_fn_name)
 
-    event_sources["EventSourceMappings"].should.have.length_of(1)
+    assert len(event_sources["EventSourceMappings"]) == 1
     updated_esm = event_sources["EventSourceMappings"][0]
 
-    updated_esm["State"].should.equal("Disabled")
-    updated_esm["BatchSize"].should.equal(10)
-    updated_esm["UUID"].shouldnt.equal(original_esm["UUID"])
+    assert updated_esm["State"] == "Disabled"
+    assert updated_esm["BatchSize"] == 10
+    assert updated_esm["UUID"] != original_esm["UUID"]
 
 
 def create_stack(cf, s3):
@@ -310,8 +334,8 @@ def create_stack(cf, s3):
     s3.create_bucket(Bucket=bucket_name)
     s3.put_object(Bucket=bucket_name, Key="test1.zip", Body=get_zip_file())
     s3.put_object(Bucket=bucket_name, Key="test2.zip", Body=get_zip_file())
-    body1 = get_template(bucket_name, "1", "python3.7")
-    body2 = get_template(bucket_name, "2", "python3.8")
+    body1 = get_template(bucket_name, "1", "python3.9")
+    body2 = get_template(bucket_name, "2", "python3.10")
     stack = cf.create_stack(StackName=stack_name, TemplateBody=body1)
     return body2, stack
 
@@ -334,15 +358,14 @@ def get_template(bucket_name, version, runtime):
 
 
 def get_role_arn():
-    with mock_iam():
-        iam = boto3.client("iam", region_name="us-west-2")
-        try:
-            iam.create_role(
-                RoleName="my-role",
-                AssumeRolePolicyDocument="some policy",
-                Path="/my-path/",
-            )
-        except ClientError:
-            pass  # Will fail second/third time - difficult to execute once with parallel tests
+    iam = boto3.client("iam", region_name="us-west-2")
+    try:
+        iam.create_role(
+            RoleName="my-role",
+            AssumeRolePolicyDocument="some policy",
+            Path="/my-path/",
+        )
+    except ClientError:
+        pass  # Will fail second/third time - difficult to execute once with parallel tests
 
-        return iam.get_role(RoleName="my-role")["Role"]["Arn"]
+    return iam.get_role(RoleName="my-role")["Role"]["Arn"]

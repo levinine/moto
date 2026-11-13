@@ -1,13 +1,15 @@
-from moto.core.exceptions import JsonRESTError
+"""Exceptions raised by the transcribe service."""
+
+from moto.core.exceptions import ServiceException
 
 
-class ConflictException(JsonRESTError):
-    def __init__(self, message, **kwargs):
-        super(ConflictException, self).__init__("ConflictException", message, **kwargs)
+class TranscribeException(ServiceException):
+    pass
 
 
-class BadRequestException(JsonRESTError):
-    def __init__(self, message, **kwargs):
-        super(BadRequestException, self).__init__(
-            "BadRequestException", message, **kwargs
-        )
+class ConflictException(TranscribeException):
+    code = "ConflictException"
+
+
+class BadRequestException(TranscribeException):
+    code = "BadRequestException"

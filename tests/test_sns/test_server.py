@@ -1,12 +1,5 @@
-from moto.core import ACCOUNT_ID
-
-import sure  # noqa # pylint: disable=unused-import
-
 import moto.server as server
-
-"""
-Test the different server responses
-"""
+from moto.core import DEFAULT_ACCOUNT_ID as ACCOUNT_ID
 
 
 def test_sns_server_get():
@@ -14,13 +7,13 @@ def test_sns_server_get():
     test_client = backend.test_client()
 
     topic_data = test_client.action_data("CreateTopic", Name="testtopic")
-    topic_data.should.contain("CreateTopicResult")
-    topic_data.should.contain(
-        "<TopicArn>arn:aws:sns:us-east-1:{}:testtopic</TopicArn>".format(ACCOUNT_ID)
-    )
+    assert "CreateTopicResult" in topic_data
+    assert (
+        f"<TopicArn>arn:aws:sns:us-east-1:{ACCOUNT_ID}:testtopic</TopicArn>"
+    ) in topic_data
 
     topics_data = test_client.action_data("ListTopics")
-    topics_data.should.contain("ListTopicsResult")
-    topic_data.should.contain(
-        "<TopicArn>arn:aws:sns:us-east-1:{}:testtopic</TopicArn>".format(ACCOUNT_ID)
-    )
+    assert "ListTopicsResult" in topics_data
+    assert (
+        f"<TopicArn>arn:aws:sns:us-east-1:{ACCOUNT_ID}:testtopic</TopicArn>"
+    ) in topics_data

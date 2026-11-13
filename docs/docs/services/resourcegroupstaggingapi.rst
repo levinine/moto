@@ -12,17 +12,6 @@
 resourcegroupstaggingapi
 ========================
 
-|start-h3| Example usage |end-h3|
-
-.. sourcecode:: python
-
-            @mock_resourcegroupstaggingapi
-            def test_resourcegroupstaggingapi_behaviour:
-                boto3.client("resourcegroupstaggingapi")
-                ...
-
-
-
 |start-h3| Implemented features for this service |end-h3|
 
 - [ ] describe_report_creation
@@ -30,7 +19,8 @@ resourcegroupstaggingapi
 - [X] get_resources
 - [X] get_tag_keys
 - [X] get_tag_values
+- [ ] list_required_tags
 - [ ] start_report_creation
-- [ ] tag_resources
-- [ ] untag_resources
+- [X] tag_resources
+- [X] untag_resources
 

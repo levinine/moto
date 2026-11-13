@@ -1,36 +1,34 @@
-from moto.core.exceptions import RESTError
+from moto.core.exceptions import ServiceException
 
 
-class InvalidFormat(RESTError):
-    code = 400
-
-    def __init__(self, message):
-        super().__init__(__class__.__name__, message)
+class CloudWatchException(ServiceException):
+    pass
 
 
-class InvalidParameterValue(RESTError):
-    code = 400
-
-    def __init__(self, message):
-        super().__init__(__class__.__name__, message)
+class InvalidFormat(CloudWatchException):
+    code = "InvalidFormat"
 
 
-class ResourceNotFound(RESTError):
-    code = 404
-
-    def __init__(self):
-        super().__init__(__class__.__name__, "Unknown")
+class InvalidParameterValue(CloudWatchException):
+    code = "InvalidParameterValue"
 
 
-class ResourceNotFoundException(RESTError):
-    code = 404
-
-    def __init__(self):
-        super().__init__(__class__.__name__, "Unknown")
+class InvalidParameterCombination(CloudWatchException):
+    code = "InvalidParameterCombination"
 
 
-class ValidationError(RESTError):
-    code = 400
+class ResourceNotFound(CloudWatchException):
+    code = "ResourceNotFound"
 
-    def __init__(self, message):
-        super().__init__(__class__.__name__, message)
+
+class ResourceNotFoundException(CloudWatchException):
+    code = "ResourceNotFoundException"
+    message = "Unknown"
+
+
+class ValidationError(CloudWatchException):
+    code = "ValidationError"
+
+
+class DashboardInvalidInputError(CloudWatchException):
+    code = "InvalidParameterInput"

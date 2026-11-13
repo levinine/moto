@@ -1,18 +1,18 @@
 import unittest
 
 import boto3
-from moto import mock_s3
+
+from moto import mock_aws
 
 
-@mock_s3
+@mock_aws
 class ClassDecoratorTest(unittest.TestCase):
     """
-    https://github.com/spulec/moto/issues/3535
+    https://github.com/getmoto/moto/issues/3535
     An update to the mock-package introduced a failure during teardown.
-    This test is in place to catch any similar failures with our mocking approach
+    This test is in place to catch any similar failures with our
+    mocking approach.
     """
 
     def test_instantiation_succeeds(self):
-        s3 = boto3.client("s3", region_name="us-east-1")
-
-        assert s3 is not None
+        assert boto3.client("s3", region_name="us-east-1") is not None

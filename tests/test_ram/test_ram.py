@@ -1,16 +1,17 @@
-import time
+import json
+import re
 from datetime import datetime
 
 import boto3
-import sure  # noqa # pylint: disable=unused-import
-from botocore.exceptions import ClientError
 import pytest
+from botocore.exceptions import ClientError
 
-from moto import mock_ram, mock_organizations
-from moto.core import ACCOUNT_ID
+from moto import mock_aws
+from moto.core import DEFAULT_ACCOUNT_ID as ACCOUNT_ID
+from moto.ram.utils import AWS_MANAGED_PERMISSIONS, RAM_RESOURCE_TYPES
 
 
-@mock_ram
+@mock_aws
 def test_create_resource_share():
     # given
     client = boto3.client("ram", region_name="us-east-1")
@@ -20,16 +21,20 @@ def test_create_resource_share():
 
     # then
     resource = response["resourceShare"]
-    resource["allowExternalPrincipals"].should.be.ok
-    resource["creationTime"].should.be.a(datetime)
-    resource["lastUpdatedTime"].should.be.a(datetime)
-    resource["name"].should.equal("test")
-    resource["owningAccountId"].should.equal(ACCOUNT_ID)
-    resource["resourceShareArn"].should.match(
-        r"arn:aws:ram:us-east-1:\d{12}:resource-share/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    assert resource["allowExternalPrincipals"] is True
+    assert isinstance(resource["creationTime"], datetime)
+    assert isinstance(resource["lastUpdatedTime"], datetime)
+    assert resource["name"] == "test"
+    assert resource["owningAccountId"] == ACCOUNT_ID
+    assert re.match(
+        (
+            r"arn:aws:ram:us-east-1:\d{12}:resource-share"
+            r"/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+        ),
+        resource["resourceShareArn"],
     )
-    resource["status"].should.equal("ACTIVE")
-    resource.should_not.have.key("featureSet")
+    assert resource["status"] == "ACTIVE"
+    assert "featureSet" not in resource
 
     # creating a resource share with the name should result in a second one
     # not overwrite/update the old one
@@ -38,27 +43,31 @@ def test_create_resource_share():
         name="test",
         allowExternalPrincipals=False,
         resourceArns=[
-            "arn:aws:ec2:us-east-1:{}:transit-gateway/tgw-123456789".format(ACCOUNT_ID)
+            f"arn:aws:ec2:us-east-1:{ACCOUNT_ID}:transit-gateway/tgw-123456789"
         ],
     )
 
     # then
     resource = response["resourceShare"]
-    resource["allowExternalPrincipals"].should_not.be.ok
-    resource["creationTime"].should.be.a(datetime)
-    resource["lastUpdatedTime"].should.be.a(datetime)
-    resource["name"].should.equal("test")
-    resource["owningAccountId"].should.equal(ACCOUNT_ID)
-    resource["resourceShareArn"].should.match(
-        r"arn:aws:ram:us-east-1:\d{12}:resource-share/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    assert resource["allowExternalPrincipals"] is False
+    assert isinstance(resource["creationTime"], datetime)
+    assert isinstance(resource["lastUpdatedTime"], datetime)
+    assert resource["name"] == "test"
+    assert resource["owningAccountId"] == ACCOUNT_ID
+    assert re.match(
+        (
+            r"arn:aws:ram:us-east-1:\d{12}:resource-share"
+            r"/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+        ),
+        resource["resourceShareArn"],
     )
-    resource["status"].should.equal("ACTIVE")
+    assert resource["status"] == "ACTIVE"
 
     response = client.get_resource_shares(resourceOwner="SELF")
-    response["resourceShares"].should.have.length_of(2)
+    assert len(response["resourceShares"]) == 2
 
 
-@mock_ram
+@mock_aws
 def test_create_resource_share_errors():
     # given
     client = boto3.client("ram", region_name="us-east-1")
@@ -68,10 +77,10 @@ def test_create_resource_share_errors():
     with pytest.raises(ClientError) as e:
         client.create_resource_share(name="test", resourceArns=["inalid-arn"])
     ex = e.value
-    ex.operation_name.should.equal("CreateResourceShare")
-    ex.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.response["Error"]["Code"].should.contain("MalformedArnException")
-    ex.response["Error"]["Message"].should.equal(
+    assert ex.operation_name == "CreateResourceShare"
+    assert ex.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "MalformedArnException" in ex.response["Error"]["Code"]
+    assert ex.response["Error"]["Message"] == (
         "The specified resource ARN inalid-arn is not valid. "
         "Verify the ARN and try again."
     )
@@ -80,14 +89,15 @@ def test_create_resource_share_errors():
     # when
     with pytest.raises(ClientError) as e:
         client.create_resource_share(
-            name="test", resourceArns=["arn:aws:iam::{}:role/test".format(ACCOUNT_ID)]
+            name="test", resourceArns=[f"arn:aws:iam::{ACCOUNT_ID}:role/test"]
         )
     ex = e.value
-    ex.operation_name.should.equal("CreateResourceShare")
-    ex.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.response["Error"]["Code"].should.contain("MalformedArnException")
-    ex.response["Error"]["Message"].should.equal(
-        "You cannot share the selected resource type."
+    assert ex.operation_name == "CreateResourceShare"
+    assert ex.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "MalformedArnException" in ex.response["Error"]["Code"]
+    assert (
+        ex.response["Error"]["Message"]
+        == "You cannot share the selected resource type."
     )
 
     # invalid principal ID
@@ -97,22 +107,136 @@ def test_create_resource_share_errors():
             name="test",
             principals=["invalid"],
             resourceArns=[
-                "arn:aws:ec2:us-east-1:{}:transit-gateway/tgw-123456789".format(
-                    ACCOUNT_ID
-                )
+                f"arn:aws:ec2:us-east-1:{ACCOUNT_ID}:transit-gateway/tgw-123456789"
             ],
         )
     ex = e.value
-    ex.operation_name.should.equal("CreateResourceShare")
-    ex.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.response["Error"]["Code"].should.contain("InvalidParameterException")
-    ex.response["Error"]["Message"].should.equal(
+    assert ex.operation_name == "CreateResourceShare"
+    assert ex.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "InvalidParameterException" in ex.response["Error"]["Code"]
+    assert ex.response["Error"]["Message"] == (
         "Principal ID invalid is malformed. Verify the ID and try again."
     )
 
 
-@mock_ram
-@mock_organizations
+@mock_aws
+def test_create_resource_share_with_service_principal():
+    client = boto3.client("ram", region_name="us-east-1")
+
+    response = client.create_resource_share(
+        name="test-service-principal",
+        principals=["backup.amazonaws.com"],
+        resourceArns=[
+            f"arn:aws:ec2:us-east-1:{ACCOUNT_ID}:transit-gateway/tgw-123456789"
+        ],
+    )
+    resource_share = response["resourceShare"]
+    assert resource_share["name"] == "test-service-principal"
+
+    associations = client.get_resource_share_associations(
+        associationType="PRINCIPAL",
+        resourceShareArns=[resource_share["resourceShareArn"]],
+    )["resourceShareAssociations"]
+    assert len(associations) == 1
+    assert associations[0]["associatedEntity"] == "backup.amazonaws.com"
+
+
+@mock_aws
+def test_create_resource_share_with_iam_role_principal():
+    client = boto3.client("ram", region_name="us-east-1")
+
+    role_arn = f"arn:aws:iam::{ACCOUNT_ID}:role/MyRole"
+    response = client.create_resource_share(
+        name="test-iam-role",
+        principals=[role_arn],
+        resourceArns=[
+            f"arn:aws:ec2:us-east-1:{ACCOUNT_ID}:transit-gateway/tgw-123456789"
+        ],
+    )
+    resource_share = response["resourceShare"]
+    assert resource_share["name"] == "test-iam-role"
+
+    associations = client.get_resource_share_associations(
+        associationType="PRINCIPAL",
+        resourceShareArns=[resource_share["resourceShareArn"]],
+    )["resourceShareAssociations"]
+    assert len(associations) == 1
+    assert associations[0]["associatedEntity"] == role_arn
+
+
+@mock_aws
+def test_create_resource_share_with_iam_user_principal():
+    client = boto3.client("ram", region_name="us-east-1")
+
+    user_arn = f"arn:aws:iam::{ACCOUNT_ID}:user/MyUser"
+    response = client.create_resource_share(
+        name="test-iam-user",
+        principals=[user_arn],
+        resourceArns=[
+            f"arn:aws:ec2:us-east-1:{ACCOUNT_ID}:transit-gateway/tgw-123456789"
+        ],
+    )
+    resource_share = response["resourceShare"]
+    assert resource_share["name"] == "test-iam-user"
+
+    associations = client.get_resource_share_associations(
+        associationType="PRINCIPAL",
+        resourceShareArns=[resource_share["resourceShareArn"]],
+    )["resourceShareAssociations"]
+    assert len(associations) == 1
+    assert associations[0]["associatedEntity"] == user_arn
+
+
+@mock_aws
+def test_create_resource_share_with_root_principal():
+    client = boto3.client("ram", region_name="us-east-1")
+
+    root_arn = f"arn:aws:iam::{ACCOUNT_ID}:root"
+    response = client.create_resource_share(
+        name="test-root",
+        principals=[root_arn],
+        resourceArns=[
+            f"arn:aws:ec2:us-east-1:{ACCOUNT_ID}:transit-gateway/tgw-123456789"
+        ],
+    )
+    resource_share = response["resourceShare"]
+    assert resource_share["name"] == "test-root"
+
+    associations = client.get_resource_share_associations(
+        associationType="PRINCIPAL",
+        resourceShareArns=[resource_share["resourceShareArn"]],
+    )["resourceShareAssociations"]
+    assert len(associations) == 1
+    assert associations[0]["associatedEntity"] == root_arn
+
+
+@mock_aws
+def test_create_resource_share_rejects_invalid_principal():
+    client = boto3.client("ram", region_name="us-east-1")
+
+    invalid_principals = [
+        "not-a-valid-principal",
+        "arn:aws:iam::not-account:role/Foo",
+        "UPPERCASE.amazonaws.com",
+        "under_score.amazonaws.com",
+    ]
+
+    for principal in invalid_principals:
+        with pytest.raises(ClientError) as e:
+            client.create_resource_share(
+                name="test-invalid",
+                principals=[principal],
+                resourceArns=[
+                    f"arn:aws:ec2:us-east-1:{ACCOUNT_ID}:transit-gateway/tgw-123456789"
+                ],
+            )
+        ex = e.value
+        assert ex.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+        assert "InvalidParameterException" in ex.response["Error"]["Code"]
+        assert "is malformed" in ex.response["Error"]["Message"]
+
+
+@mock_aws
 def test_create_resource_share_with_organization():
     # given
     client = boto3.client("organizations", region_name="us-east-1")
@@ -129,12 +253,12 @@ def test_create_resource_share_with_organization():
         name="test",
         principals=[org_arn],
         resourceArns=[
-            "arn:aws:ec2:us-east-1:{}:transit-gateway/tgw-123456789".format(ACCOUNT_ID)
+            f"arn:aws:ec2:us-east-1:{ACCOUNT_ID}:transit-gateway/tgw-123456789"
         ],
     )
 
     # then
-    response["resourceShare"]["name"].should.equal("test")
+    assert response["resourceShare"]["name"] == "test"
 
     # share in an OU
     # when
@@ -142,16 +266,15 @@ def test_create_resource_share_with_organization():
         name="test",
         principals=[ou_arn],
         resourceArns=[
-            "arn:aws:ec2:us-east-1:{}:transit-gateway/tgw-123456789".format(ACCOUNT_ID)
+            f"arn:aws:ec2:us-east-1:{ACCOUNT_ID}:transit-gateway/tgw-123456789"
         ],
     )
 
     # then
-    response["resourceShare"]["name"].should.equal("test")
+    assert response["resourceShare"]["name"] == "test"
 
 
-@mock_ram
-@mock_organizations
+@mock_aws
 def test_create_resource_share_with_organization_errors():
     # given
     client = boto3.client("organizations", region_name="us-east-1")
@@ -165,20 +288,16 @@ def test_create_resource_share_with_organization_errors():
     with pytest.raises(ClientError) as e:
         client.create_resource_share(
             name="test",
-            principals=[
-                "arn:aws:organizations::{}:organization/o-unknown".format(ACCOUNT_ID)
-            ],
+            principals=[f"arn:aws:organizations::{ACCOUNT_ID}:organization/o-unknown"],
             resourceArns=[
-                "arn:aws:ec2:us-east-1:{}:transit-gateway/tgw-123456789".format(
-                    ACCOUNT_ID
-                )
+                f"arn:aws:ec2:us-east-1:{ACCOUNT_ID}:transit-gateway/tgw-123456789"
             ],
         )
     ex = e.value
-    ex.operation_name.should.equal("CreateResourceShare")
-    ex.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.response["Error"]["Code"].should.contain("UnknownResourceException")
-    ex.response["Error"]["Message"].should.equal(
+    assert ex.operation_name == "CreateResourceShare"
+    assert ex.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "UnknownResourceException" in ex.response["Error"]["Code"]
+    assert ex.response["Error"]["Message"] == (
         "Organization o-unknown could not be found."
     )
 
@@ -187,25 +306,21 @@ def test_create_resource_share_with_organization_errors():
     with pytest.raises(ClientError) as e:
         client.create_resource_share(
             name="test",
-            principals=[
-                "arn:aws:organizations::{}:ou/o-unknown/ou-unknown".format(ACCOUNT_ID)
-            ],
+            principals=[f"arn:aws:organizations::{ACCOUNT_ID}:ou/o-unknown/ou-unknown"],
             resourceArns=[
-                "arn:aws:ec2:us-east-1:{}:transit-gateway/tgw-123456789".format(
-                    ACCOUNT_ID
-                )
+                f"arn:aws:ec2:us-east-1:{ACCOUNT_ID}:transit-gateway/tgw-123456789"
             ],
         )
     ex = e.value
-    ex.operation_name.should.equal("CreateResourceShare")
-    ex.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.response["Error"]["Code"].should.contain("UnknownResourceException")
-    ex.response["Error"]["Message"].should.equal(
+    assert ex.operation_name == "CreateResourceShare"
+    assert ex.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "UnknownResourceException" in ex.response["Error"]["Code"]
+    assert ex.response["Error"]["Message"] == (
         "OrganizationalUnit ou-unknown in unknown organization could not be found."
     )
 
 
-@mock_ram
+@mock_aws
 def test_get_resource_shares():
     # given
     client = boto3.client("ram", region_name="us-east-1")
@@ -215,21 +330,25 @@ def test_get_resource_shares():
     response = client.get_resource_shares(resourceOwner="SELF")
 
     # then
-    response["resourceShares"].should.have.length_of(1)
+    assert len(response["resourceShares"]) == 1
     resource = response["resourceShares"][0]
-    resource["allowExternalPrincipals"].should.be.ok
-    resource["creationTime"].should.be.a(datetime)
-    resource["featureSet"].should.equal("STANDARD")
-    resource["lastUpdatedTime"].should.be.a(datetime)
-    resource["name"].should.equal("test")
-    resource["owningAccountId"].should.equal(ACCOUNT_ID)
-    resource["resourceShareArn"].should.match(
-        r"arn:aws:ram:us-east-1:\d{12}:resource-share/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    assert resource["allowExternalPrincipals"] is True
+    assert isinstance(resource["creationTime"], datetime)
+    assert resource["featureSet"] == "STANDARD"
+    assert isinstance(resource["lastUpdatedTime"], datetime)
+    assert resource["name"] == "test"
+    assert resource["owningAccountId"] == ACCOUNT_ID
+    assert re.match(
+        (
+            r"arn:aws:ram:us-east-1:\d{12}:resource-share"
+            r"/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+        ),
+        resource["resourceShareArn"],
     )
-    resource["status"].should.equal("ACTIVE")
+    assert resource["status"] == "ACTIVE"
 
 
-@mock_ram
+@mock_aws
 def test_get_resource_shares_errors():
     # given
     client = boto3.client("ram", region_name="us-east-1")
@@ -239,43 +358,46 @@ def test_get_resource_shares_errors():
     with pytest.raises(ClientError) as e:
         client.get_resource_shares(resourceOwner="invalid")
     ex = e.value
-    ex.operation_name.should.equal("GetResourceShares")
-    ex.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.response["Error"]["Code"].should.contain("InvalidParameterException")
-    ex.response["Error"]["Message"].should.equal(
+    assert ex.operation_name == "GetResourceShares"
+    assert ex.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "InvalidParameterException" in ex.response["Error"]["Code"]
+    assert ex.response["Error"]["Message"] == (
         "invalid is not a valid resource owner. "
         "Specify either SELF or OTHER-ACCOUNTS and try again."
     )
 
 
-@mock_ram
+@mock_aws
 def test_update_resource_share():
     # given
     client = boto3.client("ram", region_name="us-east-1")
     arn = client.create_resource_share(name="test")["resourceShare"]["resourceShareArn"]
 
     # when
-    time.sleep(0.1)
     response = client.update_resource_share(resourceShareArn=arn, name="test-update")
 
     # then
     resource = response["resourceShare"]
-    resource["allowExternalPrincipals"].should.be.ok
-    resource["name"].should.equal("test-update")
-    resource["owningAccountId"].should.equal(ACCOUNT_ID)
-    resource["resourceShareArn"].should.match(
-        r"arn:aws:ram:us-east-1:\d{12}:resource-share/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    assert resource["allowExternalPrincipals"] is True
+    assert resource["name"] == "test-update"
+    assert resource["owningAccountId"] == ACCOUNT_ID
+    assert re.match(
+        (
+            r"arn:aws:ram:us-east-1:\d{12}:resource-share"
+            r"/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+        ),
+        resource["resourceShareArn"],
     )
-    resource["status"].should.equal("ACTIVE")
-    resource.should_not.have.key("featureSet")
+    assert resource["status"] == "ACTIVE"
+    assert "featureSet" not in resource
     creation_time = resource["creationTime"]
-    resource["lastUpdatedTime"].should.be.greater_than(creation_time)
+    assert resource["lastUpdatedTime"] > creation_time
 
     response = client.get_resource_shares(resourceOwner="SELF")
-    response["resourceShares"].should.have.length_of(1)
+    assert len(response["resourceShares"]) == 1
 
 
-@mock_ram
+@mock_aws
 def test_update_resource_share_errors():
     # given
     client = boto3.client("ram", region_name="us-east-1")
@@ -284,44 +406,40 @@ def test_update_resource_share_errors():
     # when
     with pytest.raises(ClientError) as e:
         client.update_resource_share(
-            resourceShareArn="arn:aws:ram:us-east-1:{}:resource-share/not-existing".format(
-                ACCOUNT_ID
-            ),
+            resourceShareArn=f"arn:aws:ram:us-east-1:{ACCOUNT_ID}:resource-share/not-existing",
             name="test-update",
         )
     ex = e.value
-    ex.operation_name.should.equal("UpdateResourceShare")
-    ex.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.response["Error"]["Code"].should.contain("UnknownResourceException")
-    ex.response["Error"]["Message"].should.equal(
-        "ResourceShare arn:aws:ram:us-east-1:{}:resource-share/not-existing could not be found.".format(
-            ACCOUNT_ID
-        )
+    assert ex.operation_name == "UpdateResourceShare"
+    assert ex.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "UnknownResourceException" in ex.response["Error"]["Code"]
+    assert ex.response["Error"]["Message"] == (
+        f"ResourceShare arn:aws:ram:us-east-1:{ACCOUNT_ID}"
+        ":resource-share/not-existing could not be found."
     )
 
 
-@mock_ram
+@mock_aws
 def test_delete_resource_share():
     # given
     client = boto3.client("ram", region_name="us-east-1")
     arn = client.create_resource_share(name="test")["resourceShare"]["resourceShareArn"]
 
     # when
-    time.sleep(0.1)
     response = client.delete_resource_share(resourceShareArn=arn)
 
     # then
-    response["returnValue"].should.be.ok
+    assert response["returnValue"] is True
 
     response = client.get_resource_shares(resourceOwner="SELF")
-    response["resourceShares"].should.have.length_of(1)
+    assert len(response["resourceShares"]) == 1
     resource = response["resourceShares"][0]
-    resource["status"].should.equal("DELETED")
+    assert resource["status"] == "DELETED"
     creation_time = resource["creationTime"]
-    resource["lastUpdatedTime"].should.be.greater_than(creation_time)
+    assert resource["lastUpdatedTime"] > creation_time
 
 
-@mock_ram
+@mock_aws
 def test_delete_resource_share_errors():
     # given
     client = boto3.client("ram", region_name="us-east-1")
@@ -330,23 +448,19 @@ def test_delete_resource_share_errors():
     # when
     with pytest.raises(ClientError) as e:
         client.delete_resource_share(
-            resourceShareArn="arn:aws:ram:us-east-1:{}:resource-share/not-existing".format(
-                ACCOUNT_ID
-            )
+            resourceShareArn=f"arn:aws:ram:us-east-1:{ACCOUNT_ID}:resource-share/not-existing"
         )
     ex = e.value
-    ex.operation_name.should.equal("DeleteResourceShare")
-    ex.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.response["Error"]["Code"].should.contain("UnknownResourceException")
-    ex.response["Error"]["Message"].should.equal(
-        "ResourceShare arn:aws:ram:us-east-1:{}:resource-share/not-existing could not be found.".format(
-            ACCOUNT_ID
-        )
+    assert ex.operation_name == "DeleteResourceShare"
+    assert ex.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "UnknownResourceException" in ex.response["Error"]["Code"]
+    assert ex.response["Error"]["Message"] == (
+        f"ResourceShare arn:aws:ram:us-east-1:{ACCOUNT_ID}"
+        ":resource-share/not-existing could not be found."
     )
 
 
-@mock_ram
-@mock_organizations
+@mock_aws
 def test_enable_sharing_with_aws_organization():
     # given
     client = boto3.client("organizations", region_name="us-east-1")
@@ -357,11 +471,10 @@ def test_enable_sharing_with_aws_organization():
     response = client.enable_sharing_with_aws_organization()
 
     # then
-    response["returnValue"].should.be.ok
+    assert response["returnValue"] is True
 
 
-@mock_ram
-@mock_organizations
+@mock_aws
 def test_enable_sharing_with_aws_organization_errors():
     # given
     client = boto3.client("ram", region_name="us-east-1")
@@ -371,11 +484,285 @@ def test_enable_sharing_with_aws_organization_errors():
     with pytest.raises(ClientError) as e:
         client.enable_sharing_with_aws_organization()
     ex = e.value
-    ex.operation_name.should.equal("EnableSharingWithAwsOrganization")
-    ex.response["ResponseMetadata"]["HTTPStatusCode"].should.equal(400)
-    ex.response["Error"]["Code"].should.contain("OperationNotPermittedException")
-    ex.response["Error"]["Message"].should.equal(
+    assert ex.operation_name == "EnableSharingWithAwsOrganization"
+    assert ex.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "OperationNotPermittedException" in ex.response["Error"]["Code"]
+    assert ex.response["Error"]["Message"] == (
         "Unable to enable sharing with AWS Organizations. "
-        "Received AccessDeniedException from AWSOrganizations with the following error message: "
+        "Received AccessDeniedException from AWSOrganizations with the "
+        "following error message: "
         "You don't have permissions to access this resource."
     )
+
+
+@mock_aws
+def test_get_resource_share_associations_with_principals():
+    # given
+    client = boto3.client("ram", region_name="us-east-1")
+    response = client.create_resource_share(
+        name="test",
+        principals=["123456789012"],
+        resourceArns=[
+            f"arn:aws:ec2:us-east-1:{ACCOUNT_ID}:transit-gateway/tgw-123456789"
+        ],
+    )
+    resource_share_arn = response["resourceShare"]["resourceShareArn"]
+
+    # when
+    response = client.get_resource_share_associations(
+        associationType="PRINCIPAL", resourceShareArns=[resource_share_arn]
+    )
+
+    # then
+    assert len(response["resourceShareAssociations"]) == 1
+    association = response["resourceShareAssociations"][0]
+    assert association["resourceShareArn"] == resource_share_arn
+    assert association["resourceShareName"] == "test"
+    assert association["associatedEntity"] == "123456789012"
+    assert association["associationType"] == "PRINCIPAL"
+    assert association["status"] == "ASSOCIATED"
+    assert isinstance(association["creationTime"], datetime)
+    assert isinstance(association["lastUpdatedTime"], datetime)
+    assert association["external"] is False
+
+
+@mock_aws
+def test_get_resource_share_associations_with_resources():
+    # given
+    client = boto3.client("ram", region_name="us-east-1")
+    resource_arn = f"arn:aws:ec2:us-east-1:{ACCOUNT_ID}:transit-gateway/tgw-123456789"
+    response = client.create_resource_share(
+        name="test",
+        principals=["123456789012"],
+        resourceArns=[resource_arn],
+    )
+    resource_share_arn = response["resourceShare"]["resourceShareArn"]
+
+    # when
+    response = client.get_resource_share_associations(
+        associationType="RESOURCE", resourceShareArns=[resource_share_arn]
+    )
+
+    # then
+    assert len(response["resourceShareAssociations"]) == 1
+    association = response["resourceShareAssociations"][0]
+    assert association["resourceShareArn"] == resource_share_arn
+    assert association["resourceShareName"] == "test"
+    assert association["associatedEntity"] == resource_arn
+    assert association["associationType"] == "RESOURCE"
+    assert association["status"] == "ASSOCIATED"
+    assert isinstance(association["creationTime"], datetime)
+    assert isinstance(association["lastUpdatedTime"], datetime)
+    assert association["external"] is False
+
+
+@mock_aws
+def test_get_resource_share_associations_with_filters():
+    # given
+    client = boto3.client("ram", region_name="us-east-1")
+    resource_arn = f"arn:aws:ec2:us-east-1:{ACCOUNT_ID}:transit-gateway/tgw-123456789"
+    response = client.create_resource_share(
+        name="test",
+        principals=["123456789012"],
+        resourceArns=[resource_arn],
+    )
+
+    # when filtering by principal
+    response = client.get_resource_share_associations(
+        associationType="PRINCIPAL", principal="123456789012"
+    )
+
+    # then
+    assert len(response["resourceShareAssociations"]) == 1
+    assert (
+        response["resourceShareAssociations"][0]["associatedEntity"] == "123456789012"
+    )
+
+    # when filtering by resource
+    response = client.get_resource_share_associations(
+        associationType="RESOURCE", resourceArn=resource_arn
+    )
+
+    # then
+    assert len(response["resourceShareAssociations"]) == 1
+    assert response["resourceShareAssociations"][0]["associatedEntity"] == resource_arn
+
+
+@mock_aws
+def test_get_resource_share_associations_errors():
+    # given
+    client = boto3.client("ram", region_name="us-east-1")
+    resource_arn = f"arn:aws:ec2:us-east-1:{ACCOUNT_ID}:transit-gateway/tgw-123456789"
+    client.create_resource_share(
+        name="test",
+        principals=["123456789012"],
+        resourceArns=[resource_arn],
+    )
+
+    # when invalid association type
+    with pytest.raises(ClientError) as e:
+        client.get_resource_share_associations(associationType="INVALID")
+    ex = e.value
+    assert ex.operation_name == "GetResourceShareAssociations"
+    assert ex.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "InvalidParameterException" in ex.response["Error"]["Code"]
+    assert "is not a valid association type" in ex.response["Error"]["Message"]
+
+    # when invalid association status
+    with pytest.raises(ClientError) as e:
+        client.get_resource_share_associations(
+            associationType="PRINCIPAL", associationStatus="INVALID"
+        )
+    ex = e.value
+    assert ex.operation_name == "GetResourceShareAssociations"
+    assert ex.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "InvalidParameterException" in ex.response["Error"]["Code"]
+    assert "is not a valid association status" in ex.response["Error"]["Message"]
+
+    # when resource ARN with PRINCIPAL type
+    with pytest.raises(ClientError) as e:
+        client.get_resource_share_associations(
+            associationType="PRINCIPAL", resourceArn=resource_arn
+        )
+    ex = e.value
+    assert ex.operation_name == "GetResourceShareAssociations"
+    assert ex.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "InvalidParameterException" in ex.response["Error"]["Code"]
+    assert (
+        "You cannot specify a resource ARN when the association type is PRINCIPAL"
+        in ex.response["Error"]["Message"]
+    )
+
+    # when principal with RESOURCE type
+    with pytest.raises(ClientError) as e:
+        client.get_resource_share_associations(
+            associationType="RESOURCE", principal="123456789012"
+        )
+    ex = e.value
+    assert ex.operation_name == "GetResourceShareAssociations"
+    assert ex.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+    assert "InvalidParameterException" in ex.response["Error"]["Code"]
+    assert (
+        "You cannot specify a principal when the association type is RESOURCE"
+        in ex.response["Error"]["Message"]
+    )
+
+
+@mock_aws
+@pytest.mark.parametrize(
+    "resource_region_scope, expect_error, error_message",
+    [
+        ({}, False, None),  # default value is "ALL"
+        ({"resourceRegionScope": "ALL"}, False, None),
+        ({"resourceRegionScope": "GLOBAL"}, False, None),
+        ({"resourceRegionScope": "REGIONAL"}, False, None),
+        (
+            {"resourceRegionScope": "INVALID"},
+            True,
+            "INVALID is not a valid resource region scope value. Specify a valid value and try again.",
+        ),
+    ],
+    ids=[
+        "default_region_scope",
+        "all_region_scope",
+        "global_region_scope",
+        "regional_region_scope",
+        "invalid_region_scope",
+    ],
+)
+def test_list_resource_types(resource_region_scope, expect_error, error_message):
+    client = boto3.client("ram", region_name="us-east-1")
+    region_scope = resource_region_scope.get("resourceRegionScope")
+
+    if expect_error:
+        with pytest.raises(ClientError) as e:
+            client.list_resource_types(**resource_region_scope)
+        ex = e.value
+        assert ex.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+        assert "InvalidParameterException" in ex.response["Error"]["Code"]
+        assert ex.response["Error"]["Message"] == error_message
+    else:
+        response = client.list_resource_types(**resource_region_scope)
+        expected_types = RAM_RESOURCE_TYPES
+        if region_scope == "GLOBAL":
+            expected_types = [
+                rt for rt in expected_types if rt["resourceRegionScope"] == "GLOBAL"
+            ]
+        elif region_scope == "REGIONAL":
+            expected_types = [
+                rt for rt in expected_types if rt["resourceRegionScope"] == "REGIONAL"
+            ]
+
+        assert "resourceTypes" in response
+        assert response["resourceTypes"] == expected_types
+
+
+@mock_aws
+@pytest.mark.parametrize(
+    "parameters, expect_error, error_message",
+    [
+        ({}, False, None),
+        ({"resourceType": "glue:catalog"}, False, None),
+        ({"permissionType": "ALL"}, False, None),
+        ({"resourceType": "glue:catalog", "permissionType": "AWS"}, False, None),
+        (
+            {"resourceType": "gluE:catalog", "permissionType": "AWS"},
+            True,
+            "Invalid resource type: gluE:catalog",
+        ),
+        (
+            {"resourceType": "glue:catalog", "permissionType": "INVALID"},
+            True,
+            "INVALID is not a valid scope. Must be one of: ALL, AWS, LOCAL.",
+        ),
+    ],
+    ids=[
+        "default_params",
+        "valid_resource_type",
+        "valid_permission_type",
+        "valid_resource_type_and_permission_type",
+        "invalid_resource_type",
+        "invalid_permission_type",
+    ],
+)
+def test_list_permissions(parameters, expect_error, error_message):
+    client = boto3.client("ram", region_name="us-east-1")
+    permission_types_relation = {
+        "AWS": "AWS_MANAGED",
+        "LOCAL": "CUSTOMER_MANAGED",
+    }
+    resource_type = parameters.get("resourceType")
+    permission_type = parameters.get("permissionType")
+
+    # when
+    if expect_error:
+        with pytest.raises(ClientError) as e:
+            client.list_permissions(**parameters)
+        ex = e.value
+        assert ex.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+        assert "InvalidParameterException" in ex.response["Error"]["Code"]
+        assert ex.response["Error"]["Message"] == error_message
+    else:
+        response = client.list_permissions(**parameters)
+
+        # then
+        expected_permissions = AWS_MANAGED_PERMISSIONS
+        if resource_type:
+            expected_permissions = [
+                permission
+                for permission in expected_permissions
+                if permission["resourceType"].lower() == resource_type.lower()
+            ]
+
+        if permission_type and permission_type != "ALL":
+            expected_permissions = [
+                permission
+                for permission in expected_permissions
+                if permission_types_relation.get(permission_type)
+                == permission["permissionType"]
+            ]
+
+        assert "permissions" in response
+        assert json.dumps(response["permissions"], default=str) == json.dumps(
+            expected_permissions, default=str
+        )

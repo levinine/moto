@@ -1,22 +1,19 @@
-from botocore.exceptions import ClientError
-from moto import mock_cloudformation_deprecated, mock_ec2_deprecated
-from moto import mock_cloudformation, mock_ec2
-from tests import EXAMPLE_AMI_ID
-from tests.test_cloudformation.fixtures import ec2_classic_eip
-from tests.test_cloudformation.fixtures import single_instance_with_ebs_volume
-from tests.test_cloudformation.fixtures import vpc_eip
-from tests.test_cloudformation.fixtures import vpc_eni
-from tests.test_cloudformation.fixtures import vpc_single_instance_in_subnet
-from uuid import uuid4
-import boto
-import boto.ec2
-import boto.cloudformation
-import boto.vpc
-import boto3
 import json
-import sure  # noqa # pylint: disable=unused-import
-import pytest
+from uuid import uuid4
 
+import boto3
+import pytest
+from botocore.exceptions import ClientError
+
+from moto import mock_aws
+from tests import EXAMPLE_AMI_ID
+from tests.test_cloudformation.fixtures import (
+    ec2_classic_eip,
+    single_instance_with_ebs_volume,
+    vpc_eip,
+    vpc_eni,
+    vpc_single_instance_in_subnet,
+)
 
 template_vpc = {
     "AWSTemplateFormatVersion": "2010-09-09",
@@ -26,9 +23,20 @@ template_vpc = {
     },
 }
 
+template_subnet = {
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "Create VPC",
+    "Resources": {
+        "VPC": {"Properties": {"CidrBlock": "192.168.0.0/16"}, "Type": "AWS::EC2::VPC"},
+        "Subnet": {
+            "Properties": {"VpcId": {"Ref": "VPC"}, "CidrBlock": "192.168.0.0/18"},
+            "Type": "AWS::EC2::Subnet",
+        },
+    },
+}
 
-@mock_ec2
-@mock_cloudformation
+
+@mock_aws
 def test_vpc_single_instance_in_subnet():
     template_json = json.dumps(vpc_single_instance_in_subnet.template)
     cf = boto3.client("cloudformation", region_name="us-west-1")
@@ -51,13 +59,13 @@ def test_vpc_single_instance_in_subnet():
     ][0]["PhysicalResourceId"]
 
     vpc = ec2.describe_vpcs(VpcIds=[vpc_id])["Vpcs"][0]
-    vpc["CidrBlock"].should.equal("10.0.0.0/16")
-    vpc["Tags"].should.contain({"Key": "Application", "Value": stack["StackId"]})
+    assert vpc["CidrBlock"] == "10.0.0.0/16"
+    assert {"Key": "Application", "Value": stack["StackId"]} in vpc["Tags"]
 
     security_group = ec2.describe_security_groups(
         Filters=[{"Name": "vpc-id", "Values": [vpc["VpcId"]]}]
     )["SecurityGroups"][0]
-    security_group["VpcId"].should.equal(vpc["VpcId"])
+    assert security_group["VpcId"] == vpc["VpcId"]
 
     subnet_id = [
         resource
@@ -66,7 +74,7 @@ def test_vpc_single_instance_in_subnet():
     ][0]["PhysicalResourceId"]
 
     subnet = ec2.describe_subnets(SubnetIds=[subnet_id])["Subnets"][0]
-    subnet["VpcId"].should.equal(vpc["VpcId"])
+    assert subnet["VpcId"] == vpc["VpcId"]
 
     instance_id = [
         resource
@@ -75,7 +83,7 @@ def test_vpc_single_instance_in_subnet():
     ][0]["PhysicalResourceId"]
     res = ec2.describe_instances(InstanceIds=[instance_id])["Reservations"][0]
     instance = res["Instances"][0]
-    instance["Tags"].should.contain({"Key": "Foo", "Value": "Bar"})
+    assert {"Key": "Foo", "Value": "Bar"} in instance["Tags"]
 
     eip_id = [
         resource
@@ -83,64 +91,51 @@ def test_vpc_single_instance_in_subnet():
         if resource["ResourceType"] == "AWS::EC2::EIP"
     ][0]["PhysicalResourceId"]
     eip = ec2.describe_addresses(PublicIps=[eip_id])["Addresses"][0]
-    eip["Domain"].should.equal("vpc")
-    eip["InstanceId"].should.equal(instance["InstanceId"])
+    assert eip["Domain"] == "vpc"
+    assert eip["InstanceId"] == instance["InstanceId"]
 
 
-@mock_cloudformation
-@mock_ec2
-def test_delete_stack_with_resource_missing_delete_attr():
+@mock_aws
+def test_delete_stack_with_vpc():
     cf = boto3.client("cloudformation", region_name="us-east-1")
     ec2 = boto3.client("ec2", region_name="us-east-1")
     name = str(uuid4())[0:6]
 
     cf.create_stack(StackName=name, TemplateBody=json.dumps(template_vpc))
-    cf.describe_stacks(StackName=name)["Stacks"].should.have.length_of(1)
-
     resources = cf.list_stack_resources(StackName=name)["StackResourceSummaries"]
     vpc_id = resources[0]["PhysicalResourceId"]
 
-    cf.delete_stack(
-        StackName=name
-    )  # should succeed, despite the fact that the resource itself cannot be deleted
-    with pytest.raises(ClientError) as exc:
-        cf.describe_stacks(StackName=name)
-    err = exc.value.response["Error"]
-    err.should.have.key("Code").equals("ValidationError")
-    err.should.have.key("Message").equals(f"Stack with id {name} does not exist")
+    assert len(ec2.describe_vpcs(VpcIds=[vpc_id])["Vpcs"]) == 1
 
-    # We still have our VPC, as the VPC-object does not have a delete-method yet
-    ec2.describe_vpcs(VpcIds=[vpc_id])["Vpcs"].should.have.length_of(1)
+    cf.delete_stack(StackName=name)
+    with pytest.raises(ec2.exceptions.ClientError):
+        ec2.describe_vpcs(VpcIds=[vpc_id])
 
 
-# Has boto3 equivalent
-@mock_ec2_deprecated
-@mock_cloudformation_deprecated
+@mock_aws
+def test_delete_stack_with_subnet():
+    cf = boto3.client("cloudformation", region_name="us-east-1")
+    ec2 = boto3.client("ec2", region_name="us-east-1")
+    name = str(uuid4())[0:6]
+
+    cf.create_stack(StackName=name, TemplateBody=json.dumps(template_subnet))
+    subnet_ids = [
+        resource["PhysicalResourceId"]
+        for resource in cf.list_stack_resources(StackName=name)[
+            "StackResourceSummaries"
+        ]
+        if resource["ResourceType"] == "AWS::EC2::Subnet"
+    ]
+
+    assert len(ec2.describe_subnets(SubnetIds=subnet_ids)["Subnets"]) == 1
+
+    cf.delete_stack(StackName=name)
+    with pytest.raises(ec2.exceptions.ClientError):
+        ec2.describe_subnets(SubnetIds=subnet_ids)
+
+
+@mock_aws
 def test_elastic_network_interfaces_cloudformation():
-    template = vpc_eni.template
-    template_json = json.dumps(template)
-    conn = boto.cloudformation.connect_to_region("us-west-1")
-    conn.create_stack("test_stack", template_body=template_json)
-    ec2_conn = boto.ec2.connect_to_region("us-west-1")
-    eni = ec2_conn.get_all_network_interfaces()[0]
-    eni.private_ip_addresses.should.have.length_of(1)
-
-    stack = conn.describe_stacks()[0]
-    resources = stack.describe_resources()
-    cfn_eni = [
-        resource
-        for resource in resources
-        if resource.resource_type == "AWS::EC2::NetworkInterface"
-    ][0]
-    cfn_eni.physical_resource_id.should.equal(eni.id)
-
-    outputs = {output.key: output.value for output in stack.outputs}
-    outputs["ENIIpAddress"].should.equal(eni.private_ip_addresses[0].private_ip_address)
-
-
-@mock_ec2
-@mock_cloudformation
-def test_elastic_network_interfaces_cloudformation_boto3():
     template = vpc_eni.template
     template_json = json.dumps(template)
     cf = boto3.client("cloudformation", region_name="us-west-1")
@@ -157,17 +152,16 @@ def test_elastic_network_interfaces_cloudformation_boto3():
         for resource in resources
         if resource["ResourceType"] == "AWS::EC2::NetworkInterface"
     ][0]
-    all_eni_ids.should.contain(cfn_eni["PhysicalResourceId"])
+    assert cfn_eni["PhysicalResourceId"] in all_eni_ids
 
     outputs = cf.describe_stacks(StackName=stack_name)["Stacks"][0]["Outputs"]
     received_ip = [
         o["OutputValue"] for o in outputs if o["OutputKey"] == "ENIIpAddress"
     ][0]
-    all_ips.should.contain(received_ip)
+    assert received_ip in all_ips
 
 
-@mock_ec2
-@mock_cloudformation
+@mock_aws
 def test_volume_size_through_cloudformation():
     ec2 = boto3.client("ec2", region_name="us-east-1")
     cf = boto3.client("cloudformation", region_name="us-east-1")
@@ -201,9 +195,9 @@ def test_volume_size_through_cloudformation():
     resource = cf.list_stack_resources(StackName=stack_name)["StackResourceSummaries"][
         0
     ]
-    resource.should.have.key("LogicalResourceId").being.equal("testInstance")
-    resource.should.have.key("PhysicalResourceId").shouldnt.be.none
-    resource.should.have.key("ResourceType").being.equal("AWS::EC2::Instance")
+    assert resource["LogicalResourceId"] == "testInstance"
+    assert resource["PhysicalResourceId"] is not None
+    assert resource["ResourceType"] == "AWS::EC2::Instance"
 
     instances = ec2.describe_instances(InstanceIds=[resource["PhysicalResourceId"]])
 
@@ -212,11 +206,10 @@ def test_volume_size_through_cloudformation():
     ]
 
     volumes = ec2.describe_volumes(VolumeIds=[volume["VolumeId"]])
-    volumes["Volumes"][0]["Size"].should.equal(50)
+    assert volumes["Volumes"][0]["Size"] == 50
 
 
-@mock_ec2
-@mock_cloudformation
+@mock_aws
 def test_attach_internet_gateway():
     ec2 = boto3.client("ec2", region_name="us-east-1")
     cf = boto3.client("cloudformation", region_name="us-east-1")
@@ -247,7 +240,7 @@ def test_attach_internet_gateway():
 
     # Verify VPC is created
     vpc = [r for r in stack_resources if r["ResourceType"] == "AWS::EC2::VPC"][0]
-    vpc["LogicalResourceId"].should.equal("DEVLAB1")
+    assert vpc["LogicalResourceId"] == "DEVLAB1"
     vpc_id = vpc["PhysicalResourceId"]
 
     # Verify Internet Gateway is created
@@ -255,14 +248,14 @@ def test_attach_internet_gateway():
     gateway = ec2.describe_internet_gateways(InternetGatewayIds=[gateway_id])[
         "InternetGateways"
     ][0]
-    gateway["Attachments"].should.contain({"State": "available", "VpcId": vpc_id})
-    gateway["Tags"].should.contain(
-        {"Key": "aws:cloudformation:logical-id", "Value": "internetgateway"}
-    )
+    assert {"State": "available", "VpcId": vpc_id} in gateway["Attachments"]
+    assert {
+        "Key": "aws:cloudformation:logical-id",
+        "Value": "internetgateway",
+    } in gateway["Tags"]
 
 
-@mock_ec2
-@mock_cloudformation
+@mock_aws
 def test_attach_vpn_gateway():
     ec2 = boto3.client("ec2", region_name="us-east-1")
     cf = boto3.client("cloudformation", region_name="us-east-1")
@@ -276,7 +269,7 @@ def test_attach_vpn_gateway():
             },
             "DEVLAB1DCGateway": {
                 "Type": "AWS::EC2::VPNGateway",
-                "Properties": {"Type": "ipsec.1",},
+                "Properties": {"Type": "ipsec.1"},
             },
             "DEVLAB1VPGAttaching": {
                 "Type": "AWS::EC2::VPCGatewayAttachment",
@@ -299,7 +292,7 @@ def test_attach_vpn_gateway():
     vpc_id = get_resource_id("AWS::EC2::VPC", stack_resources)
 
     gateway = ec2.describe_vpn_gateways(VpnGatewayIds=[gateway_id])["VpnGateways"][0]
-    gateway["VpcAttachments"].should.contain({"State": "attached", "VpcId": vpc_id})
+    assert {"State": "attached", "VpcId": vpc_id} in gateway["VpcAttachments"]
 
 
 def get_resource_id(resource_type, stack_resources):
@@ -307,9 +300,8 @@ def get_resource_id(resource_type, stack_resources):
     return r["PhysicalResourceId"]
 
 
-@mock_ec2
-@mock_cloudformation
-def test_subnet_tags_through_cloudformation_boto3():
+@mock_aws
+def test_subnet_tags_through_cloudformation():
     ec2 = boto3.client("ec2", region_name="us-west-1")
     ec2_res = boto3.resource("ec2", region_name="us-west-1")
     vpc = ec2_res.create_vpc(CidrBlock="10.0.0.0/16")
@@ -339,13 +331,12 @@ def test_subnet_tags_through_cloudformation_boto3():
     subnet_id = resources[0]["PhysicalResourceId"]
 
     subnet = ec2.describe_subnets(SubnetIds=[subnet_id])["Subnets"][0]
-    subnet["CidrBlock"].should.equal("10.0.0.0/24")
-    subnet["Tags"].should.contain({"Key": "foo", "Value": "bar"})
-    subnet["Tags"].should.contain({"Key": "blah", "Value": "baz"})
+    assert subnet["CidrBlock"] == "10.0.0.0/24"
+    assert {"Key": "foo", "Value": "bar"} in subnet["Tags"]
+    assert {"Key": "blah", "Value": "baz"} in subnet["Tags"]
 
 
-@mock_ec2
-@mock_cloudformation
+@mock_aws
 def test_single_instance_with_ebs_volume():
     template_json = json.dumps(single_instance_with_ebs_volume.template)
     cf = boto3.client("cloudformation", region_name="us-west-1")
@@ -377,12 +368,11 @@ def test_single_instance_with_ebs_volume():
     volume = [
         volume for volume in volumes if volume["Attachments"][0]["Device"] == "/dev/sdh"
     ][0]
-    volume["State"].should.equal("in-use")
-    volume["Attachments"][0]["InstanceId"].should.equal(ec2_instance["InstanceId"])
+    assert volume["State"] == "in-use"
+    assert volume["Attachments"][0]["InstanceId"] == ec2_instance["InstanceId"]
 
 
-@mock_ec2
-@mock_cloudformation
+@mock_aws
 def test_classic_eip():
     template_json = json.dumps(ec2_classic_eip.template)
     cf = boto3.client("cloudformation", region_name="us-west-1")
@@ -397,11 +387,10 @@ def test_classic_eip():
         for resource in resources
         if resource["ResourceType"] == "AWS::EC2::EIP"
     ][0]
-    all_ips.should.contain(cfn_eip["PhysicalResourceId"])
+    assert cfn_eip["PhysicalResourceId"] in all_ips
 
 
-@mock_ec2
-@mock_cloudformation
+@mock_aws
 def test_vpc_eip():
     template_json = json.dumps(vpc_eip.template)
     cf = boto3.client("cloudformation", region_name="us-west-1")
@@ -417,11 +406,10 @@ def test_vpc_eip():
         for resource in resources
         if resource["ResourceType"] == "AWS::EC2::EIP"
     ][0]
-    all_ips.should.contain(cfn_eip["PhysicalResourceId"])
+    assert cfn_eip["PhysicalResourceId"] in all_ips
 
 
-@mock_cloudformation
-@mock_ec2
+@mock_aws
 def test_vpc_gateway_attachment_creation_should_attach_itself_to_vpc():
     template = {
         "AWSTemplateFormatVersion": "2010-09-09",
@@ -456,16 +444,15 @@ def test_vpc_gateway_attachment_creation_should_attach_itself_to_vpc():
 
     ec2 = boto3.client("ec2", region_name="us-west-1")
     vpc = ec2.describe_vpcs(VpcIds=[vpc_id])["Vpcs"][0]
-    vpc["CidrBlock"].should.equal("10.0.0.0/16")
+    assert vpc["CidrBlock"] == "10.0.0.0/16"
 
     igws = ec2.describe_internet_gateways(
         Filters=[{"Name": "attachment.vpc-id", "Values": [vpc["VpcId"]]}]
     )["InternetGateways"]
-    igws.should.have.length_of(1)
+    assert len(igws) == 1
 
 
-@mock_cloudformation
-@mock_ec2
+@mock_aws
 def test_vpc_peering_creation():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
     ec2_client = boto3.client("ec2", region_name="us-west-1")
@@ -491,11 +478,10 @@ def test_vpc_peering_creation():
     peering_connections = ec2_client.describe_vpc_peering_connections(
         VpcPeeringConnectionIds=[our_vpx_id]
     )["VpcPeeringConnections"]
-    peering_connections.should.have.length_of(1)
+    assert len(peering_connections) == 1
 
 
-@mock_cloudformation
-@mock_ec2
+@mock_aws
 def test_multiple_security_group_ingress_separate_from_security_group_by_id():
     sg1 = str(uuid4())[0:6]
     sg2 = str(uuid4())[0:6]
@@ -537,18 +523,18 @@ def test_multiple_security_group_ingress_separate_from_security_group_by_id():
     security_group1 = get_secgroup_by_tag(ec2, sg1)
     security_group2 = get_secgroup_by_tag(ec2, sg2)
 
-    security_group1["IpPermissions"].should.have.length_of(1)
-    security_group1["IpPermissions"][0]["UserIdGroupPairs"].should.have.length_of(1)
-    security_group1["IpPermissions"][0]["UserIdGroupPairs"][0]["GroupId"].should.equal(
-        security_group2["GroupId"]
+    assert len(security_group1["IpPermissions"]) == 1
+    assert len(security_group1["IpPermissions"][0]["UserIdGroupPairs"]) == 1
+    assert (
+        security_group1["IpPermissions"][0]["UserIdGroupPairs"][0]["GroupId"]
+        == security_group2["GroupId"]
     )
-    security_group1["IpPermissions"][0]["IpProtocol"].should.equal("tcp")
-    security_group1["IpPermissions"][0]["FromPort"].should.equal(80)
-    security_group1["IpPermissions"][0]["ToPort"].should.equal(8080)
+    assert security_group1["IpPermissions"][0]["IpProtocol"] == "tcp"
+    assert security_group1["IpPermissions"][0]["FromPort"] == 80
+    assert security_group1["IpPermissions"][0]["ToPort"] == 8080
 
 
-@mock_cloudformation
-@mock_ec2
+@mock_aws
 def test_security_group_ingress_separate_from_security_group_by_id():
     ec2 = boto3.client("ec2", region_name="us-west-1")
     sg_name = str(uuid4())
@@ -586,18 +572,18 @@ def test_security_group_ingress_separate_from_security_group_by_id():
     ][0]
     security_group2 = get_secgroup_by_tag(ec2, sg_2)
 
-    security_group1["IpPermissions"].should.have.length_of(1)
-    security_group1["IpPermissions"][0]["UserIdGroupPairs"].should.have.length_of(1)
-    security_group1["IpPermissions"][0]["UserIdGroupPairs"][0]["GroupId"].should.equal(
-        security_group2["GroupId"]
+    assert len(security_group1["IpPermissions"]) == 1
+    assert len(security_group1["IpPermissions"][0]["UserIdGroupPairs"]) == 1
+    assert (
+        security_group1["IpPermissions"][0]["UserIdGroupPairs"][0]["GroupId"]
+        == security_group2["GroupId"]
     )
-    security_group1["IpPermissions"][0]["IpProtocol"].should.equal("tcp")
-    security_group1["IpPermissions"][0]["FromPort"].should.equal(80)
-    security_group1["IpPermissions"][0]["ToPort"].should.equal(8080)
+    assert security_group1["IpPermissions"][0]["IpProtocol"] == "tcp"
+    assert security_group1["IpPermissions"][0]["FromPort"] == 80
+    assert security_group1["IpPermissions"][0]["ToPort"] == 8080
 
 
-@mock_cloudformation
-@mock_ec2
+@mock_aws
 def test_security_group_ingress_separate_from_security_group_by_id_using_vpc():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
     ec2_client = boto3.client("ec2", region_name="us-west-1")
@@ -642,18 +628,18 @@ def test_security_group_ingress_separate_from_security_group_by_id_using_vpc():
     security_group1 = get_secgroup_by_tag(ec2_client, "sg1")
     security_group2 = get_secgroup_by_tag(ec2_client, "sg2")
 
-    security_group1["IpPermissions"].should.have.length_of(1)
-    security_group1["IpPermissions"][0]["UserIdGroupPairs"].should.have.length_of(1)
-    security_group1["IpPermissions"][0]["UserIdGroupPairs"][0]["GroupId"].should.equal(
-        security_group2["GroupId"]
+    assert len(security_group1["IpPermissions"]) == 1
+    assert len(security_group1["IpPermissions"][0]["UserIdGroupPairs"]) == 1
+    assert (
+        security_group1["IpPermissions"][0]["UserIdGroupPairs"][0]["GroupId"]
+        == security_group2["GroupId"]
     )
-    security_group1["IpPermissions"][0]["IpProtocol"].should.equal("tcp")
-    security_group1["IpPermissions"][0]["FromPort"].should.equal(80)
-    security_group1["IpPermissions"][0]["ToPort"].should.equal(8080)
+    assert security_group1["IpPermissions"][0]["IpProtocol"] == "tcp"
+    assert security_group1["IpPermissions"][0]["FromPort"] == 80
+    assert security_group1["IpPermissions"][0]["ToPort"] == 8080
 
 
-@mock_cloudformation
-@mock_ec2
+@mock_aws
 def test_security_group_with_update():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
     ec2_client = boto3.client("ec2", region_name="us-west-1")
@@ -680,17 +666,16 @@ def test_security_group_with_update():
     stack_name = str(uuid4())[0:6]
     cf.create_stack(StackName=stack_name, TemplateBody=template_json)
     security_group = get_secgroup_by_tag(ec2_client, sg)
-    security_group["VpcId"].should.equal(vpc1.id)
+    assert security_group["VpcId"] == vpc1.id
 
     template["Resources"]["test-security-group"]["Properties"]["VpcId"] = vpc2.id
     template_json = json.dumps(template)
     cf.update_stack(StackName=stack_name, TemplateBody=template_json)
     security_group = get_secgroup_by_tag(ec2_client, sg)
-    security_group["VpcId"].should.equal(vpc2.id)
+    assert security_group["VpcId"] == vpc2.id
 
 
-@mock_cloudformation
-@mock_ec2
+@mock_aws
 def test_subnets_should_be_created_with_availability_zone():
     ec2 = boto3.resource("ec2", region_name="us-west-1")
     ec2_client = boto3.client("ec2", region_name="us-west-1")
@@ -716,11 +701,257 @@ def test_subnets_should_be_created_with_availability_zone():
     resources = cf.list_stack_resources(StackName=stack_name)["StackResourceSummaries"]
     subnet_id = resources[0]["PhysicalResourceId"]
     subnet = ec2_client.describe_subnets(SubnetIds=[subnet_id])["Subnets"][0]
-    subnet["CidrBlock"].should.equal("10.0.0.0/24")
-    subnet["AvailabilityZone"].should.equal("us-west-1b")
+    assert subnet["CidrBlock"] == "10.0.0.0/24"
+    assert subnet["AvailabilityZone"] == "us-west-1b"
 
 
 def get_secgroup_by_tag(ec2, sg_):
     return ec2.describe_security_groups(
         Filters=[{"Name": "tag:sg-name", "Values": [sg_]}]
     )["SecurityGroups"][0]
+
+
+@mock_aws
+def test_vpc_endpoint_creation():
+    ec2 = boto3.resource("ec2", region_name="us-west-1")
+    ec2_client = boto3.client("ec2", region_name="us-west-1")
+    vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")
+    subnet1 = ec2.create_subnet(
+        VpcId=vpc.id, CidrBlock="10.0.0.0/24", AvailabilityZone="us-west-1a"
+    )
+
+    subnet_template = {
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Parameters": {
+            "EndpointSubnetId": {"Type": "String"},
+            "EndpointVpcId": {"Type": "String"},
+            "EndpointServiceName": {"Type": "String"},
+        },
+        "Resources": {
+            "GwlbVpcEndpoint": {
+                "Type": "AWS::EC2::VPCEndpoint",
+                "Properties": {
+                    "ServiceName": {"Ref": "EndpointServiceName"},
+                    "SubnetIds": [{"Ref": "EndpointSubnetId"}],
+                    "VpcEndpointType": "GatewayLoadBalancer",
+                    "VpcId": {"Ref": "EndpointVpcId"},
+                },
+            }
+        },
+        "Outputs": {
+            "EndpointId": {
+                "Description": "Id of the endpoint created",
+                "Value": {"Ref": "GwlbVpcEndpoint"},
+            },
+        },
+    }
+    cf = boto3.client("cloudformation", region_name="us-west-1")
+    template_json = json.dumps(subnet_template)
+    stack_name = str(uuid4())[0:6]
+    cf.create_stack(
+        StackName=stack_name,
+        TemplateBody=template_json,
+        Parameters=[
+            {"ParameterKey": "EndpointSubnetId", "ParameterValue": subnet1.id},
+            {"ParameterKey": "EndpointVpcId", "ParameterValue": vpc.id},
+            {"ParameterKey": "EndpointServiceName", "ParameterValue": "serv_name"},
+        ],
+    )
+    resources = cf.list_stack_resources(StackName=stack_name)["StackResourceSummaries"]
+    assert len(resources) == 1
+    assert resources[0]["LogicalResourceId"] == "GwlbVpcEndpoint"
+    vpc_endpoint_id = resources[0]["PhysicalResourceId"]
+
+    outputs = cf.describe_stacks(StackName=stack_name)["Stacks"][0]["Outputs"]
+    assert len(outputs) == 1
+    assert outputs[0] == {
+        "OutputKey": "EndpointId",
+        "OutputValue": vpc_endpoint_id,
+        "Description": "Id of the endpoint created",
+    }
+
+    endpoint = ec2_client.describe_vpc_endpoints(VpcEndpointIds=[vpc_endpoint_id])[
+        "VpcEndpoints"
+    ][0]
+    assert endpoint["VpcId"] == vpc.id
+    assert endpoint["ServiceName"] == "serv_name"
+    assert endpoint["State"] == "available"
+    assert endpoint["SubnetIds"] == [subnet1.id]
+    assert endpoint["VpcEndpointType"] == "GatewayLoadBalancer"
+
+
+@mock_aws
+def test_launch_template_create():
+    cf = boto3.client("cloudformation", region_name="us-west-1")
+    ec2 = boto3.client("ec2", region_name="us-west-1")
+
+    launch_template_name = str(uuid4())[0:6]
+    logical_id = str(uuid4())[0:6]
+    stack_name = str(uuid4())[0:6]
+
+    lt_tags = [{"Key": "lt-tag-key", "Value": "lt-tag-value"}]
+
+    template_json = json.dumps(
+        {
+            "AWSTemplateFormatVersion": "2010-09-09",
+            "Resources": {
+                logical_id: {
+                    "Type": "AWS::EC2::LaunchTemplate",
+                    "Properties": {
+                        "LaunchTemplateName": launch_template_name,
+                        "VersionDescription": "some template",
+                        "LaunchTemplateData": {
+                            "TagSpecifications": [
+                                {
+                                    "ResourceType": "instance",
+                                    "Tags": [
+                                        {"Key": "i-tag-key", "Value": "i-tag-value"}
+                                    ],
+                                }
+                            ]
+                        },
+                        "TagSpecifications": [
+                            {
+                                "ResourceType": "launch-template",
+                                "Tags": lt_tags,
+                            }
+                        ],
+                    },
+                }
+            },
+            "Outputs": {
+                "LaunchTemplateId": {
+                    "Description": "The ID of the created launch template",
+                    "Value": {"Ref": logical_id},
+                },
+            },
+        }
+    )
+
+    cf.create_stack(StackName=stack_name, TemplateBody=template_json)
+
+    resources = cf.list_stack_resources(StackName=stack_name)["StackResourceSummaries"]
+    assert len(resources) == 1
+    assert resources[0]["LogicalResourceId"] == logical_id
+    launch_template_id = resources[0]["PhysicalResourceId"]
+
+    outputs = cf.describe_stacks(StackName=stack_name)["Stacks"][0]["Outputs"]
+    assert len(outputs) == 1
+    assert outputs[0] == {
+        "OutputKey": "LaunchTemplateId",
+        "OutputValue": launch_template_id,
+        "Description": "The ID of the created launch template",
+    }
+
+    launch_template = ec2.describe_launch_templates(
+        LaunchTemplateNames=[launch_template_name]
+    )["LaunchTemplates"][0]
+    assert launch_template["LaunchTemplateName"] == launch_template_name
+    assert launch_template["LaunchTemplateId"] == launch_template_id
+    assert launch_template["Tags"] == lt_tags
+
+    launch_template_version = ec2.describe_launch_template_versions(
+        LaunchTemplateName=launch_template_name
+    )["LaunchTemplateVersions"][0]
+    assert launch_template_version["LaunchTemplateName"] == launch_template_name
+    assert launch_template_version["LaunchTemplateId"] == launch_template_id
+    assert (
+        launch_template_version["LaunchTemplateData"]["TagSpecifications"][0][
+            "ResourceType"
+        ]
+        == "instance"
+    )
+
+
+@mock_aws
+def test_launch_template_update():
+    cf = boto3.client("cloudformation", region_name="us-west-1")
+    ec2 = boto3.client("ec2", region_name="us-west-1")
+
+    launch_template_name = str(uuid4())[0:6]
+    logical_id = str(uuid4())[0:6]
+    stack_name = str(uuid4())[0:6]
+
+    template_json = json.dumps(
+        {
+            "AWSTemplateFormatVersion": "2010-09-09",
+            "Resources": {
+                logical_id: {
+                    "Type": "AWS::EC2::LaunchTemplate",
+                    "Properties": {
+                        "LaunchTemplateName": launch_template_name,
+                        "VersionDescription": "some template",
+                        "LaunchTemplateData": {"UserData": ""},
+                    },
+                }
+            },
+        }
+    )
+
+    cf.create_stack(StackName=stack_name, TemplateBody=template_json)
+
+    template_json = json.dumps(
+        {
+            "AWSTemplateFormatVersion": "2010-09-09",
+            "Resources": {
+                logical_id: {
+                    "Type": "AWS::EC2::LaunchTemplate",
+                    "Properties": {
+                        "LaunchTemplateName": launch_template_name,
+                        "VersionDescription": "a better template",
+                        "LaunchTemplateData": {"UserData": ""},
+                    },
+                }
+            },
+        }
+    )
+
+    cf.update_stack(StackName=stack_name, TemplateBody=template_json)
+
+    resources = cf.list_stack_resources(StackName=stack_name)["StackResourceSummaries"]
+    assert len(resources) == 1
+
+    launch_template_versions = ec2.describe_launch_template_versions(
+        LaunchTemplateName=launch_template_name
+    )["LaunchTemplateVersions"]
+    assert len(launch_template_versions) == 2
+    assert launch_template_versions[0]["VersionDescription"] == "some template"
+    assert launch_template_versions[1]["VersionDescription"] == "a better template"
+
+
+@mock_aws
+def test_launch_template_delete():
+    cf = boto3.client("cloudformation", region_name="us-west-1")
+    ec2 = boto3.client("ec2", region_name="us-west-1")
+
+    launch_template_name = str(uuid4())[0:6]
+    logical_id = str(uuid4())[0:6]
+    stack_name = str(uuid4())[0:6]
+
+    template_json = json.dumps(
+        {
+            "AWSTemplateFormatVersion": "2010-09-09",
+            "Resources": {
+                logical_id: {
+                    "Type": "AWS::EC2::LaunchTemplate",
+                    "Properties": {
+                        "LaunchTemplateName": launch_template_name,
+                        "VersionDescription": "some template",
+                        "LaunchTemplateData": {"UserData": ""},
+                    },
+                }
+            },
+        }
+    )
+    cf.create_stack(StackName=stack_name, TemplateBody=template_json)
+
+    cf.delete_stack(StackName=stack_name)
+
+    with pytest.raises(ClientError) as exc:
+        ec2.describe_launch_templates(LaunchTemplateNames=[launch_template_name])
+    err = exc.value.response["Error"]
+    assert err["Code"] == "InvalidLaunchTemplateName.NotFoundException"
+    assert (
+        err["Message"]
+        == "At least one of the launch templates specified in the request does not exist."
+    )
